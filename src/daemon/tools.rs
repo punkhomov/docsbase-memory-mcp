@@ -1865,13 +1865,17 @@ pub const NEIGHBOR_CAP: u64 = 100;
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn list_projects(db: &Db) -> Result<Value> {
-    list_projects_from(db, &registry::list_projects(db)?)
+    list_projects_from(db, db, &registry::list_projects(db)?)
 }
 
-pub(super) fn list_projects_from(db: &Db, selected: &[Project]) -> Result<Value> {
+pub(super) fn list_projects_from(
+    registry: &Db,
+    metadata: &Db,
+    selected: &[Project],
+) -> Result<Value> {
     let mut projects = Vec::new();
     for project in selected {
-        projects.push(project_entry(db, project, None, false)?);
+        projects.push(project_entry(registry, metadata, project, None, false)?);
     }
     Ok(Value::Array(projects))
 }
@@ -1891,6 +1895,7 @@ pub fn status(
 ) -> Result<Value> {
     status_for_projects(
         db,
+        db,
         &registry::list_projects(db)?,
         stats,
         watchers,
@@ -1904,7 +1909,8 @@ pub fn status(
 // The caller filters identities before any project/runtime/coverage callback.
 #[allow(clippy::too_many_arguments)] // Existing status inputs plus the admitted project set.
 pub(super) fn status_for_projects(
-    db: &Db,
+    registry: &Db,
+    metadata: &Db,
     selected: &[Project],
     stats: &Stats,
     watchers: u64,
@@ -1915,9 +1921,16 @@ pub(super) fn status_for_projects(
 ) -> Result<Value> {
     let mut projects = Vec::new();
     for project in selected {
-        let mut entry = project_entry(db, project, Some(watching(project.id)), true)?;
+        let mut entry = project_entry(
+            registry,
+            metadata,
+            project,
+            Some(watching(project.id)),
+            true,
+        )?;
         entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
-        entry["index_generation"] = json!(repo::index_generation(db.connection(), project.id)?);
+        entry["index_generation"] =
+            json!(repo::index_generation(metadata.connection(), project.id)?);
         let hybrid_on = coverage(project).is_some();
         entry["embed_coverage"] = match coverage(project) {
             Some(cov) => json!({ "cached": cov.cached, "total": cov.total }),
@@ -1932,7 +1945,7 @@ pub(super) fn status_for_projects(
     Ok(json!({
         "protocol_version": PROTOCOL_VERSION,
         "build_id": build_id(),
-        "schema_version": db.schema_version()?,
+        "schema_version": registry.schema_version()?,
         "projects": projects,
         "query_cache": query_cache_json(dense),
         "sessions": stats.sessions,
@@ -1946,17 +1959,18 @@ pub(super) fn status_for_projects(
 }
 
 fn project_entry(
-    db: &Db,
+    registry: &Db,
+    metadata: &Db,
     project: &Project,
     watched: Option<bool>,
     with_git: bool,
 ) -> Result<Value> {
-    let counts = repo::project_counts(db.connection(), project.id)?;
+    let counts = repo::project_counts(metadata.connection(), project.id)?;
     // The newest job's own warnings and error are surfaced whatever its state:
     // a dropped watcher batch records its lost paths here (FR-19), while a
     // failed full job carries `error` and no warnings. An older job's warnings
     // never leak through a newer row (FR-26).
-    let (warnings, last_error) = match repo::latest_job(db.connection(), project.id)? {
+    let (warnings, last_error) = match repo::latest_job(registry.connection(), project.id)? {
         Some((_state, Some(raw))) => {
             let stats = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
             (

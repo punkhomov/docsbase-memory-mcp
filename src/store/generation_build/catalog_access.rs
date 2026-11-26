@@ -56,6 +56,16 @@ impl CatalogAccess {
     }
 }
 
+pub(crate) fn open_index_registry(
+    cache: &Path,
+    settings: &Resolved<DbSettings>,
+    epoch: [u8; 16],
+) -> Result<Db> {
+    let db = CatalogAccess::Operational.writer(cache, settings)?;
+    validate_epoch(db.connection(), epoch)?;
+    Ok(db)
+}
+
 fn open_operational_reader(
     cache: &Path,
     settings: &Resolved<DbSettings>,

@@ -53,6 +53,23 @@ impl ReadPool {
         Self::prepare_with(cache, db_policy, pool_policy, Db::open_readonly_for_search)
     }
 
+    pub(crate) fn prepare_for_catalog(
+        cache: &Path,
+        db_policy: &Resolved<DbSettings>,
+        pool_policy: &Resolved<ReadPoolSettings>,
+        epoch: [u8; 16],
+    ) -> Result<Self> {
+        Self::prepare_with(cache, db_policy, pool_policy, |cache, policy| {
+            let db = Db::open_readonly_for_admission(cache, policy, true)?;
+            if !db.has_generation_catalog() || db.generation_epoch()? != epoch {
+                return Err(Error::Admission {
+                    message: "registry changed before preparing daemon readers".into(),
+                });
+            }
+            Ok(db)
+        })
+    }
+
     fn prepare_with(
         cache: &Path,
         db_policy: &Resolved<DbSettings>,

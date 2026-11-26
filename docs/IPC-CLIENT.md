@@ -58,6 +58,11 @@ CLI sync uses that binding and the existing explicit sync job; an unavailable
 globally selected Website requires foreground `docsbase serve`, without direct
 sync or autostart. A connected denial or interruption is never replayed directly.
 
+On supported Unix filesystems, Website also accepts an existing v5 registry
+with a published lexical index. Hello reports schema 5 for this registry.
+An accepted Sync continues after the client disconnects. If publication fails,
+the previous index remains readable and `serverStatus()` reports the failed Sync.
+
 ## Lifetime, concurrency and errors
 
 See the package README for complete typed options. The application configuration

@@ -8,13 +8,10 @@ use crate::config::paths;
 use crate::config::schema::Resolved;
 use crate::daemon::registry;
 use crate::error::{Error, Result};
-use crate::index::{job::CaptureBudget, outcome};
+use crate::index::{generation_job::GenerationJob, job::CaptureBudget, outcome};
 use crate::search::budget::PayloadBudget;
 use crate::search::operation::SearchOperation;
 use crate::store::Db;
-use crate::store::generation_build::{
-    LexicalBuildRequest, observe_index_base, with_prepared_lexical_generation,
-};
 use crate::store::models::Project;
 use crate::store::settings::DbSettings;
 
@@ -64,24 +61,8 @@ impl Target {
         budget: &PayloadBudget,
     ) -> Result<serde_json::Value> {
         operation.check()?;
-        let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
-        let base = observe_index_base(&self.cache, project_id, self.epoch, &self.settings, limits)?;
         let recipe = outcome::recipe_id(&self.config);
-        let reserved_disk_bytes = self.config.index_writer.staging_disk_bytes();
-        let mut plan = blake3::Hasher::new_derive_key("docsbase.index.direct.lexical.v1");
-        plan.update(&self.epoch);
-        plan.update(&project_id.to_le_bytes());
-        // An explicit index invocation owns work in this installation and
-        // project even if the user changes a setting before retrying. The
-        // staged receipt and CAS separately bind base, reservation and recipe.
-        let request = LexicalBuildRequest {
-            project_id,
-            epoch: self.epoch,
-            base,
-            plan_digest: *plan.finalize().as_bytes(),
-            reserved_disk_bytes,
-        };
         let config_dir = paths::config_dir()?;
         let project_root = &self.project.canonical_root;
         let account = budget.reserve(0)?;
@@ -91,29 +72,28 @@ impl Target {
             #[cfg(test)]
             observed: None,
         };
-        let stats = with_prepared_lexical_generation(
-            &self.cache,
-            request,
-            &self.settings,
-            limits,
-            &self.config,
-            &mut capture,
-            |prepared| {
-                operation.check()?;
-                prepared.publish(|commit| {
-                    with_config_guards(&config_dir, project_root, || {
-                        operation.check()?;
-                        let current = Config::load_from(&config_dir, Some(project_root))?;
-                        if !lexical(&current) || outcome::recipe_id(&current) != recipe {
-                            return Err(admission(
-                                "project index configuration changed; retry index",
-                            ));
-                        }
-                        commit.commit(|| operation.check())
-                    })
+        let job = GenerationJob {
+            cache: &self.cache,
+            project: &self.project,
+            epoch: self.epoch,
+            settings: &self.settings,
+            config: &self.config,
+        };
+        let stats = job.prepare(&mut capture, |prepared| {
+            operation.check()?;
+            prepared.publish(|commit| {
+                with_config_guards(&config_dir, project_root, || {
+                    operation.check()?;
+                    let current = Config::load_from(&config_dir, Some(project_root))?;
+                    if !lexical(&current) || outcome::recipe_id(&current) != recipe {
+                        return Err(admission(
+                            "project index configuration changed; retry index",
+                        ));
+                    }
+                    commit.commit(|| operation.check())
                 })
-            },
-        )?;
+            })
+        })?;
         Ok(serde_json::json!({ "project_id": project_id, "stats": stats }))
     }
 }

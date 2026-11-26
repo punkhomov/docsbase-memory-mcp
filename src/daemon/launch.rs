@@ -46,6 +46,17 @@ pub(crate) struct FixedProject {
 pub(crate) struct AdmittedLaunch {
     pub launch: LaunchConfig,
     pub website: Option<FixedProject>,
+    pub catalog_epoch: Option<[u8; 16]>,
+}
+
+impl AdmittedLaunch {
+    pub(crate) const fn registry_schema(&self) -> u32 {
+        if self.catalog_epoch.is_some() {
+            crate::store::GENERATION_SCHEMA_VERSION
+        } else {
+            crate::store::migrations::SCHEMA_VERSION
+        }
+    }
 }
 
 pub(crate) fn lexical_only(config: &Config) -> Result<()> {
@@ -64,6 +75,7 @@ impl LaunchConfig {
         settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     ) -> Result<AdmittedLaunch> {
         self.config.settings().validate()?;
+        let mut catalog_epoch = None;
         let website = match &self.config.settings().daemon.profile {
             crate::daemon::settings::DaemonProfile::Shared => None,
             crate::daemon::settings::DaemonProfile::Website { project_root } => {
@@ -78,13 +90,14 @@ impl LaunchConfig {
                         message: "website project root must be a directory".to_owned(),
                     });
                 }
-                let db = crate::store::Db::open_readonly_for_admission(cache, settings).map_err(
-                    |error| Error::Admission {
+                let allow_catalog = cfg!(unix) && self.config.settings().vector_store.is_some();
+                let db =
+                    crate::store::Db::open_readonly_for_admission(cache, settings, allow_catalog)
+                        .map_err(|error| Error::Admission {
                         message: format!(
                             "website requires an existing registered indexed project: {error}"
                         ),
-                    },
-                )?;
+                    })?;
                 let project = crate::daemon::registry::list_projects(&db)?
                     .into_iter()
                     .find(|project| {
@@ -95,7 +108,14 @@ impl LaunchConfig {
                         message: "website root must match an existing registered project"
                             .to_owned(),
                     })?;
-                if project.status != crate::store::models::ProjectStatus::Indexed {
+                if db.has_generation_catalog() {
+                    catalog_epoch = Some(db.generation_epoch()?);
+                    crate::store::project_index::with_catalog_pair(
+                        &db,
+                        &project,
+                        |_, _, _| Ok(()),
+                    )?;
+                } else if project.status != crate::store::models::ProjectStatus::Indexed {
                     return Err(Error::Admission {
                         message: "website project must already be indexed".to_owned(),
                     });
@@ -111,6 +131,7 @@ impl LaunchConfig {
         Ok(AdmittedLaunch {
             launch: self,
             website,
+            catalog_epoch,
         })
     }
 }

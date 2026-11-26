@@ -70,23 +70,28 @@ fn daemon_admission_lease_survives_returned_work_and_held_native_tail() {
     let daemon_cache = cache.clone();
     let daemon_endpoint = endpoint.clone();
     let daemon = std::thread::spawn(move || {
-        crate::daemon::lifecycle::run_with_admission(&daemon_cache, &policy, |transport| {
-            let listener = transport.bind(&daemon_endpoint).unwrap();
-            bound.send(transport.clone()).unwrap();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            let stream = runtime.block_on(listener.accept()).unwrap();
-            let ownership = stream.ownership();
-            let (entered, observed) = std_mpsc::channel();
-            let caller = std::thread::spawn(move || {
-                ownership.test_hold_write_cancellation(entered, proceed);
-            });
-            observed.recv_timeout(WATCHDOG).unwrap();
-            caller_sent.send(caller).unwrap();
-            Err::<(), _>(Error::internal("controlled daemon work failure"))
-        })
+        crate::daemon::lifecycle::run_with_admission(
+            &daemon_cache,
+            &policy,
+            crate::store::migrations::SCHEMA_VERSION,
+            |transport| {
+                let listener = transport.bind(&daemon_endpoint).unwrap();
+                bound.send(transport.clone()).unwrap();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let stream = runtime.block_on(listener.accept()).unwrap();
+                let ownership = stream.ownership();
+                let (entered, observed) = std_mpsc::channel();
+                let caller = std::thread::spawn(move || {
+                    ownership.test_hold_write_cancellation(entered, proceed);
+                });
+                observed.recv_timeout(WATCHDOG).unwrap();
+                caller_sent.send(caller).unwrap();
+                Err::<(), _>(Error::internal("controlled daemon work failure"))
+            },
+        )
     });
     let transport = ready.recv_timeout(WATCHDOG).unwrap();
     let client = transport.connect_blocking(&endpoint).unwrap();

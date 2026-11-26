@@ -118,11 +118,19 @@ pub(crate) struct LexicalCommit<'a> {
 
 impl LexicalCommit<'_> {
     pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
+        self.commit_with(|_, _| Ok(()), admit)
+    }
+
+    pub(crate) fn commit_with(
+        self,
+        record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<ObservedProjectIndex> {
         let writer_lock = lifecycle::lease_path(self.publication.cache, self.project.id);
         lifecycle::with_writer_lock(
             open_coordination_file(&writer_lock, false)?,
             &writer_lock,
-            || commit_head(&self, admit),
+            || commit_head(&self, record, admit),
         )?;
         Ok(self.current)
     }
@@ -591,7 +599,11 @@ fn write_seal(path: &Path, bytes: &[u8]) -> Result<()> {
     filesystem(path, "sync generation seal", file.sync_all())
 }
 
-fn commit_head(commit: &LexicalCommit<'_>, admit: impl FnOnce() -> Result<()>) -> Result<()> {
+fn commit_head(
+    commit: &LexicalCommit<'_>,
+    record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
+    admit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let StagedPublication {
         cache,
         request,
@@ -678,6 +690,7 @@ fn commit_head(commit: &LexicalCommit<'_>, admit: impl FnOnce() -> Result<()>) -
         params![request.project_id, staged.generation_id],
     )
     .map_err(repo::db_error)?;
+    record(&tx, commit.current)?;
     // All validation and SQL writes are still reversible at this boundary.
     admit()?;
     tx.commit().map_err(|error| {

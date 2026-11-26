@@ -3,6 +3,7 @@
 pub(crate) mod async_job;
 pub mod chunk;
 pub mod frontmatter;
+pub(crate) mod generation_job;
 pub mod job;
 pub(crate) mod lexical_settings;
 pub mod outcome;

@@ -48,6 +48,8 @@ fn acquire_writer_lease(cache: &std::path::Path, project: i64) -> Result<Exclusi
     })
 }
 
+pub(crate) mod catalog_sync;
+
 pub(crate) use super::job::JobInput;
 
 pub(crate) fn active_sync_conflict() -> Error {
@@ -78,6 +80,7 @@ pub(crate) struct JobContext {
 
 // Explicit native/data before guards: also preserves ordering if terminal publication unwinds.
 pub(crate) struct IndexState {
+    catalog_sync: Option<catalog_sync::CatalogSync>,
     index: Option<IndexHandle>,
     #[cfg(test)]
     retirement_observer: Option<crate::daemon::job_service::RetirementObserver>,
@@ -107,6 +110,7 @@ pub(crate) struct IndexState {
 impl IndexState {
     pub(crate) fn empty(account: Arc<PayloadPermit>) -> Self {
         Self {
+            catalog_sync: None,
             index: None,
             #[cfg(test)]
             retirement_observer: None,
@@ -485,6 +489,9 @@ impl IndexState {
         crate::daemon::tools::sync_status(db, &serde_json::json!({"job_id":self.sync_id}))
     }
     fn terminal(&mut self) -> Result<serde_json::Value> {
+        if let Some(sync) = &self.catalog_sync {
+            return sync.terminal(self.error.as_deref());
+        }
         let Some(context) = &self.context else {
             return Err(Error::Admission {
                 message: "background admission abandoned".into(),

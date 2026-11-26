@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,7 @@ pub(crate) mod search_async;
 
 /// Daemon state shared by all connections.
 pub struct Shared {
+    catalog_epoch: Option<[u8; 16]>,
     /// Cache root being served.
     pub cache: PathBuf,
     db: Mutex<Db>,
@@ -87,6 +88,8 @@ pub struct Shared {
     pub(super) registration_work_gate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     // Website has exactly one fixed-project background sync closure.
     sync_slot: Arc<tokio::sync::Semaphore>,
+    // A reserved slot may be reconciling an earlier job before it has an ID.
+    catalog_sync_id: Arc<AtomicI64>,
     #[cfg(feature = "hybrid-remote")]
     remote: Arc<crate::hybrid::remote::RemoteExecution>,
     /// Live sessions.
@@ -246,6 +249,14 @@ fn prepare_runtime_owners(
     })
 }
 impl Shared {
+    pub(super) const fn registry_schema(&self) -> u32 {
+        if self.catalog_epoch.is_some() {
+            crate::store::GENERATION_SCHEMA_VERSION
+        } else {
+            migrations::SCHEMA_VERSION
+        }
+    }
+
     /// Opens the registry database and prepares shared state.
     /// Compatibility adapter: one captured global source, warned defaults on a
     /// malformed source, and owner-resolved daemon resources. Strict boundaries
@@ -386,7 +397,11 @@ impl Shared {
         owners: Option<AsyncDaemonOwners>,
     ) -> Result<Arc<Self>> {
         use crate::config::schema::{Capabilities, SettingsSpec};
-        let AdmittedLaunch { launch, website } = admitted;
+        let AdmittedLaunch {
+            launch,
+            website,
+            catalog_epoch,
+        } = admitted;
         launch.config.settings().validate()?;
         crate::hybrid::dense_settings::DenseSpec::validate(
             dense_settings,
@@ -404,8 +419,18 @@ impl Shared {
             AnnPolicy::BuildOrLoad
         };
         let dense = DenseCache::for_config(ann_policy, cache, dense_settings, &global_config)?;
-        let db = Db::open_with_settings(cache, settings)?;
-        let readers = Arc::new(ReadPool::prepare(cache, settings, pool_settings)?);
+        let (db, readers) = if let Some(epoch) = catalog_epoch {
+            (
+                crate::store::generation_build::open_index_registry(cache, settings, epoch)?,
+                ReadPool::prepare_for_catalog(cache, settings, pool_settings, epoch)?,
+            )
+        } else {
+            (
+                Db::open_with_settings(cache, settings)?,
+                ReadPool::prepare(cache, settings, pool_settings)?,
+            )
+        };
+        let readers = Arc::new(readers);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
@@ -434,6 +459,7 @@ impl Shared {
             )])
         });
         let shared = Arc::new(Self {
+            catalog_epoch,
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             db_settings: settings.clone(),
@@ -448,6 +474,7 @@ impl Shared {
             #[cfg(test)]
             registration_work_gate: Mutex::new(None),
             sync_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            catalog_sync_id: Arc::new(AtomicI64::new(0)),
             sessions: SessionRegistry::with_settings(&global_config.daemon)?,
             watchers,
             stopping: AtomicBool::new(false),
@@ -1201,14 +1228,14 @@ impl Shared {
         // reads and unrelated projects keep their last coherent state.
         let _reload = slot.reload.lock().unwrap_or_else(PoisonError::into_inner);
         let config = self.config_for_root(&project.canonical_root)?;
-        if explicit_index_db.is_some() {
+        if self.website.is_some() || explicit_index_db.is_some() {
             let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(current) = &state.config
-                && let Some(stages) = &state.search_stages
+                && let Some(stages) = state.search_stages.as_ref().or(state.stages.as_ref())
                 && current.as_ref() == &config
             {
-                // A second Index can prepare before the first job row exists.
-                // Keep the validated snapshot both workers use as their revision.
+                // An equal explicit Index or Website read-only bind must keep
+                // the revision that already-admitted work will publish against.
                 return Ok((Arc::clone(current), Arc::clone(stages)));
             }
         }
@@ -1649,11 +1676,11 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                         build_id: &build_id,
                         // The refused frontend's schema is unknown; record
                         // the daemon's own expectation here.
-                        schema_version: migrations::SCHEMA_VERSION,
+                        schema_version: shared.registry_schema(),
                         cache_root: &shared.cache,
                         pid: std::process::id(),
                         recorded_build_id: Some(&daemon_build),
-                        recorded_schema_version: Some(migrations::SCHEMA_VERSION),
+                        recorded_schema_version: Some(shared.registry_schema()),
                         holder_pid: None,
                     },
                 );
@@ -1669,7 +1696,7 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 Response::Hello {
                     protocol_version: PROTOCOL_VERSION,
                     build_id: protocol::build_id(),
-                    schema_version: migrations::SCHEMA_VERSION,
+                    schema_version: shared.registry_schema(),
                     capabilities: {
                         let mut capabilities = vec![
                             protocol::SEARCH_CONTEXT_CAPABILITY.to_owned(),
@@ -2323,6 +2350,10 @@ async fn index_async_with_operation(
     detached: bool,
     operation: crate::search::operation::SearchOperation,
 ) -> Result<Value> {
+    if let Some(epoch) = shared.catalog_epoch {
+        return start_catalog_sync(shared, service, session, args, activity, operation, epoch)
+            .await;
+    }
     // The outer request owns cancellation; this phase borrows its original
     // operation so an ordinary preparation error cannot cancel a later recovery.
     let activity = activity.unwrap_or_else(|| shared.activity.track());
@@ -2404,6 +2435,113 @@ async fn index_async_with_operation(
         operation.check()?;
     }
     result
+}
+
+async fn start_catalog_sync(
+    shared: &Arc<Shared>,
+    service: &super::job_service::JobService,
+    session: Option<u64>,
+    args: Value,
+    activity: Option<Arc<Activity>>,
+    operation: crate::search::operation::SearchOperation,
+    epoch: [u8; 16],
+) -> Result<Value> {
+    let activity = activity.unwrap_or_else(|| shared.activity.track());
+    let permit = crate::hybrid::work::RemoteCall::new(operation.clone())
+        .wait(
+            &crate::hybrid::work::Cancellation::new(),
+            shared.workers.control(),
+        )
+        .await?;
+    let context_owner = shared.clone();
+    let call = operation.clone();
+    let capture = request::spawn(Some(permit), Some(activity.clone()), move || {
+        call.check()?;
+        capture_catalog_sync(&context_owner, session, &args, epoch)
+    });
+    let context = match request::run(capture, Some(&operation)).await? {
+        Ok(context) => context,
+        Err(existing) => return Ok(existing),
+    };
+
+    let owner = service
+        .admit_with_account(
+            shared.workers.clone(),
+            activity.clone(),
+            &operation,
+            &shared.payload_budget,
+            None,
+        )
+        .await?;
+    let call = operation.clone();
+    let (owner, status) = service
+        .phase(
+            &shared.workers,
+            activity.clone(),
+            &operation,
+            owner,
+            move |state| state.prepare_catalog_sync(context, &call),
+        )
+        .await?;
+    let status = (**status).clone();
+    let service = service.clone();
+    let workers = shared.workers.clone();
+    // The JobRoot owns the terminal envelope and native work even if the
+    // connection is dropped after acknowledgement.
+    drop(tokio::spawn(async move {
+        let call = operation.clone();
+        let _ = service
+            .phase(&workers, activity, &operation, owner, move |state| {
+                state.run_catalog_sync(&call)
+            })
+            .await;
+    }));
+    Ok(status)
+}
+
+fn capture_catalog_sync(
+    shared: &Arc<Shared>,
+    session: Option<u64>,
+    args: &Value,
+    epoch: [u8; 16],
+) -> Result<std::result::Result<crate::index::async_job::catalog_sync::Context, Value>> {
+    let fixed = shared.website.as_ref().ok_or_else(Shared::profile_denial)?;
+    let bound = session
+        .and_then(|id| shared.sessions.get(id))
+        .and_then(|session| session.project_id);
+    shared.admit_binding(bound)?;
+    shared.admit_binding(opt_i64(args, "project_id")?.or(bound))?;
+    let Ok(singleton) = shared.sync_slot.clone().try_acquire_owned() else {
+        let id = shared.catalog_sync_id.load(Ordering::Acquire);
+        if id > 0 {
+            let db = shared.db();
+            if let Some(job) = crate::store::repo::sync_job(db.connection(), id)?
+                && job.project_id == fixed.project.id
+                && shared.catalog_sync_id.load(Ordering::Acquire) == id
+            {
+                return Ok(Err(tools::sync_job_value(&job)));
+            }
+        }
+        return Err(Error::Admission {
+            message: "fixed-project sync is starting or retiring; retry sync".into(),
+        });
+    };
+    let project = fixed.project.clone();
+    registry::ensure_root_present(&project)?;
+    let config = shared.project_config(&project)?;
+    super::launch::lexical_only(&config)?;
+    Ok(Ok(crate::index::async_job::catalog_sync::Context {
+        cache: shared.cache.clone(),
+        epoch,
+        settings: shared.db_settings.clone(),
+        revision: shared.project_slot(project.id),
+        project,
+        config,
+        owner: crate::index::async_job::catalog_sync::Owner::new(
+            shared.catalog_sync_id.clone(),
+            singleton,
+        ),
+    }))
 }
 
 /// `search_docs` with the project's hybrid stages, dense cache and window.
@@ -2508,60 +2646,27 @@ fn route_metadata_tool_in(
     if name == "index_project" && shared.website.is_some() {
         return Err(Shared::profile_denial());
     }
+    if matches!(
+        name,
+        "status" | "panel_projects" | "list_projects" | "list_docs" | "read_neighbors"
+    ) {
+        if shared.catalog_epoch.is_some() {
+            let fixed = shared.website.as_ref().ok_or_else(Shared::profile_denial)?;
+            let reader = shared.readers.try_acquire()?;
+            return crate::store::project_index::with_catalog_pair(
+                reader,
+                &fixed.project,
+                |registry, local, _| {
+                    let metadata = local.as_ref().map_or(&*registry, |local| &local.db);
+                    route_index_metadata(shared, session_id, name, args, &registry, metadata)
+                },
+            );
+        }
+        let db = shared.db();
+        return route_index_metadata(shared, session_id, name, args, &db, &db);
+    }
     let db = shared.db();
     match name {
-        "status" => {
-            let sessions = shared.sessions.stats();
-            let notice = shared.restart_notice();
-            let projects = shared.visible_projects(&db)?;
-            let mut status = tools::status_for_projects(
-                &db,
-                &projects,
-                &sessions,
-                shared.watchers.count(),
-                notice.as_deref(),
-                &|id| shared.watchers.watching(id),
-                &|project| {
-                    if shared.website.is_some() {
-                        return None;
-                    }
-                    let Ok(config) = shared.project_config(project) else {
-                        return None;
-                    };
-                    hybrid_jobs::coverage_from(
-                        &db,
-                        &config.hybrid_cfg,
-                        project.id,
-                        &shared.vector_source_for(project.id, &config),
-                    )
-                    .ok()
-                    .flatten()
-                },
-                if shared.website.is_none() {
-                    Some(&shared.dense)
-                } else {
-                    None
-                },
-            )?;
-            let mut execution = shared.workers.snapshot();
-            if let (Some(target), Some(payload)) = (
-                execution.as_object_mut(),
-                shared.payload_budget.snapshot().as_object(),
-            ) {
-                target.extend(payload.clone());
-            }
-            #[cfg(feature = "hybrid-remote")]
-            if let Some(target) = execution.as_object_mut() {
-                let remote = serde_json::to_value(shared.remote.snapshot()).map_err(|error| {
-                    Error::internal_with_source("serialize remote execution", error)
-                })?;
-                if let Some(remote) = remote.as_object() {
-                    target.extend(remote.clone());
-                }
-            }
-            status["remote_execution"] = execution;
-            Ok(status)
-        }
         "panel_info" => Ok(json!(crate::ipc::panel::PanelInfo {
             capabilities: {
                 let mut capabilities = vec![
@@ -2585,61 +2690,10 @@ fn route_metadata_tool_in(
             let config = shared.project_config(&project)?;
             Ok(json!(crate::ipc::panel::ConfigView::from_config(&config)))
         }
-        "panel_projects" => {
-            let projects = shared
-                .visible_projects(&db)?
-                .into_iter()
-                .map(|p| {
-                    let count = crate::store::repo::project_counts(db.connection(), p.id)?;
-                    let config = if shared.website.is_none() {
-                        shared.project_config(&p).ok()
-                    } else {
-                        None
-                    };
-                    let coverage = config.as_ref().and_then(|config| {
-                        hybrid_jobs::coverage_from(
-                            &db,
-                            &config.hybrid_cfg,
-                            p.id,
-                            &shared.vector_source_for(p.id, config),
-                        )
-                        .ok()
-                        .flatten()
-                    });
-                    Ok(crate::ipc::panel::ProjectView {
-                        watched: shared.watchers.watching(p.id),
-                        cached_vectors: coverage.map(|c| c.cached),
-                        vector_chunks: coverage.map(|c| c.total),
-                        ann_state: config.as_ref().map(|_| {
-                            tools::classified_ann_state(&shared.dense, p.id, coverage.is_some())
-                                .0
-                                .as_str()
-                                .to_owned()
-                        }),
-                        id: p.id,
-                        name: p.name,
-                        root: p.canonical_root.to_string_lossy().into_owned(),
-                        status: p.status.as_str().into(),
-                        docs: count.docs,
-                        chunks: count.chunks,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(json!(projects))
-        }
-        "list_projects" => tools::list_projects_from(&db, &shared.visible_projects(&db)?),
-        "list_docs" => {
-            let project = bound_project(shared, &db, session_id)?;
-            tools::list_docs(&db, &project, args)
-        }
         "get_doc" => {
             let project = bound_project(shared, &db, session_id)?;
             let config = shared.project_config(&project)?;
             tools::get_doc(&project, &config, args)
-        }
-        "read_neighbors" => {
-            let project = bound_project(shared, &db, session_id)?;
-            tools::read_neighbors(&db, &project, args)
         }
         "index_project" => {
             drop(db);
@@ -2757,6 +2811,128 @@ fn route_metadata_tool_in(
             "tool {other:?} is not implemented yet"
         ))),
     }
+}
+
+// The admitted registry supplies installation state (schema and sync history).
+// Indexed project data always comes from one metadata connection.
+fn route_index_metadata(
+    shared: &Arc<Shared>,
+    session_id: Option<u64>,
+    name: &str,
+    args: &Value,
+    registry_db: &Db,
+    metadata: &Db,
+) -> Result<Value> {
+    match name {
+        "status" => runtime_status(shared, registry_db, metadata),
+        "panel_projects" => {
+            let projects = shared
+                .visible_projects(metadata)?
+                .into_iter()
+                .map(|p| {
+                    let count = crate::store::repo::project_counts(metadata.connection(), p.id)?;
+                    let config = if shared.website.is_none() {
+                        shared.project_config(&p).ok()
+                    } else {
+                        None
+                    };
+                    let coverage = config.as_ref().and_then(|config| {
+                        hybrid_jobs::coverage_from(
+                            metadata,
+                            &config.hybrid_cfg,
+                            p.id,
+                            &shared.vector_source_for(p.id, config),
+                        )
+                        .ok()
+                        .flatten()
+                    });
+                    Ok(crate::ipc::panel::ProjectView {
+                        watched: shared.watchers.watching(p.id),
+                        cached_vectors: coverage.map(|c| c.cached),
+                        vector_chunks: coverage.map(|c| c.total),
+                        ann_state: config.as_ref().map(|_| {
+                            tools::classified_ann_state(&shared.dense, p.id, coverage.is_some())
+                                .0
+                                .as_str()
+                                .to_owned()
+                        }),
+                        id: p.id,
+                        name: p.name,
+                        root: p.canonical_root.to_string_lossy().into_owned(),
+                        status: p.status.as_str().into(),
+                        docs: count.docs,
+                        chunks: count.chunks,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(json!(projects))
+        }
+        "list_projects" => {
+            tools::list_projects_from(registry_db, metadata, &shared.visible_projects(metadata)?)
+        }
+        "list_docs" => {
+            let project = bound_project(shared, metadata, session_id)?;
+            tools::list_docs(metadata, &project, args)
+        }
+        "read_neighbors" => {
+            let project = bound_project(shared, metadata, session_id)?;
+            tools::read_neighbors(metadata, &project, args)
+        }
+        _ => Err(Error::internal("unexpected index metadata tool")),
+    }
+}
+
+fn runtime_status(shared: &Shared, registry_db: &Db, metadata: &Db) -> Result<Value> {
+    let sessions = shared.sessions.stats();
+    let notice = shared.restart_notice();
+    let projects = shared.visible_projects(metadata)?;
+    let mut status = tools::status_for_projects(
+        registry_db,
+        metadata,
+        &projects,
+        &sessions,
+        shared.watchers.count(),
+        notice.as_deref(),
+        &|id| shared.watchers.watching(id),
+        &|project| {
+            if shared.website.is_some() {
+                return None;
+            }
+            let Ok(config) = shared.project_config(project) else {
+                return None;
+            };
+            hybrid_jobs::coverage_from(
+                metadata,
+                &config.hybrid_cfg,
+                project.id,
+                &shared.vector_source_for(project.id, &config),
+            )
+            .ok()
+            .flatten()
+        },
+        if shared.website.is_none() {
+            Some(&shared.dense)
+        } else {
+            None
+        },
+    )?;
+    let mut execution = shared.workers.snapshot();
+    if let (Some(target), Some(payload)) = (
+        execution.as_object_mut(),
+        shared.payload_budget.snapshot().as_object(),
+    ) {
+        target.extend(payload.clone());
+    }
+    #[cfg(feature = "hybrid-remote")]
+    if let Some(target) = execution.as_object_mut() {
+        let remote = serde_json::to_value(shared.remote.snapshot())
+            .map_err(|error| Error::internal_with_source("serialize remote execution", error))?;
+        if let Some(remote) = remote.as_object() {
+            target.extend(remote.clone());
+        }
+    }
+    status["remote_execution"] = execution;
+    Ok(status)
 }
 
 fn opt_str(args: &Value, key: &str) -> Result<Option<String>> {

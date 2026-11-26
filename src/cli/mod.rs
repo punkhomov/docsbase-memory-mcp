@@ -469,7 +469,7 @@ pub(crate) fn existing_website_project(
     target: &std::path::Path,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> crate::error::Result<crate::store::models::Project> {
-    let result = crate::store::Db::open_readonly_for_admission(cache, settings)
+    let result = crate::store::Db::open_readonly_for_admission(cache, settings, true)
         .and_then(|db| crate::daemon::registry::resolve_by_cwd(&db, target));
     result.map_err(|error| Error::Admission {
         message: format!("website requires an existing fixed project: {error}"),

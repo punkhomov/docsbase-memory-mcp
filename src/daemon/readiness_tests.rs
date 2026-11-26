@@ -104,6 +104,54 @@ fn queued_job_movement_without_generation_change_is_state_changed_without_retry(
 }
 
 #[test]
+#[cfg(unix)]
+fn catalog_readiness_observes_a_sync_enqueued_during_the_health_check() {
+    let mut env = Env::new();
+    let epoch = [7_u8; 16];
+    let project = env.project.id;
+    let dir = lifecycle::index_dir(env.cache.path(), project);
+    std::fs::write(dir.parent().unwrap().join(".legacy-generation.lock"), []).unwrap();
+    let tx = env.db.begin_write().unwrap();
+    tx.execute_batch(include_str!("../store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [epoch.as_slice()],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO project_generations
+         (id, project_id, layout, phase, base_revision, reserved_disk_bytes)
+         VALUES (1, ?1, 'legacy', 'active', 0, 0)",
+        [project],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO project_generation_head VALUES (?1, 1, 'active')",
+        [project],
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", 5).unwrap();
+    tx.commit().unwrap();
+
+    let pool = ReadPool::prepare_for_catalog(
+        env.cache.path(),
+        &crate::store::settings::standalone().unwrap(),
+        &crate::store::settings::standalone_read_pool().unwrap(),
+        epoch,
+    )
+    .unwrap();
+    let status = observe_catalog(&pool, &env.project, &Config::default(), None, |dir| {
+        let job = crate::store::repo::create_sync_job(env.db.connection(), project).unwrap();
+        assert!(job.is_some());
+        index_health(dir)
+    })
+    .unwrap();
+    assert_eq!(status.reason, Some(ReadinessReason::StateChanged));
+    assert_eq!(status.active_sync.unwrap().state, "queued");
+}
+
+#[test]
 fn strict_job_stats_movement_without_generation_change_is_state_changed_without_retry() {
     let env = Env::new();
     env.db.connection().execute_batch("INSERT INTO sync_jobs(project_id,state,started_at,finished_at,stats_json) VALUES(1,'error',1,2,'{}')").unwrap();

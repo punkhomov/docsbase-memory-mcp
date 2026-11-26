@@ -54,6 +54,10 @@ impl ProjectIndex {
         self.content_revision
     }
 
+    pub(crate) fn generation_id(self) -> Option<i64> {
+        self.generation.map(|generation| generation.id)
+    }
+
     /// Resolve within the same cache as the metadata reader that supplied this binding.
     pub(crate) fn tantivy_dir(self, cache: &Path) -> PathBuf {
         match self.generation {
