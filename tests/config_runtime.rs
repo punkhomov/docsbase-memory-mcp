@@ -821,6 +821,152 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
 }
 
+#[cfg(unix)]
+fn seed_published_v5_pair(
+    env: &Env,
+) -> docsbase_memory::store::generation_build::PreparedLexicalGeneration {
+    use docsbase_memory::config::Config;
+    use docsbase_memory::store::generation_build::{
+        LexicalBuildRequest, prepare_lexical_generation, publish_lexical_generation,
+    };
+    use docsbase_memory::store::registry_inspect::InspectionLimits;
+    use docsbase_memory::store::{Db, settings};
+
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    let db_settings = settings::standalone().unwrap();
+    let config = Config::load_from(&env.cache().join("config"), Some(env.root())).unwrap();
+    let mut db = Db::open_with_settings(env.cache(), &db_settings).unwrap();
+    let project = docsbase_memory::daemon::registry::ensure_project(&mut db, env.root()).unwrap();
+    // Seed a new v5 registry. Staging and head publication then use the real
+    // maintenance API, with no legacy document or chunk rows to fall back to.
+    let tx = db.begin_write().unwrap();
+    tx.execute_batch(include_str!("../src/store/generation_catalog/schema.sql"))
+        .unwrap();
+    let epoch = [17; 16];
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [epoch.as_slice()],
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", 5).unwrap();
+    tx.commit().unwrap();
+    drop(db);
+
+    let request = LexicalBuildRequest {
+        project_id: project.id,
+        epoch,
+        base: None,
+        plan_digest: [13; 32],
+        reserved_disk_bytes: 16 * 1024 * 1024,
+    };
+    let limits = InspectionLimits {
+        max_projects: 8,
+        max_metadata_bytes: 65_536,
+        max_sqlite_value_bytes: 1_048_576,
+        sqlite_cache_kib: 64,
+    };
+    let prepared =
+        prepare_lexical_generation(env.cache(), request, &db_settings, limits, &config).unwrap();
+    publish_lexical_generation(
+        env.cache(),
+        request,
+        prepared,
+        &db_settings,
+        limits,
+        &config,
+    )
+    .unwrap();
+    prepared
+}
+
+#[cfg(unix)]
+fn assert_published_search_refuses(env: &Env, expected: &str) {
+    let output = env
+        .cmd()
+        .args(["search", "needlefrompublishedpair"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "search accepted inconsistent inputs"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(expected), "{stderr}");
+}
+
+#[test]
+#[cfg(unix)]
+fn direct_search_reads_the_published_v5_pair() {
+    use docsbase_memory::store::DB_FILE;
+
+    let env = Env::new(&[("guide.md", "# Guide\n\nneedlefrompublishedpair\n")]);
+    let prepared = seed_published_v5_pair(&env);
+    let hits = env.run_json(&["search", "needlefrompublishedpair", "--snippet"]);
+    assert_eq!(hits[0]["path"], "guide.md");
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("needlefrompublishedpair")
+    );
+    let registry = rusqlite::Connection::open(env.cache().join(DB_FILE)).unwrap();
+    assert_eq!(
+        registry
+            .query_row("SELECT count(*) FROM docs", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(registry);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars = 1000\n",
+    )
+    .unwrap();
+    assert_published_search_refuses(&env, "index recipe");
+    fs::remove_file(env.project_config()).unwrap();
+    let seal = env
+        .cache()
+        .join("projects")
+        .join(prepared.project_id.to_string())
+        .join("generations")
+        .join(prepared.generation_id.to_string())
+        .join("seal.json");
+    let valid_seal: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
+    let registry = rusqlite::Connection::open(env.cache().join(DB_FILE)).unwrap();
+    for (field, wrong) in [
+        ("format", serde_json::json!(2)),
+        (
+            "generation_id",
+            serde_json::json!(prepared.generation_id + 1),
+        ),
+        (
+            "content_revision",
+            serde_json::json!(prepared.content_revision + 1),
+        ),
+        ("index_recipe", serde_json::json!("wrong recipe")),
+    ] {
+        let mut edited = valid_seal.clone();
+        edited[field] = wrong;
+        let bytes = serde_json::to_vec(&edited).unwrap();
+        fs::write(&seal, &bytes).unwrap();
+        registry
+            .execute(
+                "UPDATE project_generations SET seal_digest = ?1 WHERE id = ?2",
+                rusqlite::params![
+                    blake3::hash(&bytes).as_bytes().as_slice(),
+                    prepared.generation_id
+                ],
+            )
+            .unwrap();
+        assert_published_search_refuses(&env, "seal");
+    }
+    drop(registry);
+
+    fs::write(seal, "foreign seal").unwrap();
+    assert_published_search_refuses(&env, "seal");
+}
+
 #[test]
 fn writer_policy_change_preserves_existing_index_and_applies_to_connected_jobs() {
     let mut env = Env::new(&[("guide.md", &doc("writerconfigurationwidget"))]);

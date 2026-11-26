@@ -1648,3 +1648,23 @@ observes that reclamation remains excluded. Fresh review and re-review
 passed after the discard test was synchronized with writer retirement.
 The stage uses logical lengths. Runtime activation and native Windows
 publication remain open.
+
+## 2026-11-26 — CF11c, прямой лексический читатель
+
+Task CF11c direct lexical search: complete (operational CLI reads the published
+pair under a bounded reader slot and the same generation lease as Tantivy).
+The local SQLite outcome and the resolved recipe agree with the seal. Subsequent
+phases distinguish different published generations with equal content revisions.
+
+Ruling: a digest-valid seal with the wrong format was accepted before decoding
+and identity checks. The CLI integration fixture now rejects that seal and
+mismatched generation, revision and recipe. The immutable reader refuses a
+real Tantivy directory from another published pair with the same revision.
+Actual refill and payload acquisition reject an older captured generation
+after a real publication at the same content revision. A second real build
+follows an operational read and an explicit stopped publication retry.
+Stopped preparation keeps its no-write inspection gate.
+
+Independent review and fix review passed. Full Rust 1.100.0 cli-full, Clippy
+(including the opt-in artifact and performance targets), fmt and the lean
+offline check passed with the existing search benchmark baseline.

@@ -310,6 +310,90 @@ fn retire_local_pair(env: &Env) -> (ObservedProjectIndex, ObservedProjectIndex) 
 
 #[test]
 #[cfg(unix)]
+fn catalog_reader_holds_the_pair_lease_and_distinguishes_equal_revisions() {
+    use crate::store::project_index::with_catalog_pair;
+
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let config = Config::default();
+    let publish = |request, staged| {
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings,
+            limits(),
+            &config,
+        )
+        .unwrap()
+    };
+    let read = |expected: ObservedProjectIndex, needle: &str| {
+        let db = Db::open_readonly_for_search(env.cache.path(), &settings).unwrap();
+        let project = registry::project_by_id(&db, expected.project_id)
+            .unwrap()
+            .unwrap();
+        let directory = env.generation(expected.generation_id.unwrap());
+        let path = directory.join(".read.lock");
+        let mut exclusive = RwLock::new(open_coordination_file(&path, false).unwrap());
+        let binding = with_catalog_pair(&db, &project, |_, local, binding| {
+            let local = local.unwrap();
+            let tantivy = local.tantivy_dir()?;
+            assert_eq!(tantivy, directory.join("tantivy"));
+            drop(local);
+            assert_eq!(
+                exclusive.try_write().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+            );
+            let index = ReadIndex::open(&tantivy)?;
+            assert_eq!(index.search(needle, 2)?.len(), 1);
+            Ok(binding)
+        })
+        .unwrap();
+        assert!(exclusive.try_write().is_ok());
+        binding
+    };
+
+    let first_request = env.request();
+    let first_staged = env.build(first_request).unwrap();
+    let first = publish(first_request, first_staged);
+    let first_binding = read(first, "Applemigration");
+    // The read-only WAL client may leave coordination files. An accepted
+    // maintenance retry recovers them before the next quiescent preparation.
+    assert_eq!(publish(first_request, first_staged), first);
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# New\n\nCherryupdate\n",
+    )
+    .unwrap();
+    let next_request = LexicalBuildRequest {
+        base: Some(first),
+        ..env.request()
+    };
+    let next = publish(next_request, env.build(next_request).unwrap());
+    let next_binding = read(next, "Cherryupdate");
+
+    assert_eq!(
+        first_binding.content_revision(),
+        next_binding.content_revision()
+    );
+    assert_ne!(first_binding, next_binding);
+
+    let current = env.generation(next.generation_id.unwrap()).join("tantivy");
+    let previous = env.generation(first.generation_id.unwrap()).join("tantivy");
+    fs::rename(&current, current.with_file_name("saved-tantivy")).unwrap();
+    fs::rename(previous, current).unwrap();
+
+    let db = Db::open_readonly_for_search(env.cache.path(), &settings).unwrap();
+    let project = registry::project_by_id(&db, next.project_id)
+        .unwrap()
+        .unwrap();
+    let error =
+        with_catalog_pair(&db, &project, |_, local, _| local.unwrap().tantivy_dir()).unwrap_err();
+    assert!(error.to_string().contains("Tantivy"), "{error}");
+}
+
+#[test]
+#[cfg(unix)]
 fn retired_local_pair_waits_for_readers_and_preserves_unowned_files() {
     let env = Env::new();
     let settings = settings::standalone().unwrap();

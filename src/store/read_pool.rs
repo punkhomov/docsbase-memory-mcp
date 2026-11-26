@@ -17,6 +17,7 @@ pub struct ReadPool {
     state: Mutex<State>,
     returned: Condvar,
     settings: Resolved<ReadPoolSettings>,
+    generation_catalog: bool,
 }
 
 struct State {
@@ -36,6 +37,28 @@ impl ReadPool {
         db_policy: &Resolved<DbSettings>,
         pool_policy: &Resolved<ReadPoolSettings>,
     ) -> Result<Self> {
+        Self::prepare_with(
+            cache,
+            db_policy,
+            pool_policy,
+            Db::open_readonly_with_settings,
+        )
+    }
+
+    pub(crate) fn prepare_for_search(
+        cache: &Path,
+        db_policy: &Resolved<DbSettings>,
+        pool_policy: &Resolved<ReadPoolSettings>,
+    ) -> Result<Self> {
+        Self::prepare_with(cache, db_policy, pool_policy, Db::open_readonly_for_search)
+    }
+
+    fn prepare_with(
+        cache: &Path,
+        db_policy: &Resolved<DbSettings>,
+        pool_policy: &Resolved<ReadPoolSettings>,
+        open: impl Fn(&Path, &Resolved<DbSettings>) -> Result<Db>,
+    ) -> Result<Self> {
         let capabilities = Capabilities::current();
         DbSpec::validate(db_policy.settings(), &capabilities)?;
         ReadPoolSpec::validate(pool_policy.settings(), &capabilities)?;
@@ -46,10 +69,17 @@ impl ReadPool {
         let mut idle = Vec::new();
         idle.try_reserve_exact(pool_policy.settings().max_connections)
             .map_err(|err| Error::internal_with_source("reserve metadata read pool slots", err))?;
+        let mut generation_catalog = None;
         for index in 0..pool_policy.settings().max_connections {
-            slots.push(Mutex::new(Db::open_readonly_with_settings(
-                cache, db_policy,
-            )?));
+            let db = open(cache, db_policy)?;
+            let catalog = db.has_generation_catalog();
+            if generation_catalog.is_some_and(|expected| expected != catalog) {
+                return Err(Error::Admission {
+                    message: "registry schema changed while preparing search readers".into(),
+                });
+            }
+            generation_catalog = Some(catalog);
+            slots.push(Mutex::new(db));
             idle.push(index);
         }
         Ok(Self {
@@ -61,7 +91,12 @@ impl ReadPool {
             }),
             returned: Condvar::new(),
             settings: pool_policy.clone(),
+            generation_catalog: generation_catalog.unwrap_or(false),
         })
+    }
+
+    pub(crate) const fn has_generation_catalog(&self) -> bool {
+        self.generation_catalog
     }
 
     /// Immutable capacity policy and its caller-supplied provenance.

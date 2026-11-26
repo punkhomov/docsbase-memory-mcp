@@ -270,7 +270,11 @@ pub(in crate::store) fn local_revision(
     Ok(revision)
 }
 
-fn check_seal(path: &Path, expected: &[u8; 32]) -> Observed<()> {
+pub(in crate::store) fn check_seal(path: &Path, expected: &[u8; 32]) -> Observed<()> {
+    read_checked_seal(path, expected).map(|_| ())
+}
+
+pub(in crate::store) fn read_checked_seal(path: &Path, expected: &[u8; 32]) -> Observed<Vec<u8>> {
     let file = open_checked_file(path)?;
     let bytes = read_bounded(file, MAX_STATE_BYTES).map_err(|error| match error {
         ReadFailure::LimitExceeded => Why::LimitExceeded,
@@ -279,24 +283,56 @@ fn check_seal(path: &Path, expected: &[u8; 32]) -> Observed<()> {
     if blake3::hash(&bytes).as_bytes() != expected {
         return Err(Why::InvalidRegistry);
     }
-    Ok(())
+    Ok(bytes)
 }
 
 fn check_pair(metadata: &Connection, project_id: i64, tantivy: &Path) -> Observed<()> {
     if repo::has_pending_docs(metadata, project_id).map_err(|_| Why::Io)? {
         return Err(Why::RecoveryRequired);
     }
-    check_tantivy_files(tantivy)?;
+    check_tantivy_files(tantivy, None)?;
     ReadIndex::check_health_with_project_lease(tantivy).map_err(|_| Why::Io)
 }
 
-pub(in crate::store) fn check_tantivy_files(tantivy: &Path) -> Observed<()> {
+pub(in crate::store) fn check_tantivy_files(
+    tantivy: &Path,
+    sealed: Option<&[(String, u64)]>,
+) -> Observed<()> {
     check_directory(tantivy)?;
     // Tantivy owns the component opens. Check the flat directory first under
     // the cooperating writer lease, including files read through its mmap backend.
+    let reader_lock = &tantivy::directory::META_LOCK.filepath;
+    let mut matched = 0;
     for entry in fs::read_dir(tantivy).map_err(|_| Why::Io)? {
         let entry = entry.map_err(|_| Why::Io)?;
-        check_single_link(&entry.path()).map_err(|_| Why::Io)?;
+        let path = entry.path();
+        check_single_link(&path).map_err(|_| Why::Io)?;
+        if let Some(files) = sealed {
+            let name = entry.file_name();
+            // Tantivy's read-time coordination file is outside the segment
+            // payload and can be created by a reader of an immutable index.
+            if Path::new(&name) == reader_lock {
+                continue;
+            }
+            let relative = format!("tantivy/{}", name.to_str().ok_or(Why::InvalidRegistry)?);
+            let position = files
+                .binary_search_by(|(file, _)| file.cmp(&relative))
+                .map_err(|_| Why::Changed)?;
+            if fs::symlink_metadata(&path).map_err(|_| Why::Io)?.len() != files[position].1 {
+                return Err(Why::Changed);
+            }
+            matched += 1;
+        }
+    }
+    if let Some(files) = sealed {
+        let expected = files
+            .iter()
+            .filter_map(|(file, _)| file.strip_prefix("tantivy/"))
+            .filter(|name| Path::new(name) != reader_lock)
+            .count();
+        if matched != expected {
+            return Err(Why::Changed);
+        }
     }
     // Use Tantivy's lookup paths so the bound also applies on filesystems
     // that resolve a different spelling of the same name.
@@ -314,14 +350,14 @@ pub(in crate::store) fn check_tantivy_files(tantivy: &Path) -> Observed<()> {
     Ok(())
 }
 
-fn check_directory(path: &Path) -> Observed<()> {
+pub(in crate::store) fn check_directory(path: &Path) -> Observed<()> {
     if !path.is_dir() || fs::canonicalize(path).map_err(|_| Why::Io)? != path {
         return Err(Why::Io);
     }
     Ok(())
 }
 
-fn open_checked_file(path: &Path) -> Observed<fs::File> {
+pub(in crate::store) fn open_checked_file(path: &Path) -> Observed<fs::File> {
     #[cfg(unix)]
     check_single_link(path).map_err(|_| Why::Io)?;
     let file = open_readonly_nofollow(path).map_err(|_| Why::Io)?;

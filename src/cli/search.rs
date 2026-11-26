@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::cli::status::read_project_with_settings;
+use crate::cli::status::read_project_for_search;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
@@ -163,15 +163,21 @@ async fn run_in(
     let original = operation.clone();
     let captured = context
         .control(&operation, &activity, move || {
-            let (db, project) = read_project_with_settings(&settings)?;
+            let (db, project) = read_project_for_search(&settings)?;
             let config =
                 std::sync::Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
+            if db.has_generation_catalog() && config.hybrid_cfg.enabled {
+                return Err(Error::Admission {
+                    message: "published v5 generations require lexical search".into(),
+                });
+            }
             let stages = std::sync::Arc::new(owner.stages(&config)?);
-            let readers = std::sync::Arc::new(crate::store::read_pool::ReadPool::prepare(
-                &owner.cache,
-                &settings,
-                &pool,
-            )?);
+            let readers =
+                std::sync::Arc::new(crate::store::read_pool::ReadPool::prepare_for_search(
+                    &owner.cache,
+                    &settings,
+                    &pool,
+                )?);
             let dense = std::sync::Arc::new(crate::hybrid::dense::DenseCache::for_config(
                 crate::hybrid::dense::AnnPolicy::LoadOnly,
                 &owner.cache,

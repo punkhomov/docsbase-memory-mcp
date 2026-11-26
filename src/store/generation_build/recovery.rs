@@ -361,9 +361,10 @@ fn validate_retired_files(
     if blake3::hash(&content).as_bytes() != expected {
         return Err(admission("retired generation seal changed"));
     }
-    let manifest: super::publication::Seal = serde_json::from_slice(&content).map_err(|error| {
-        super::Error::internal_with_source("decode retired generation seal", error)
-    })?;
+    let manifest: crate::store::generation_seal::GenerationSeal = serde_json::from_slice(&content)
+        .map_err(|error| {
+            super::Error::internal_with_source("decode retired generation seal", error)
+        })?;
     validate_generation_files(path, Some(&manifest.files))
 }
 
