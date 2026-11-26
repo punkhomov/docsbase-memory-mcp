@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 
 mod job_pin;
 mod owner;
-pub(crate) use job_pin::JobPinAuthority;
+pub(crate) use job_pin::{JobPinAuthority, PinVerification};
 pub mod settings;
 mod source;
 pub use owner::VectorStore;

@@ -80,7 +80,7 @@ pub(crate) struct JobContext {
 
 // Explicit native/data before guards: also preserves ordering if terminal publication unwinds.
 pub(crate) struct IndexState {
-    catalog_sync: Option<catalog_sync::CatalogSync>,
+    catalog_job: Option<catalog_sync::CatalogJob>,
     index: Option<IndexHandle>,
     #[cfg(test)]
     retirement_observer: Option<crate::daemon::job_service::RetirementObserver>,
@@ -110,7 +110,7 @@ pub(crate) struct IndexState {
 impl IndexState {
     pub(crate) fn empty(account: Arc<PayloadPermit>) -> Self {
         Self {
-            catalog_sync: None,
+            catalog_job: None,
             index: None,
             #[cfg(test)]
             retirement_observer: None,
@@ -454,8 +454,8 @@ impl IndexState {
         crate::daemon::tools::sync_status(db, &serde_json::json!({"job_id":self.sync_id}))
     }
     fn terminal(&mut self) -> Result<serde_json::Value> {
-        if let Some(sync) = &self.catalog_sync {
-            return sync.terminal(self.error.as_deref());
+        if let Some(job) = &self.catalog_job {
+            return job.terminal(self.error.as_deref());
         }
         let Some(context) = &self.context else {
             return Err(Error::Admission {
@@ -853,8 +853,8 @@ async fn embed_batches(
         let call = operation.clone();
         let (next, packet) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
-                if let Some(sync) = &mut state.catalog_sync {
-                    return sync.batch_packet(&call, state.account.clone());
+                if let Some(job) = &mut state.catalog_job {
+                    return job.batch_packet(&call, state.account.clone());
                 }
                 let batch = state.batch(backfill, &call)?;
                 let context = state
@@ -884,12 +884,12 @@ async fn embed_batches(
         let (next, written) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
                 call.check()?;
-                if let Some(sync) = &state.catalog_sync {
+                if let Some(job) = &state.catalog_job {
                     let batch = packet
                         .0
                         .as_ref()
                         .ok_or_else(|| Error::internal("embedding batch absent"))?;
-                    return sync.store(batch, &vectors);
+                    return job.store(batch, &vectors);
                 }
                 let context = state
                     .context

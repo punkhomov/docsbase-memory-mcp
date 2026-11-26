@@ -73,7 +73,7 @@ const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 /// leave a stray `.docsbase.toml.lock` in the user's project root, and
 /// never-unlinking avoids the classic inode race (a waiter that opened the
 /// old file would be bypassed by a fresh inode after removal). The id is a
-/// stable `SipHash` of the target path; collisions are negligible and only
+/// stable hash of the target's directory entry; collisions are negligible and only
 /// cause harmless extra serialization. Bounded retry, then an error.
 ///
 /// # Errors
@@ -90,15 +90,21 @@ pub(crate) fn with_config_write_lock<T>(
 pub(crate) fn with_index_config_write_locks<T>(
     global_file: Option<&Path>,
     project_root: &Path,
-    work: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let project_file = project_root.join(".docsbase.toml");
-    let lock_project = || with_config_write_lock(&project_file, work);
-    if let Some(global_file) = global_file {
+    let lock_project = || with_config_write_lock(&project_file, || Ok(work()?));
+    let result = if let Some(global_file) = global_file {
         with_config_write_lock(global_file, lock_project)
     } else {
         lock_project()
-    }
+    };
+    result.map_err(|error| match error.downcast::<Error>() {
+        Ok(error) => error,
+        Err(error) => Error::Admission {
+            message: format!("could not lock the index configuration: {error}"),
+        },
+    })
 }
 
 /// Per-call retry seam; production uses the same real backoff as before.
@@ -122,24 +128,77 @@ fn with_config_write_lock_in<T>(
 ) -> anyhow::Result<T> {
     std::fs::create_dir_all(lock_dir)
         .map_err(|err| anyhow::anyhow!("create {}: {err}", lock_dir.display()))?;
-    let lock_path = config_lock_path(lock_dir, path);
+    let target = canonical_config_target(path)?;
+    // Keep the original path key for an older editor using this spelling.
+    // New callers with different spellings also share the canonical key.
+    let mut keys = [
+        config_lock_path(lock_dir, path),
+        config_lock_path(lock_dir, &target),
+    ];
+    keys.sort_unstable();
+    with_config_lock_file(&keys[0], path, &mut wait, |wait| {
+        if keys[0] == keys[1] {
+            f()
+        } else {
+            with_config_lock_file(&keys[1], path, wait, |_| f())
+        }
+    })
+}
+
+fn with_config_lock_file<T, W: FnMut(Duration)>(
+    lock_path: &Path,
+    target: &Path,
+    wait: &mut W,
+    work: impl FnOnce(&mut W) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(|err| anyhow::anyhow!("open {}: {err}", lock_path.display()))?;
     let mut lock = FdRwLock::new(file);
     for _ in 0..CONFIG_LOCK_RETRIES {
         match lock.try_write() {
-            Ok(_guard) => return f(),
+            Ok(_guard) => return work(wait),
             Err(_) => wait(CONFIG_LOCK_RETRY_DELAY),
         }
     }
     Err(anyhow::anyhow!(
         "another docsbase process is writing {}; retry",
-        path.display()
+        target.display()
     ))
+}
+
+/// Canonicalize the directory, since editors replace the file by name. For a
+/// first write, keep the missing directory names below the nearest real parent.
+fn canonical_config_target(path: &Path) -> anyhow::Result<PathBuf> {
+    use std::path::Component;
+
+    let absolute = std::path::absolute(path)?;
+    let Some(parent) = absolute.parent() else {
+        anyhow::bail!("configuration file has no parent: {}", path.display());
+    };
+    for ancestor in parent.ancestors() {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut directory) => {
+                for name in absolute.strip_prefix(ancestor)?.components() {
+                    match name {
+                        Component::Normal(name) => directory.push(name),
+                        Component::ParentDir => {
+                            directory.pop();
+                        }
+                        Component::CurDir => {}
+                        _ => anyhow::bail!("invalid configuration path: {}", path.display()),
+                    }
+                }
+                return Ok(directory);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("configuration directory is unavailable: {}", path.display())
 }
 
 /// Deterministic lock-file name for `target` inside `lock_dir`: FNV-1a over
@@ -173,7 +232,7 @@ mod tests {
         std::fs::create_dir_all(&project).expect("project dir");
         let path = project.join(".docsbase.toml");
         std::fs::create_dir_all(&lock_dir).expect("lock dir");
-        let lock_path = config_lock_path(&lock_dir, &path);
+        let lock_path = config_lock_path(&lock_dir, &canonical_config_target(&path).unwrap());
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -263,6 +322,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn config_directory_aliases_share_a_lock_before_the_config_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_dir = root.path().join("locks");
+        let physical = root.path().join("physical");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&physical).unwrap();
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let actual = physical.join("new/config.toml");
+        let aliased = alias.join("new/config.toml");
+        let mut alias_entered = false;
+        let mut retries = 0;
+        with_config_write_lock_in(
+            &lock_dir,
+            &actual,
+            || {
+                let result = with_config_write_lock_in(
+                    &lock_dir,
+                    &aliased,
+                    || {
+                        alias_entered = true;
+                        Ok(())
+                    },
+                    |_| retries += 1,
+                );
+                assert!(
+                    result.is_err(),
+                    "an alias must contend with the canonical directory"
+                );
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(!alias_entered);
+        assert_eq!(retries, CONFIG_LOCK_RETRIES);
+
+        // Simulate an older editor that hashes the original spelling only.
+        let file = std::fs::File::create(config_lock_path(&lock_dir, &aliased)).unwrap();
+        let mut legacy = FdRwLock::new(file);
+        let _held = legacy.try_write().unwrap();
+        let result = with_config_write_lock_in(&lock_dir, &aliased, || Ok(()), |_| {});
+        assert!(result.is_err(), "an old editor still excludes a new writer");
+    }
+
     #[test]
     fn config_write_lock_wrapper_routes_locks_to_data_dir() {
         // Re-exec ourselves in a child with a sandboxed `DOCSBASE_DATA_DIR`
@@ -306,11 +411,19 @@ mod tests {
             "locks dir exists: {}",
             lock_dir.display()
         );
-        let count = std::fs::read_dir(&lock_dir)
+        let actual: std::collections::BTreeSet<_> = std::fs::read_dir(&lock_dir)
             .expect("read locks")
             .filter_map(std::result::Result::ok)
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "lock"))
-            .count();
-        assert_eq!(count, 1, "exactly one lock file in {}", lock_dir.display());
+            .map(|entry| entry.path())
+            .collect();
+        let target = canonical_config_target(&path).unwrap();
+        let expected = [
+            config_lock_path(&lock_dir, &path),
+            config_lock_path(&lock_dir, &target),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected);
     }
 }

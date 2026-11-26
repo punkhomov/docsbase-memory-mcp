@@ -2847,14 +2847,14 @@ async fn start_catalog_sync(
         Err(existing) => return Ok(existing),
     };
 
-    let project_id = context.project.id;
+    let project_id = context.build.project.id;
     let warm = (shared.website.is_none()
-        && context.stages.ranking == Ranking::Rrf
-        && context.stages.embedder.is_some())
+        && context.build.stages.ranking == Ranking::Rrf
+        && context.build.stages.embedder.is_some())
     .then(|| CatalogAnnWarm {
-        project: context.project.clone(),
-        config: context.config.clone(),
-        stages: context.stages.clone(),
+        project: context.build.project.clone(),
+        config: context.build.config.clone(),
+        stages: context.build.stages.clone(),
     });
     let owner = service
         .admit_with_account(
@@ -3079,16 +3079,18 @@ fn capture_catalog_sync(
         None
     };
     Ok(Ok(crate::index::async_job::catalog_sync::Context {
-        cache: shared.cache.clone(),
-        epoch,
-        settings: shared.db_settings.clone(),
+        build: crate::index::async_job::catalog_sync::BuildContext {
+            cache: shared.cache.clone(),
+            epoch,
+            settings: shared.db_settings.clone(),
+            project,
+            config,
+            stages,
+            active_model,
+            source,
+            pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
+        },
         revision,
-        project,
-        config,
-        stages,
-        active_model,
-        source,
-        pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
         owner,
         refresh,
     }))

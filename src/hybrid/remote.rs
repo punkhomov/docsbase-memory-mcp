@@ -455,18 +455,16 @@ impl RemoteExecution {
                 })
             },
         );
-        let result = call
-            .wait(&self.shutdown, async {
-                let output = worker.await.map_err(|error| {
-                    Error::internal_with_source("remote CPU task join", error)
-                })??;
-                output.value
-            })
-            .await;
-        if result.is_ok() {
+        call.wait(&self.shutdown, async {
+            let joined = worker.await;
+            // The worker is retired even if its body returned an error.
+            // Keep the outer call able to deliver that error.
             cancelled.0 = None;
-        }
-        result
+            let output = joined
+                .map_err(|error| Error::internal_with_source("remote CPU task join", error))??;
+            output.value
+        })
+        .await
     }
 }
 

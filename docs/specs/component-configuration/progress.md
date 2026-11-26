@@ -2001,3 +2001,22 @@ minor (deferred): the paused route fixture proves acknowledgement independence
 but does not sample Activity after isolating both earlier native retirements.
 The common graph lifetime is also exercised by the existing retained ANN
 handoff test.
+
+## 2026-11-26 — CF11c, прямой hybrid Index в v5
+
+Task CF11c stopped hybrid catalog Index: complete (direct entry point,
+shared embedding phases, source and vector proof, fresh review and fixes).
+
+Ruling: the configured CLI fixture uses the real async HTTP provider adapter
+on loopback. A malformed vector response keeps the selected generation and
+reports the provider schema error. A project config edit during another
+embedding request refuses publication. Restoring the config reuses the valid
+cached vector and serves the document for a dense-only match through stopped
+RRF search. Direct indexing keeps its existing result shape and terminal
+resource ownership. Completed worker errors no longer cancel the parent call.
+
+Ruling: the shared index/editor guard serializes directory aliases and
+retains the literal key for older editors using that spelling. The regression
+contends on both cases before the config exists. Stopped Website rejects hybrid
+before creating a registry row. On Linux, cli-full, all-target Clippy, lean
+offline and formatting passed. Native PR checks follow Shared hybrid integration.

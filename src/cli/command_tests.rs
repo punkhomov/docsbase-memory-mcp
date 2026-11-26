@@ -28,6 +28,7 @@ fn child(name: &str, ranking: &str) -> Option<std::process::Output> {
         .env(CHILD, "1")
         .env("DOCSBASE_CACHE_DIR", cache.path())
         .env("DOCSBASE_CONFIG_DIR", cache.path().join("config"))
+        .env("DOCSBASE_DATA_DIR", cache.path().join("data"))
         .env("OPENROUTER_API_KEY", "fixture-secret")
         .current_dir(root.path())
         .output()
@@ -69,11 +70,26 @@ fn read_request(socket: &std::net::TcpStream) -> Option<serde_json::Value> {
     Some(serde_json::from_slice(&body).unwrap())
 }
 fn response(socket: &mut std::net::TcpStream) {
-    let body=serde_json::json!({"object":"list","data":[{"index":0,"embedding":[1.0,0.0,0.0]}],"model":"fixture","usage":{"prompt_tokens":1,"total_tokens":1}}).to_string();
+    embedding_response(socket, &[1.0, 0.0, 0.0]);
+}
+
+fn embedding_response(socket: &mut std::net::TcpStream, vector: &[f32]) {
+    let body=serde_json::json!({"object":"list","data":[{"index":0,"embedding":vector}],"model":"fixture","usage":{"prompt_tokens":1,"total_tokens":1}}).to_string();
     write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
 }
 fn http_fixture(
     expected: usize,
+) -> (
+    std::net::SocketAddr,
+    Arc<crate::hybrid::openrouter::test_http::Redirect>,
+    std::thread::JoinHandle<Vec<serde_json::Value>>,
+) {
+    http_fixture_with(expected, |_, socket| response(socket))
+}
+
+fn http_fixture_with(
+    expected: usize,
+    mut respond: impl FnMut(usize, &mut std::net::TcpStream) + Send + 'static,
 ) -> (
     std::net::SocketAddr,
     Arc<crate::hybrid::openrouter::test_http::Redirect>,
@@ -84,17 +100,143 @@ fn http_fixture(
     let calls = crate::hybrid::openrouter::test_http::install(format!("http://{addr}"));
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for _ in 0..expected {
+        for index in 0..expected {
             let (mut socket, _) = listener.accept().unwrap();
             let Some(request) = read_request(&socket) else {
                 break;
             };
             requests.push(request);
-            response(&mut socket);
+            respond(index, &mut socket);
         }
         requests
     });
     (addr, calls, server)
+}
+
+#[test]
+#[cfg(unix)]
+fn configured_direct_catalog_index_preserves_the_head_on_failure() {
+    use crate::store::registry_inspect::{ProjectIndexObservation, inspect_project_index};
+
+    if let Some(output) = child(
+        "configured_direct_catalog_index_preserves_the_head_on_failure",
+        "rrf",
+    ) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("\"guide.md\"") && stdout.contains("\"dense\""),
+            "{stdout}"
+        );
+        return;
+    }
+    let cache = crate::config::paths::cache_dir().unwrap();
+    let config = crate::config::paths::config_dir().unwrap();
+    let target = std::env::current_dir().unwrap();
+    let project_file = target.join(".docsbase.toml");
+    let project_source = std::fs::read_to_string(&project_file).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "config_version = 2\n").unwrap();
+    let settings = crate::store::settings::standalone().unwrap();
+    crate::store::Db::open_for_index(&cache, &settings, true)
+        .unwrap()
+        .close()
+        .unwrap();
+    assert_website_rejects_direct_hybrid_before_registration(&cache, &config, &target, &settings);
+    let alter = project_file.clone();
+    let changed_source = project_source.replace("model='fixture'", "model='other'");
+    let (addr, calls, server) = http_fixture_with(4, move |request, socket| {
+        if request == 1 {
+            embedding_response(socket, &[1.0]);
+        } else {
+            if request == 2 {
+                std::fs::write(&alter, &changed_source).unwrap();
+            }
+            response(socket);
+        }
+    });
+    let index = || super::index::run_with_settings(Some(&target), &settings);
+    let selected = || {
+        let limits = crate::config::observe::PlanningLimits::standard().registry;
+        let observation = inspect_project_index(&cache, 1, &settings, limits).unwrap();
+        let ProjectIndexObservation::Present(index) = observation else {
+            panic!("catalog head unavailable: {observation:?}");
+        };
+        index
+    };
+    index().unwrap();
+    let previous = selected();
+    std::fs::write(
+        target.join("guide.md"),
+        "# Updated\n\nrevisedsearchwidget\n",
+    )
+    .unwrap();
+    let error = index().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("incompatible OpenRouter embeddings schema"),
+        "{error}"
+    );
+    assert_eq!(selected(), previous);
+
+    let error = index().unwrap_err();
+    assert!(
+        error.to_string().contains("configuration changed"),
+        "{error}"
+    );
+    assert_eq!(selected(), previous);
+
+    std::fs::write(project_file, project_source).unwrap();
+    index().unwrap();
+    assert_ne!(selected().generation_id, previous.generation_id);
+    let options = super::search::Options {
+        limit: 10,
+        explain: true,
+        snippet: false,
+        dedupe: "none".into(),
+        n_per_doc: None,
+        path_prefix: None,
+        tags: Vec::new(),
+    };
+    let search = super::search::run_with_settings("semanticneedle", &options, &settings);
+    let _ = std::net::TcpStream::connect(addr);
+    let requests = server.join().unwrap();
+    search.unwrap();
+    assert_eq!(requests.len(), 4, "the retry reuses the valid vector");
+    assert!(
+        requests[0]["input"]
+            .to_string()
+            .contains("commandsearchwidget")
+    );
+    assert_eq!(requests[3]["input"][0], "semanticneedle");
+    assert_eq!(calls.synchronous.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(unix)]
+fn assert_website_rejects_direct_hybrid_before_registration(
+    cache: &std::path::Path,
+    config: &std::path::Path,
+    target: &std::path::Path,
+    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+) {
+    let file = config.join("config.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {} }}\n",
+            toml::Value::String(target.to_string_lossy().into_owned())
+        ),
+    )
+    .unwrap();
+    let error = super::index::run_with_settings(Some(target), settings).unwrap_err();
+    assert!(error.to_string().contains("lexical"), "{error}");
+    let db = crate::store::Db::open_for_index(cache, settings, false).unwrap();
+    assert_eq!(
+        crate::daemon::registry::list_projects(&db).unwrap(),
+        [] as [crate::store::models::Project; 0]
+    );
+    db.close().unwrap();
+    std::fs::write(file, "config_version = 2\n").unwrap();
 }
 
 #[test]
