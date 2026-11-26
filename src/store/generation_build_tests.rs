@@ -551,10 +551,11 @@ fn catalog_reads_incremental_revision_after_schema_1_upgrade() {
     assert_eq!(pair.search("Cherryupdatedbatch").unwrap().0, current);
     assert_eq!(fs::read(tantivy.join("meta.json")).unwrap(), manifest);
     assert_eq!(fs::read(directory.join("seal.json")).unwrap(), seal);
+    let cache = pair.env.cache.path().canonicalize().unwrap();
     assert_eq!(
         registry_inspect::observe_project(
             pair.registry.connection(),
-            pair.env.cache.path(),
+            &cache,
             pair.project.id,
             limits(),
             0,

@@ -1790,3 +1790,8 @@ baseline are unchanged.
 Rust 1.100.0 full cli-full, lean offline, all-target Clippy including the
 opt-in targets, fmt and Node/web build checks passed. Targeted contention
 and profile tests were repeated after the review fixes.
+
+Ruling: macOS native tests exposed a fixture that passed a linked temporary
+directory directly to the internal stopped observer. The public observer
+resolves that directory before checking the pair. The fixture follows the
+same contract. A linked TMPDIR reproduced the exact failure on Linux.
