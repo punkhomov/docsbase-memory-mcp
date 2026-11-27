@@ -70,6 +70,7 @@ pub struct SourceLayer {
     pub(super) provisioning: Option<crate::hybrid::provisioning::ProvisioningPatch>,
     pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
     pub(super) retrieval: Option<crate::search::retrieval::RetrievalPatch>,
+    pub(super) config_lock: Option<super::paths::ConfigLockPatch>,
 }
 impl fmt::Debug for SourceLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -118,6 +119,7 @@ impl SourceLayer {
         let mut lexical = None;
         let mut rrf = None;
         let mut retrieval = None;
+        let mut config_lock = None;
         let mut store = None;
         let mut read_pool = None;
         let mut dense = None;
@@ -149,6 +151,7 @@ impl SourceLayer {
             }
             rrf = take_project_table(&mut fields, "rrf")?;
             retrieval = take_project_table(&mut fields, "retrieval")?;
+            config_lock = take_global_table(&mut fields, &source, "config_lock")?;
             provisioning = take_global_table(&mut fields, &source, "provisioning")?;
             store = take_global_table(&mut fields, &source, "store")?;
             read_pool = take_global_table(&mut fields, &source, "read_pool")?;
@@ -188,6 +191,7 @@ impl SourceLayer {
             lexical,
             rrf,
             retrieval,
+            config_lock,
             provisioning,
             store,
             read_pool,

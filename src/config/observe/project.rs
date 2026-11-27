@@ -223,18 +223,21 @@ fn project_plan_using(
     profile: Option<&DaemonProfile>,
     inspect: impl FnOnce() -> Result<Inspected>,
 ) -> Result<ProjectConfigPlan> {
-    let (global, project, mut assessment) =
+    let (global, project, source_assessment) =
         capture_plan_sources(config_dir, cache, root, limits, profile)?;
+    let mut assessment = Assessment::default();
+    let mut vectors = Assessment::default();
 
     let mut replacement = None;
     let mut live_change = None;
     let mut restart_required = None;
-    let (full_survey, observation_failure) = if assessment.blockers.is_empty() {
+    let (full_survey, observation_failure) = if source_assessment.blockers.is_empty() {
         match resolve_plan_sources(&global, &project, active.as_ref(), profile) {
             Ok(Some((global_config, Ok(config)))) if permits_project(&config, root) => {
                 match inspect()? {
                     Ok(inspection) => {
-                        let survey = assess_project(&inspection, &config, &mut assessment)?;
+                        let survey =
+                            assess_project(&inspection, &config, &mut assessment, &mut vectors)?;
                         if let Some(active) = &active {
                             restart_required = assess_runtime(
                                 active,
@@ -255,7 +258,7 @@ fn project_plan_using(
                                     reviewed: reviewed_replacement(
                                         selected,
                                         [global.observation, project.observation],
-                                        &assessment,
+                                        vectors.actions.is_empty(),
                                     )?,
                                 });
                             }
@@ -267,7 +270,7 @@ fn project_plan_using(
                                 config,
                                 selected,
                                 [global.observation, project.observation],
-                                &assessment,
+                                vectors.actions.is_empty(),
                             )?);
                         }
                         (survey, None)
@@ -300,7 +303,7 @@ fn project_plan_using(
         (None, None)
     };
     let plan = compile_project_plan(
-        assessment,
+        &[source_assessment, assessment, vectors],
         limits,
         replacement.as_ref(),
         live_change.as_ref(),
@@ -414,13 +417,13 @@ fn capture_plan_sources(
 }
 
 fn compile_project_plan(
-    assessment: Assessment,
+    assessments: &[Assessment],
     limits: PlanningLimits,
     replacement: Option<&ProjectReplacement>,
     live_change: Option<&LiveProjectChange>,
 ) -> Result<ChangePlan> {
     change::compile_for(
-        &[assessment],
+        assessments,
         PlanLimits {
             max_actions: 5,
             max_dependencies: 5,
@@ -438,28 +441,24 @@ fn replacement_for(
     config: Config,
     selected: &registry_inspect::SelectedIndexEvidence,
     sources: [source::SourceObservation; 2],
-    assessment: &Assessment,
+    reuse_vectors_only: bool,
 ) -> Result<ProjectReplacement> {
     Ok(ProjectReplacement {
         global,
         config,
-        reviewed: reviewed_replacement(selected, sources, assessment)?,
+        reviewed: reviewed_replacement(selected, sources, reuse_vectors_only)?,
     })
 }
 
 fn reviewed_replacement(
     selected: &registry_inspect::SelectedIndexEvidence,
     sources: [source::SourceObservation; 2],
-    assessment: &Assessment,
+    reuse_vectors_only: bool,
 ) -> Result<ReviewedReplacement> {
-    let vectors = artifact("document_vectors", Some(selected.index.project_id));
     Ok(ReviewedReplacement {
         base: selected.index,
         head: CatalogHead::from_observed_seal(selected.index, selected.seal)?,
-        reuse_vectors_only: !assessment
-            .actions
-            .iter()
-            .any(|action| action.resource == vectors),
+        reuse_vectors_only,
         sources,
     })
 }
@@ -576,6 +575,8 @@ fn assess_ann(
     inspection: &registry_inspect::ProjectRecipeInspection,
     assessment: &mut Assessment,
 ) -> Result<()> {
+    use crate::config::schema::{ArtifactFacts, ComponentImpact, SettingsSpec};
+    use crate::hybrid::ann_settings::AnnBuildSpec;
     let resource = artifact("ann_graph", inspection.project_id);
     let ann_format = (
         crate::hybrid::ann_store::ANN_FORMAT_VERSION,
@@ -623,7 +624,12 @@ fn assess_ann(
             .actions
             .iter()
             .find(|action| action.resource == index);
-        if rebuild_index.is_some() || old.ann_build != config.ann_build {
+        let impact = AnnBuildSpec::impact(
+            Some(&old.ann_build),
+            &config.ann_build,
+            &ArtifactFacts::default(),
+        );
+        if rebuild_index.is_some() || impact != ComponentImpact::Unchanged {
             let generation = rebuild_index.is_none().then_some((
                 selected.index.epoch,
                 selected.index.generation_id,
@@ -692,6 +698,7 @@ fn assess_project(
     inspection: &registry_inspect::ProjectRecipeInspection,
     config: &Config,
     assessment: &mut Assessment,
+    vectors: &mut Assessment,
 ) -> Result<Option<bool>> {
     let registry = inspection
         .schema_version
@@ -707,7 +714,7 @@ fn assess_project(
         state: registry.map_or(ExpectedState::Missing, ExpectedState::KnownIdentity),
     });
     if let Some(selected) = &inspection.selected {
-        return assess_selected(selected, config, assessment);
+        return assess_selected(selected, config, assessment, vectors);
     }
     assessment.expected.push(Observation {
         resource: artifact("project_index", inspection.project_id),
@@ -720,6 +727,7 @@ fn assess_selected(
     selected: &registry_inspect::SelectedIndexEvidence,
     config: &Config,
     assessment: &mut Assessment,
+    vectors: &mut Assessment,
 ) -> Result<Option<bool>> {
     let identity = selected.index;
     let project = Some(identity.project_id);
@@ -756,7 +764,7 @@ fn assess_selected(
             chunks: crate::index::outcome::vector_inputs_id(config),
             embedding,
         });
-        let vectors = desired
+        *vectors = desired
             .map(|desired| {
                 inputs::assess_replacement(
                     identity.project_id,
@@ -783,16 +791,13 @@ fn push_replacement(
     project_id: i64,
     lexical: &str,
     embedding: Option<EmbeddingRecipe>,
-    vectors: Assessment,
+    vectors: &Assessment,
 ) -> Result<()> {
     let dependencies = vectors
         .actions
         .iter()
         .map(|action| action.resource.clone())
         .collect();
-    assessment.expected.extend(vectors.expected);
-    assessment.actions.extend(vectors.actions);
-    assessment.blockers.extend(vectors.blockers);
     assessment.actions.push(Action {
         resource: artifact("project_index", Some(project_id)),
         effect: Effect::Rebuild,
@@ -861,36 +866,41 @@ mod tests {
                 full_survey: true,
             }),
         };
-        let mut assessment = Assessment::default();
+        let assess = |selected: &registry_inspect::SelectedIndexEvidence, config: &Config| {
+            let mut project = Assessment::default();
+            let mut vectors = Assessment::default();
+            assert_eq!(
+                assess_selected(selected, config, &mut project, &mut vectors).unwrap(),
+                Some(true)
+            );
+            compile_project_plan(&[project, vectors], PlanningLimits::standard(), None, None)
+                .unwrap()
+                .body
+        };
+        let compatible = assess(&selected, &config);
+        assert_eq!(compatible.actions.len(), 1);
         assert_eq!(
-            assess_selected(&selected, &config, &mut assessment).unwrap(),
-            Some(true)
-        );
-        assert_eq!(assessment.actions.len(), 1);
-        assert_eq!(
-            assessment.actions[0].resource,
+            compatible.actions[0].resource,
             artifact("project_index", Some(1))
         );
-        assert_eq!(assessment.actions[0].dependencies, [] as [ResourceId; 0]);
-        assert_eq!(assessment.actions[0].required_grants, [] as [Grant; 0]);
+        assert_eq!(compatible.actions[0].dependencies, [] as [ResourceId; 0]);
+        assert_eq!(compatible.required_grants, [] as [Grant; 0]);
 
         selected.recipes.as_mut().unwrap().vector_inputs = None;
-        let mut unknown = Assessment::default();
-        assess_selected(&selected, &config, &mut unknown).unwrap();
+        let unknown = assess(&selected, &config);
         assert_eq!(unknown.actions.len(), 2);
-        assert_eq!(unknown.actions[0].required_grants, vec![Grant::Remote]);
+        assert_eq!(unknown.required_grants, vec![Grant::Remote]);
 
         config.max_file_size += 1;
         selected.recipes.as_mut().unwrap().vector_inputs =
             Some(crate::index::outcome::vector_inputs_id(&Config::default()));
-        let mut changed = Assessment::default();
-        assess_selected(&selected, &config, &mut changed).unwrap();
+        let changed = assess(&selected, &config);
         assert_eq!(changed.actions.len(), 2);
         assert_eq!(
             changed.actions[0].resource,
             artifact("document_vectors", Some(1))
         );
-        assert_eq!(changed.actions[0].required_grants, vec![Grant::Remote]);
+        assert_eq!(changed.required_grants, vec![Grant::Remote]);
         assert_eq!(
             changed.actions[1].dependencies,
             vec![changed.actions[0].resource.clone()]

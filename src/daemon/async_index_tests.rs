@@ -1198,6 +1198,7 @@ fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
 
 #[test]
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)] // One fixture observes both vector pin and commit boundaries.
 fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1267,8 +1268,12 @@ fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
         };
         let before = catalog_diagnostics(&shared, session).await;
         std::fs::write(&guide, "newcapacitywatchwidget").unwrap();
-        assert_failed_watch_keeps_over_budget_cache(cache.path(), &provider, watch(guide.clone()))
-            .await;
+        Box::pin(assert_failed_watch_keeps_over_budget_cache(
+            cache.path(),
+            &provider,
+            watch(guide.clone()),
+        ))
+        .await;
         let error = watch(guide.clone()).await.unwrap_err();
         assert!(
             error.to_string().contains("active and prepared vectors"),

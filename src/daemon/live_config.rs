@@ -384,6 +384,7 @@ pub(super) fn publish_runtime(
     let base = change.reviewed.base;
     crate::config::paths::with_index_config_write_locks(
         shared.config_lock_dir()?,
+        config.config_lock,
         shared.global_config_path.as_deref(),
         &project.canonical_root,
         || {

@@ -2406,3 +2406,33 @@ Ruling: an absent vector fails before publication. The existing generation
 continues serving reads. Older seals provide unknown vector-input evidence.
 A native v5 fixture proved reuse, refusal on a cache miss and zero provider calls
 for the reviewed lexical-only path. Existing source, head and pin checks remain.
+
+Task I13: complete (project-owned bounded post-filter overscan with CLI and
+daemon evidence, default preserved, search baseline passed).
+Ruling: Factor 1 keeps the first window at the request limit and still advances
+bounded refill. The ANN/RRF/reranker base window remains owner-specific.
+minor (deferred): non-default hybrid refill factor coverage in the benchmark.
+
+Task I44: complete (global Shared watcher policy, Website mask provenance,
+native explicit Sync and restart inspection).
+Ruling: the configuration changes the next daemon's watcher owner. Website
+masks the setting before restart comparison. Fresh review and fix round completed.
+
+Task I49: complete (global typed client deadlines, bounded native I/O, MCP
+exchange consumers, unsupported versions and invalid source handling).
+Ruling: invalid recognized owner policy fails before startup; an MCP-only
+change does not replace the daemon. Blocking Windows setters are operational.
+Fresh review and fixes passed; 105 serial Linux cases and Windows cross-check.
+
+Task I55: complete (captured daemon/cache/model/ORT paths and source-lock
+directory, explicit CLI/autostart boundaries).
+Ruling: project configuration publication and its writer serialize using the
+same captured locks. The injected-daemon test exercises ambient path divergence
+and an existing held lock.
+
+Task CF11-cache-only: complete (stopped replacement derives model identity
+from the reviewed config, pins and verifies cached vectors without constructing
+a provider, including empty generations).
+Ruling: Live replacement can retain the exact prior stages if their settings
+are equal. A complete native stopped fixture proves this route with the
+provider credentials absent; a miss keeps the prior pair selected.

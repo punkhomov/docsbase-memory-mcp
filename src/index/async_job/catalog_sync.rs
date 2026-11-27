@@ -96,18 +96,25 @@ impl RuntimeUpdate {
     ) -> Result<T> {
         let root = &context.project.canonical_root;
         let global_file = self.global_path.as_deref();
-        with_index_config_write_locks(&self.config_lock_dir, global_file, root, || {
-            operation.check()?;
-            if let Some(reviewed) = &self.reviewed {
-                reviewed.verify_sources()?;
-            } else if Config::for_project(&self.global_config, root)? != *context.config {
-                return Err(Error::Admission {
-                    message: "project index configuration changed before publication; retry index"
-                        .into(),
-                });
-            }
-            publish()
-        })
+        with_index_config_write_locks(
+            &self.config_lock_dir,
+            context.config.config_lock,
+            global_file,
+            root,
+            || {
+                operation.check()?;
+                if let Some(reviewed) = &self.reviewed {
+                    reviewed.verify_sources()?;
+                } else if Config::for_project(&self.global_config, root)? != *context.config {
+                    return Err(Error::Admission {
+                        message:
+                            "project index configuration changed before publication; retry index"
+                                .into(),
+                    });
+                }
+                publish()
+            },
+        )
     }
 
     fn revise_watcher(&self, context: &BuildContext) {
@@ -872,48 +879,55 @@ impl CatalogJob {
         let config_dir = &direct.sources.config_dir;
         let config_lock_dir = &direct.sources.config_lock_dir;
         let global_file = config_dir.join("config.toml");
-        with_index_config_write_locks(config_lock_dir, Some(&global_file), root, || {
-            operation.check()?;
-            let current = if direct.reviewed.is_some() {
-                self.context.config.clone()
-            } else {
-                Arc::new(Config::load_from(config_dir, Some(root))?)
-            };
-            let current_recipe = current
-                .embedding_model_key()?
-                .as_deref()
-                .map(EmbeddingRecipe::for_model);
-            if current != self.context.config || current_recipe != recipe {
-                return Err(Error::Admission {
-                    message: "project index configuration changed before publication; retry index"
-                        .into(),
-                });
-            }
-            let verification = self.vector_verification(|| operation.check())?;
-            let commit = if let Some(reviewed) = &direct.reviewed {
-                reviewed.verify_sources()?;
-                commit.with_reviewed_head(reviewed.head)
-            } else {
-                commit
-            };
-            commit.commit_with(
-                || {
-                    operation.check()?;
-                    verification
-                        .map(|proof| proof.hold_verified(|| operation.check()))
-                        .transpose()
-                },
-                |_, _| Ok(()),
-                || {
-                    operation.check()?;
-                    if let Some(reviewed) = &direct.reviewed {
-                        reviewed.verify_sources()?;
-                    }
-                    Ok(())
-                },
-                |_| {},
-            )
-        })
+        with_index_config_write_locks(
+            config_lock_dir,
+            self.context.config.config_lock,
+            Some(&global_file),
+            root,
+            || {
+                operation.check()?;
+                let current = if direct.reviewed.is_some() {
+                    self.context.config.clone()
+                } else {
+                    Arc::new(Config::load_from(config_dir, Some(root))?)
+                };
+                let current_recipe = current
+                    .embedding_model_key()?
+                    .as_deref()
+                    .map(EmbeddingRecipe::for_model);
+                if current != self.context.config || current_recipe != recipe {
+                    return Err(Error::Admission {
+                        message:
+                            "project index configuration changed before publication; retry index"
+                                .into(),
+                    });
+                }
+                let verification = self.vector_verification(|| operation.check())?;
+                let commit = if let Some(reviewed) = &direct.reviewed {
+                    reviewed.verify_sources()?;
+                    commit.with_reviewed_head(reviewed.head)
+                } else {
+                    commit
+                };
+                commit.commit_with(
+                    || {
+                        operation.check()?;
+                        verification
+                            .map(|proof| proof.hold_verified(|| operation.check()))
+                            .transpose()
+                    },
+                    |_, _| Ok(()),
+                    || {
+                        operation.check()?;
+                        if let Some(reviewed) = &direct.reviewed {
+                            reviewed.verify_sources()?;
+                        }
+                        Ok(())
+                    },
+                    |_| {},
+                )
+            },
+        )
     }
 
     fn commit_sync(

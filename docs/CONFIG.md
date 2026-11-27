@@ -966,6 +966,23 @@ Stop. On Windows, Stop checks process exit and `config effective` displays
 `null` for the Unix-only value. Stop uses standalone timing if loading the
 configuration fails, so a config error still permits cleanup.
 
+### Configuration lock retries
+
+Global v2 configuration can set the retry policy for configuration editors
+and index publication.
+
+```toml
+[config_lock]
+attempts = 50
+retry_delay_ms = 20
+```
+
+Use 1 to 1000 attempts and a nonnegative delay. Their product must be at most
+1000 ms per lock file. A publication can acquire locks for both source files
+and their canonical paths. Editors read the policy before acquisition and
+reread the edited source under the lock. When the global configuration cannot
+be loaded, editors acquire the lock with the default policy.
+
 ## Observed migration plan (CF4c2)
 
 ```sh

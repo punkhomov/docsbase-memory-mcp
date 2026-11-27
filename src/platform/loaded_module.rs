@@ -103,6 +103,36 @@ fn windows_spelling(path: &Path) -> Vec<u16> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_loader_comparison_preserves_native_bytes() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let one = Path::new(OsStr::from_bytes(b"/lib/onnx-\xff.so"));
+        let other = Path::new(OsStr::from_bytes(b"/lib/onnx-\xfe.so"));
+        assert!(matches_path(one, one));
+        assert!(!matches_path(one, other));
+        assert!(!matches_path(
+            Path::new("/lib/runtime.so"),
+            Path::new("/lib/Runtime.so")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_loader_comparison_accepts_verbatim_spelling_only() {
+        for (normal, verbatim) in [
+            (r"C:\models\ort.dll", r"\\?\C:\models\ort.dll"),
+            (r"\\host\share\ort.dll", r"\\?\UNC\host\share\ort.dll"),
+        ] {
+            assert!(matches_path(Path::new(normal), Path::new(verbatim)));
+        }
+        assert!(!matches_path(
+            Path::new(r"C:\models\ort.dll"),
+            Path::new(r"C:\Models\ort.dll")
+        ));
+    }
+
     #[test]
     fn native_module_path_is_the_owner_of_a_live_symbol() {
         static OWNED_BY_THIS_BINARY: u8 = 73;

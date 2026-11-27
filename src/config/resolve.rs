@@ -212,6 +212,15 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
         }
+        if let Some(patch) = layer.config_lock {
+            super::paths::ConfigLockSpec::overlay(
+                &mut self.settings.config_lock,
+                patch,
+                &self.defaults.initial.config_lock,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
         if let Some(patch) = layer.retrieval {
             RetrievalSpec::overlay(
                 &mut self.settings.retrieval,

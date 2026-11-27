@@ -480,17 +480,18 @@ pub(crate) fn runtime_restart_notice(
         snapshot
             .resolve(overrides.clone())
             .and_then(|resolved| {
-                if compare_effective_policy {
-                    Ok(crate::config::view::launch_identity(resolved.settings())?
-                        == crate::config::view::launch_identity(active)?)
-                } else {
-                    // Preserve the legacy source notice unless the frontend is
-                    // the only consumer of the changed effective policy.
-                    let mut current = resolved.into_settings();
-                    let client = current.client;
-                    current.client = client.with_mcp_timeouts_from(active.client);
-                    Ok(client != current.client && current == *active)
+                let current = resolved.settings();
+                let client = current.client;
+                // Legacy status still reports raw source drift unless MCP is
+                // the only consumer affected. Compare daemon policy rather
+                // than the installed native handles attached to its snapshot.
+                if !compare_effective_policy
+                    && client == client.with_mcp_timeouts_from(active.client)
+                {
+                    return Ok(false);
                 }
+                Ok(crate::config::view::launch_identity(current)?
+                    == crate::config::view::launch_identity(active)?)
             })
             .unwrap_or(false)
     };

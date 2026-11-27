@@ -1290,3 +1290,36 @@ fn v2_rrf_inherits_individual_fields_and_refuses_invalid_scoring() {
         assert!(error.to_string().contains(message), "{text}: {error}");
     }
 }
+
+#[test]
+fn v2_configuration_lock_policy_is_bounded_and_machine_scoped() {
+    let global = TempDir::new().unwrap();
+    let path = global.path().join("config.toml");
+    let write = |body: &str| {
+        std::fs::write(&path, format!("config_version=2\n[config_lock]\n{body}\n")).unwrap();
+    };
+    for invalid in [
+        "attempts=0",
+        "attempts=1001",
+        "attempts=50\nretry_delay_ms=21",
+    ] {
+        write(invalid);
+        assert!(Config::global_from(global.path()).is_err(), "{invalid}");
+    }
+    write("attempts=3\nretry_delay_ms=7");
+    let view = docsbase_memory::config::view::load_from(global.path(), None).unwrap();
+    let field = view
+        .fields
+        .iter()
+        .find(|field| field.key == "config_lock.attempts")
+        .unwrap();
+    assert_eq!(field.value, 3);
+    assert_eq!(field.origin.source, SourceId::Global(path));
+    let project = TempDir::new().unwrap();
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version=2\n[config_lock]\nattempts=1\n",
+    );
+    assert!(Config::load_from(global.path(), Some(project.path())).is_err());
+}

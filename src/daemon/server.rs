@@ -1738,7 +1738,10 @@ impl Shared {
                 stages.ranking == Ranking::Rrf,
             ),
             _ => (
-                config.embedding_model_key().ok()??,
+                config
+                    .providers
+                    .embedding_model_id(config.hybrid_cfg.embedding.as_ref()?)
+                    .ok()?,
                 config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf,
             ),
         };

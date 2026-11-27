@@ -435,6 +435,25 @@ mod tests {
     }
 
     #[test]
+    fn dense_invalidation_follows_document_and_vector_inputs() {
+        let original = Config {
+            hybrid_cfg: crate::hybrid::config::HybridCfg::enabled_with_defaults(),
+            ..Config::default()
+        };
+        let mut changed = original.clone();
+        changed.hybrid_cfg.reranker.as_mut().unwrap().window += 1;
+        changed.search.request_timeout_ms += 1;
+        assert!(!changed.changes_dense_state(&original));
+
+        changed.hybrid_cfg.embedding.as_mut().unwrap().dimensions += 1;
+        assert!(changed.changes_dense_state(&original));
+
+        let mut changed = original.clone();
+        changed.max_file_size += 1;
+        assert!(changed.changes_dense_state(&original));
+    }
+
+    #[test]
     fn checked_view_rejects_missing_duplicate_and_undeclared_fields() {
         let snapshot = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone())
             .finish()

@@ -157,6 +157,7 @@ impl Target {
         let project_root = &self.project.canonical_root;
         paths::with_index_config_write_locks(
             &self.sources.config_lock_dir,
+            self.config.config_lock,
             Some(&self.sources.config_dir.join("config.toml")),
             project_root,
             || {

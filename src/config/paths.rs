@@ -10,7 +10,10 @@ use directories::ProjectDirs;
 use fd_lock::RwLock as FdRwLock;
 
 use super::bootstrap::{BootstrapContext, BootstrapValue};
-use super::schema::SourceId;
+use super::schema::{
+    ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
+    SourceId, Unit,
+};
 use crate::error::{Error, Result};
 
 const APP: &str = "docsbase-memory-mcp";
@@ -118,8 +121,107 @@ pub(crate) fn daemon_exe_from(
 /// Number of retries for the cross-process config-write lock (C13).
 const CONFIG_LOCK_RETRIES: u32 = 50;
 
-/// Delay between lock retries.
-const CONFIG_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
+/// Default delay between lock retries.
+const CONFIG_LOCK_RETRY_DELAY_MS: u32 = 20;
+const MAX_CONFIG_LOCK_ATTEMPTS: u32 = 1_000;
+const MAX_CONFIG_LOCK_WAIT_MS: u32 = 1_000;
+
+/// Installation-wide policy for one configuration lock acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigLockSettings {
+    attempts: u32,
+    retry_delay_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConfigLockPatch {
+    attempts: Option<u32>,
+    retry_delay_ms: Option<u32>,
+}
+
+pub(super) struct ConfigLockSpec;
+
+impl ConfigLockSpec {
+    const DEFAULT: ConfigLockSettings = ConfigLockSettings {
+        attempts: CONFIG_LOCK_RETRIES,
+        retry_delay_ms: CONFIG_LOCK_RETRY_DELAY_MS,
+    };
+
+    pub(super) fn view_fields(
+        settings: ConfigLockSettings,
+        view: &mut super::view::ViewBuilder<'_>,
+    ) -> Result<()> {
+        view.push(Self::FIELDS[0].key, settings.attempts.into(), None)?;
+        view.push(Self::FIELDS[1].key, settings.retry_delay_ms.into(), None)
+    }
+}
+
+impl SettingsSpec for ConfigLockSpec {
+    type Settings = ConfigLockSettings;
+    type Patch = ConfigLockPatch;
+    type Defaults = ConfigLockSettings;
+    const SCOPE: Scope = Scope::Machine;
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::new("config_lock.attempts", Self::SCOPE, Unit::Count),
+        FieldSpec::new(
+            "config_lock.retry_delay_ms",
+            Self::SCOPE,
+            Unit::Milliseconds,
+        ),
+    ];
+
+    fn defaults(_: &super::bootstrap::DefaultsContext) -> Self::Defaults {
+        Self::DEFAULT
+    }
+
+    fn initial(defaults: &Self::Defaults) -> Self::Settings {
+        *defaults
+    }
+
+    fn overlay(
+        settings: &mut Self::Settings,
+        patch: Self::Patch,
+        _: &Self::Defaults,
+        source: &SourceId,
+        origins: &mut Provenance,
+    ) -> Result<()> {
+        let next = ConfigLockSettings {
+            attempts: patch.attempts.unwrap_or(settings.attempts),
+            retry_delay_ms: patch.retry_delay_ms.unwrap_or(settings.retry_delay_ms),
+        };
+        Self::validate(&next, &Capabilities::current())?;
+        if patch.attempts.is_some() {
+            origins.set(Self::FIELDS[0].key, source)?;
+        }
+        if patch.retry_delay_ms.is_some() {
+            origins.set(Self::FIELDS[1].key, source)?;
+        }
+        *settings = next;
+        Ok(())
+    }
+
+    fn validate(settings: &Self::Settings, _: &Capabilities) -> Result<()> {
+        if !(1..=MAX_CONFIG_LOCK_ATTEMPTS).contains(&settings.attempts)
+            || settings.attempts.saturating_mul(settings.retry_delay_ms) > MAX_CONFIG_LOCK_WAIT_MS
+        {
+            return Err(Error::Admission {
+                message: format!(
+                    "config_lock requires 1..={MAX_CONFIG_LOCK_ATTEMPTS} attempts and a total retry wait of at most {MAX_CONFIG_LOCK_WAIT_MS} ms"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn impact(
+        old: Option<&Self::Settings>,
+        next: &Self::Settings,
+        _: &ArtifactFacts,
+    ) -> ComponentImpact {
+        ComponentImpact::between(old, next)
+    }
+}
 
 /// Serializes read-modify-write of a config file across processes (review
 /// panel C13): both `connect` and `models use --global` rewrite the whole
@@ -147,15 +249,29 @@ pub(crate) fn with_config_write_lock<T>(
 /// Hold source guards in global-to-project order during index publication.
 pub(crate) fn with_index_config_write_locks<T>(
     lock_dir: &Path,
+    policy: ConfigLockSettings,
     global_file: Option<&Path>,
     project_root: &Path,
     work: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let project_file = project_root.join(".docsbase.toml");
-    let lock_project =
-        || with_config_write_lock_in(lock_dir, &project_file, || Ok(work()?), std::thread::sleep);
+    let lock_project = || {
+        with_config_write_lock_in(
+            policy,
+            lock_dir,
+            &project_file,
+            || Ok(work()?),
+            std::thread::sleep,
+        )
+    };
     let result = if let Some(global_file) = global_file {
-        with_config_write_lock_in(lock_dir, global_file, lock_project, std::thread::sleep)
+        with_config_write_lock_in(
+            policy,
+            lock_dir,
+            global_file,
+            lock_project,
+            std::thread::sleep,
+        )
     } else {
         lock_project()
     };
@@ -175,12 +291,18 @@ pub(crate) fn with_config_write_lock_with_wait<T>(
     wait: impl FnMut(Duration),
 ) -> anyhow::Result<T> {
     let lock_dir = config_lock_dir()?;
-    with_config_write_lock_in(&lock_dir, path, f, wait)
+    // This read controls only lock acquisition. Editors reread and validate
+    // their target under the lock. The fixed bootstrap policy still permits
+    // recovery when the file that contains the override cannot be decoded.
+    let policy =
+        super::Config::global().map_or(ConfigLockSpec::DEFAULT, |config| config.config_lock);
+    with_config_write_lock_in(policy, &lock_dir, path, f, wait)
 }
 
 /// `with_config_write_lock` with an explicit lock directory (tests pass a
 /// `TempDir` instead of touching the real data dir).
 fn with_config_write_lock_in<T>(
+    policy: ConfigLockSettings,
     lock_dir: &Path,
     path: &Path,
     f: impl FnOnce() -> anyhow::Result<T>,
@@ -196,16 +318,17 @@ fn with_config_write_lock_in<T>(
         config_lock_path(lock_dir, &target),
     ];
     keys.sort_unstable();
-    with_config_lock_file(&keys[0], path, &mut wait, |wait| {
+    with_config_lock_file(policy, &keys[0], path, &mut wait, |wait| {
         if keys[0] == keys[1] {
             f()
         } else {
-            with_config_lock_file(&keys[1], path, wait, |_| f())
+            with_config_lock_file(policy, &keys[1], path, wait, |_| f())
         }
     })
 }
 
 fn with_config_lock_file<T, W: FnMut(Duration)>(
+    policy: ConfigLockSettings,
     lock_path: &Path,
     target: &Path,
     wait: &mut W,
@@ -218,10 +341,10 @@ fn with_config_lock_file<T, W: FnMut(Duration)>(
         .open(lock_path)
         .map_err(|err| anyhow::anyhow!("open {}: {err}", lock_path.display()))?;
     let mut lock = FdRwLock::new(file);
-    for _ in 0..CONFIG_LOCK_RETRIES {
+    for _ in 0..policy.attempts {
         match lock.try_write() {
             Ok(_guard) => return work(wait),
-            Err(_) => wait(CONFIG_LOCK_RETRY_DELAY),
+            Err(_) => wait(Duration::from_millis(u64::from(policy.retry_delay_ms))),
         }
     }
     Err(anyhow::anyhow!(
@@ -287,6 +410,14 @@ mod tests {
     #[test]
     fn config_write_lock_serializes_and_releases() {
         let dir = tempfile::TempDir::new().expect("tmp");
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "config_version = 2\n[config_lock]\nattempts = 3\nretry_delay_ms = 7\n",
+        )
+        .expect("write config policy");
+        let policy = super::super::Config::global_from(dir.path())
+            .expect("resolve config policy")
+            .config_lock;
         let lock_dir = dir.path().join("locks");
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).expect("project dir");
@@ -304,6 +435,7 @@ mod tests {
         let mut waits = Vec::new();
         let mut writes = 0;
         let err = with_config_write_lock_in(
+            policy,
             &lock_dir,
             &path,
             || {
@@ -320,12 +452,13 @@ mod tests {
         assert_eq!(writes, 0, "exhausted lock must not execute the write");
         assert_eq!(
             waits,
-            vec![CONFIG_LOCK_RETRY_DELAY; CONFIG_LOCK_RETRIES as usize],
+            vec![Duration::from_millis(7); 3],
             "every failed attempt must request the configured retry delay"
         );
         drop(guard);
         waits.clear();
         with_config_write_lock_in(
+            policy,
             &lock_dir,
             &path,
             || {
@@ -341,6 +474,7 @@ mod tests {
         // A wait callback can release a real lock without consuming backoff.
         let mut guard = Some(held.try_write().expect("hold for retry handoff"));
         let value = with_config_write_lock_in(
+            policy,
             &lock_dir,
             &path,
             || {
@@ -355,7 +489,7 @@ mod tests {
         .expect("acquires after the first retry releases the lock");
         assert_eq!(value, 17);
         assert_eq!(writes, 2, "successful retry must execute the write once");
-        assert_eq!(waits, vec![CONFIG_LOCK_RETRY_DELAY]);
+        assert_eq!(waits, vec![Duration::from_millis(7)]);
         assert!(guard.is_none());
         assert!(
             !project.join(".docsbase.toml.lock").exists(),
@@ -396,10 +530,12 @@ mod tests {
         let mut alias_entered = false;
         let mut retries = 0;
         with_config_write_lock_in(
+            ConfigLockSpec::DEFAULT,
             &lock_dir,
             &actual,
             || {
                 let result = with_config_write_lock_in(
+                    ConfigLockSpec::DEFAULT,
                     &lock_dir,
                     &aliased,
                     || {
@@ -424,7 +560,13 @@ mod tests {
         let file = std::fs::File::create(config_lock_path(&lock_dir, &aliased)).unwrap();
         let mut legacy = FdRwLock::new(file);
         let _held = legacy.try_write().unwrap();
-        let result = with_config_write_lock_in(&lock_dir, &aliased, || Ok(()), |_| {});
+        let result = with_config_write_lock_in(
+            ConfigLockSpec::DEFAULT,
+            &lock_dir,
+            &aliased,
+            || Ok(()),
+            |_| {},
+        );
         assert!(result.is_err(), "an old editor still excludes a new writer");
     }
 

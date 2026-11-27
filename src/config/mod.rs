@@ -24,6 +24,7 @@ use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
+use paths::{ConfigLockSettings, ConfigLockSpec};
 use schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
     SourceId, Unit,
@@ -66,6 +67,8 @@ pub struct Config {
     pub retrieval: RetrievalSettings,
     /// Installation-wide timeout policy for local IPC and MCP callers.
     pub client: ClientSettings,
+    /// Configuration source lock admission policy.
+    pub config_lock: ConfigLockSettings,
     /// Installation-wide SQLite connection policy.
     pub store: DbSettings,
     /// Global prepared metadata reader capacity.
@@ -297,26 +300,20 @@ impl Config {
     }
 
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
-        if self.client == previous.client
-            && self.ann_search == previous.ann_search
-            && self.watch == previous.watch
-            && self.lexical == previous.lexical
-            && self.rrf == previous.rrf
-            && self.retrieval == previous.retrieval
-            && self.index_writer == previous.index_writer
-        {
-            self != previous
-        } else {
-            let mut previous = previous.clone();
-            previous.client = self.client;
-            previous.ann_search = self.ann_search;
-            previous.watch = self.watch;
-            previous.lexical = self.lexical;
-            previous.rrf = self.rrf;
-            previous.retrieval = self.retrieval;
-            previous.index_writer = self.index_writer;
-            self != &previous
-        }
+        // Dense state depends on document inputs, the embedding identity and
+        // its ANN/vector-store policies. Query and execution policy changes
+        // can be published using the same resident data.
+        self.ann_build != previous.ann_build
+            || self.dense != previous.dense
+            || self.vector_store != previous.vector_store
+            || self.hybrid_cfg.cache != previous.hybrid_cfg.cache
+            || self.hybrid_cfg.ranking != previous.hybrid_cfg.ranking
+            || crate::index::outcome::vector_inputs_id(self)
+                != crate::index::outcome::vector_inputs_id(previous)
+            || match (self.embedding_model_key(), previous.embedding_model_key()) {
+                (Ok(next), Ok(old)) => next != old,
+                _ => true,
+            }
     }
 
     /// Rejects values that would silently disable indexing.
@@ -353,6 +350,7 @@ impl Config {
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         RetrievalSpec::validate(&self.retrieval, &Capabilities::current())?;
         ClientSpec::validate(&self.client, &Capabilities::current())?;
+        ConfigLockSpec::validate(&self.config_lock, &Capabilities::current())?;
         DbSpec::validate(&self.store, &Capabilities::current())?;
         ReadPoolSpec::validate(&self.read_pool, &Capabilities::current())?;
         DenseSpec::validate(&self.dense, &Capabilities::current())?;
@@ -468,6 +466,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(RetrievalSpec::FIELDS);
         fields.extend_from_slice(ClientSpec::FIELDS);
+        fields.extend_from_slice(ConfigLockSpec::FIELDS);
         fields.extend_from_slice(DbSpec::FIELDS);
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
         fields.extend(DenseSpec::file_fields());
@@ -498,6 +497,7 @@ impl SettingsSpec for ConfigSpec {
             search: SearchSpec::initial(&search),
             retrieval: RetrievalSpec::defaults(context),
             client: ClientSpec::defaults(context),
+            config_lock: ConfigLockSpec::defaults(context),
             store: DbSpec::defaults(context),
             read_pool: ReadPoolSpec::defaults(context),
             dense: DenseSpec::defaults(context),
@@ -670,6 +670,7 @@ impl ConfigSpec {
         SearchSpec::view_fields(&settings.search, view)?;
         RetrievalSpec::view_fields(settings.retrieval, view)?;
         ClientSpec::view_fields(settings.client, view)?;
+        ConfigLockSpec::view_fields(settings.config_lock, view)?;
         settings.store.view_fields(view)?;
         view.push(
             "read_pool.max_connections",
