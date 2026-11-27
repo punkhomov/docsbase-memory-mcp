@@ -2488,3 +2488,8 @@ runtime. The installer admission loop and stale Tantivy directory removal
 retain their fixed retry budgets (I48 and I21). The inventory still needs to
 classify remaining fixed administrative and metadata-read limits before
 SC-5 can be asserted.
+
+Task CF14-portable-source-fixture: complete (construct the expected config
+source with native path components). The first Windows run reached the
+bootstrap provenance regression and found a mixed-separator test literal.
+The actual CLI provenance used the native path.

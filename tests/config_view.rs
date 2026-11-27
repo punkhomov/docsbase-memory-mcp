@@ -438,7 +438,7 @@ fn effective_cli_reports_captured_bootstrap_values_and_sources() {
     assert_eq!(snapshot(root.path()), before);
 
     fs::create_dir(root.path().join("config")).unwrap();
-    let global = root.path().join("config/config.toml");
+    let global = root.path().join("config").join("config.toml");
     fs::write(
         &global,
         "config_version=2\n[providers.fastembed]\nenabled=true\nruntime_path='not-loaded-by-the-view'\n",
