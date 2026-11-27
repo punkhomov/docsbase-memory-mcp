@@ -93,7 +93,8 @@ pub struct Config {
     pub hybrid: bool,
     /// Hybrid stages resolved from the file forms (bool shorthand or table).
     pub hybrid_cfg: HybridCfg,
-    /// Explicit per-query ANN traversal policy. Unconfigured search uses the legacy adapter.
+    /// Per-query ANN traversal. Resolved v2 snapshots always carry the active policy.
+    /// Legacy caller snapshots may omit the policy.
     pub ann_search: Option<AnnSearchSettings>,
     /// Validated ANN construction recipe captured with the project.
     pub ann_build: AnnBuildSettings,
@@ -695,7 +696,8 @@ impl ConfigSpec {
         settings.ann_build.view_fields(view)?;
         let ann = settings
             .ann_search
-            .unwrap_or_else(AnnSearchSettings::owner_defaults);
+            .unwrap_or_else(AnnSearchSettings::legacy_defaults);
+        view.push("ann.search.mode", ann.mode_name().into(), None)?;
         for (key, value) in [
             ("ann.search.ef_base", ann.ef_base()),
             ("ann.search.ef_max", ann.ef_max()),

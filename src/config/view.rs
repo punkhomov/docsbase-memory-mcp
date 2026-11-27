@@ -164,16 +164,13 @@ fn settings_identity(
         .map(|field| (field.key, &field.value))
         .collect();
     if scope.is_some() {
-        return super::change::policy_identity(domain, &(config.ann_search.is_some(), fields));
+        return super::change::policy_identity(domain, &fields);
     }
     let vector_policy = config
         .vector_store
         .as_ref()
         .map(|policy| (policy.max_entries, policy.max_bytes, policy.busy_timeout));
-    super::change::policy_identity(
-        domain,
-        &(config.ann_search.is_some(), fields, vector_policy),
-    )
+    super::change::policy_identity(domain, &(fields, vector_policy))
 }
 
 /// Resolves the same versioned sources as the runtime loader and displays their origins.

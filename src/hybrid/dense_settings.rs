@@ -123,6 +123,8 @@ pub struct DenseSettings {
     pub vector_cache_max_bytes: u64,
     /// Best-effort ANN dump budget, with one index retained during disk cleanup.
     pub max_ann_disk_bytes: u64,
+    /// Maximum bytes in an individual ANN graph or vector file admitted for reading.
+    pub max_ann_read_file_bytes: u64,
     /// Newest generations kept per project and model during retention cleanup.
     pub ann_keep_generations: usize,
     /// Maximum cached query vectors.
@@ -152,6 +154,10 @@ impl DenseSettings {
             ("dense.max_projects", serde_json::json!(self.max_projects)),
             ("dense.min_vectors", serde_json::json!(self.min_vectors)),
             ("dense.max_ann_disk_bytes", self.max_ann_disk_bytes.into()),
+            (
+                "dense.max_ann_read_file_bytes",
+                self.max_ann_read_file_bytes.into(),
+            ),
             (
                 "dense.ann_keep_generations",
                 self.ann_keep_generations.into(),
@@ -199,6 +205,8 @@ pub struct DensePatch {
     pub vector_cache_max_bytes: Option<u64>,
     /// Best-effort ANN dump budget, with one index retained during disk cleanup.
     pub max_ann_disk_bytes: Option<u64>,
+    /// Maximum bytes in an individual ANN graph or vector file admitted for reading.
+    pub max_ann_read_file_bytes: Option<u64>,
     /// Newest generations kept per project and model during retention cleanup.
     pub ann_keep_generations: Option<usize>,
     /// Maximum cached query vectors.
@@ -220,6 +228,7 @@ pub(crate) struct DenseFilePatch {
     min_vectors: Option<usize>,
     build_backoff: Option<u64>,
     max_ann_disk_bytes: Option<u64>,
+    max_ann_read_file_bytes: Option<u64>,
     ann_keep_generations: Option<usize>,
     query_cache_max_entries: Option<usize>,
     query_cache_max_bytes: Option<u64>,
@@ -237,6 +246,7 @@ impl From<DenseFilePatch> for DensePatch {
             build_backoff: patch.build_backoff.map(Duration::from_millis),
             vector_cache_max_bytes: None,
             max_ann_disk_bytes: patch.max_ann_disk_bytes,
+            max_ann_read_file_bytes: patch.max_ann_read_file_bytes,
             ann_keep_generations: patch.ann_keep_generations,
             query_cache_max_entries: patch.query_cache_max_entries,
             query_cache_max_bytes: patch.query_cache_max_bytes,
@@ -269,6 +279,7 @@ impl SettingsSpec for DenseSpec {
         FieldSpec::new("dense.build_backoff", Scope::Daemon, Unit::Milliseconds),
         FieldSpec::new("dense.vector_cache_max_bytes", Scope::Daemon, Unit::Bytes),
         FieldSpec::new("dense.max_ann_disk_bytes", Scope::Daemon, Unit::Bytes),
+        FieldSpec::new("dense.max_ann_read_file_bytes", Scope::Daemon, Unit::Bytes),
         FieldSpec::new("dense.ann_keep_generations", Scope::Daemon, Unit::Count),
         FieldSpec::new("dense.query_cache_max_entries", Scope::Daemon, Unit::Count),
         FieldSpec::new("dense.query_cache_max_bytes", Scope::Daemon, Unit::Bytes),
@@ -284,6 +295,7 @@ impl SettingsSpec for DenseSpec {
             build_backoff: Duration::from_secs(30),
             vector_cache_max_bytes: 1024 * 1024 * 1024,
             max_ann_disk_bytes: 4 * 1024 * 1024 * 1024,
+            max_ann_read_file_bytes: super::ann_store::MAX_ANN_FILE_BYTES,
             ann_keep_generations: DEFAULT_ANN_KEEP_GENERATIONS,
             query_cache_max_entries: DEFAULT_QUERY_CACHE_MAX_ENTRIES,
             query_cache_max_bytes: DEFAULT_QUERY_CACHE_MAX_BYTES,
@@ -331,6 +343,10 @@ impl SettingsSpec for DenseSpec {
             settings.max_ann_disk_bytes = value;
             origins.set("dense.max_ann_disk_bytes", source)?;
         }
+        if let Some(value) = patch.max_ann_read_file_bytes {
+            settings.max_ann_read_file_bytes = value;
+            origins.set("dense.max_ann_read_file_bytes", source)?;
+        }
         if let Some(value) = patch.ann_keep_generations {
             settings.ann_keep_generations = value;
             origins.set("dense.ann_keep_generations", source)?;
@@ -365,6 +381,14 @@ impl SettingsSpec for DenseSpec {
         if settings.ann_keep_generations == 0 {
             return Err(Error::Admission {
                 message: "dense.ann_keep_generations must be positive".into(),
+            });
+        }
+        if !(1..=super::ann_store::MAX_ANN_FILE_BYTES).contains(&settings.max_ann_read_file_bytes) {
+            return Err(Error::Admission {
+                message: format!(
+                    "dense.max_ann_read_file_bytes must be between 1 and {}",
+                    super::ann_store::MAX_ANN_FILE_BYTES,
+                ),
             });
         }
         settings.query_cache_settings().validate()

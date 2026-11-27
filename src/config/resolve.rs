@@ -312,6 +312,9 @@ impl Resolution<ConfigSpec> {
         }
         self.settings.hybrid_cfg.cache.max_bytes = policy.settings().max_bytes;
         self.settings.vector_store = Some(policy.settings().clone());
+        self.settings
+            .ann_search
+            .get_or_insert(crate::hybrid::ann_settings::AnnSearchSettings::legacy_defaults());
         Ok(())
     }
 

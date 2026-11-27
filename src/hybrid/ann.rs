@@ -314,17 +314,23 @@ impl AnnIndex {
     /// # Errors
     /// The dump is unreadable or its actual graph differs from its metadata.
     pub fn load(slot: &AnnSlot) -> Result<Self> {
-        Self::load_inner(slot)
+        Self::load_inner(slot, super::ann_store::MAX_ANN_FILE_BYTES)
     }
 
     pub(super) fn load_with_cpu_pool(
         slot: &AnnSlot,
+        read_file_limit: u64,
         cpu_pool: Option<&super::cpu::CpuPool>,
     ) -> Result<Self> {
-        Self::in_pool(cpu_pool, || Self::load_inner(slot))
+        Self::in_pool(cpu_pool, || Self::load_inner(slot, read_file_limit))
     }
 
-    fn load_inner(slot: &AnnSlot) -> Result<Self> {
+    fn load_inner(slot: &AnnSlot, read_file_limit: u64) -> Result<Self> {
+        if !super::ann_store::dump_within_read_budget(&slot.dir, read_file_limit)? {
+            return Err(Error::Admission {
+                message: "ANN dump exceeds the configured read file limit".into(),
+            });
+        }
         let settings = AnnBuildSettings::new(slot.meta.m, slot.meta.ef_construction)?;
         let loaded = match load_loaded(&slot.dir, true) {
             Ok(loaded) => loaded,

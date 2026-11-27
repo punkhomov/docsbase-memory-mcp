@@ -169,7 +169,7 @@ fn dense_candidates<Guard>(
         |hashes| stream_hashes(context, query.index, model_id, hashes, vector, query.fetch);
     if context
         .ann_search
-        .is_some_and(|settings| query.fetch > settings.ef_max())
+        .is_some_and(|settings| !settings.admits_fetch(query.fetch))
     {
         let metadata = in_read_phase(context, source, admit, |reader, index| {
             require_search_index(index, Some(query.index))?;

@@ -313,6 +313,11 @@ pub fn draft_migration(
 fn verify_equivalent(before: &Config, after: &Config, cap: u64) -> Result<()> {
     let mut expected = before.clone();
     expected.hybrid_cfg.cache.max_bytes = cap;
+    // v2 resolves the legacy traversal explicitly. Its fetch policy is the
+    // same as an omitted v1 traversal.
+    expected
+        .ann_search
+        .get_or_insert_with(crate::hybrid::ann_settings::AnnSearchSettings::legacy_defaults);
     expected
         .vector_store
         .get_or_insert_with(crate::vector_cache::settings::VectorStoreSettings::owner_defaults)
