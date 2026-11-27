@@ -2289,3 +2289,45 @@ construction changes remain the next live execution work.
 
 Rust 1.100.0 Linux cli-full passed 1,961 tests and lean passed 1,622.
 Linux and Windows GNU cross-Clippy and formatting passed.
+
+## 2026-11-27 — CF5/CF11, перестройка по проверенному live plan
+
+Task CF5/CF11 reviewed live replacement: complete (CLI and provider-gated
+acceptance, fresh review and fix round). Native PR checks remain pending.
+
+Ruling: the control request grants and admits a detached catalog Index against
+an exact source and head review. The job keeps its native owner and original
+background deadline when the client disconnects. The CLI waits for a terminal
+record. Peers without job acknowledgement support refuse before admission.
+Polling checks immediately and caps subsequent sleep by the time left for a
+reply. Staging and publication recheck source bytes and selected identity.
+The existing CAS publishes the new index, terminal record and live settings.
+
+Ruling: real CLI Index replacement is observable through an existing search
+connection. The hermetic provider gate verifies refusal without a grant,
+old-head search during the request, refusal on a source edit, and compatible
+vector reuse on a reviewed retry. An ANN recipe change retires the memory
+entry and schedules bounded warm without an embedding request or an index
+replacement. Admission is reported separately from graph readiness.
+
+## 2026-11-27 — CF5, граница автоматического первого Index
+
+Task CF5 managed v5 first Index: complete (actual registration, missing-base
+admission and observed-head regressions). Native PR checks remain pending.
+
+Ruling: managed v5 automatic indexing requires the INSERT receipt and an
+absent catalog head. Existing registrations and an independently published
+head cannot fall through to replacement. Explicit Sync/Index remain the
+owners of recovery. Unmanaged compatibility behavior is retained.
+
+## 2026-11-27 — CF12 I45, сроки ожидания launcher
+
+Task CF12 launcher deadlines: complete (resolved daemon policy, real launcher
+and Stop consumer tests). Native PR checks remain pending.
+
+Ruling: Start waits with its captured policy. Stop uses one resolved duration
+for the exchange and process-exit wait. Unreadable configuration still permits
+Stop through standalone policy. Only Unix uses socket absence as evidence;
+Windows verifies process exit and displays null for the Unix-only parameter.
+The settings change no stored recipe. All 32 lifecycle and daemon-settings
+checks passed locally on Linux. Windows GNU focused Clippy passed.

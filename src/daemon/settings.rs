@@ -81,6 +81,12 @@ pub struct DaemonSettings {
     pub idle_grace_ms: u64,
     /// Owner policy: `control_timeout_ms`.
     pub control_timeout_ms: u64,
+    /// Launcher wait for the daemon endpoint.
+    pub start_timeout_ms: u64,
+    /// Stop command budget for exchanging the request and waiting for exit.
+    pub stop_timeout_ms: u64,
+    /// Unix stop may return after observing an absent socket for this long.
+    pub no_listener_timeout_ms: u64,
     /// Owner policy: `poll_interval_ms`.
     pub poll_interval_ms: u64,
     /// Owner policy: `janitor_interval_ms`.
@@ -110,6 +116,9 @@ struct EffectiveDaemonPolicy<'a> {
     max_blocking_threads: usize,
     idle_grace_ms: u64,
     control_timeout_ms: u64,
+    start_timeout_ms: u64,
+    stop_timeout_ms: u64,
+    no_listener_timeout_ms: Option<u64>,
     poll_interval_ms: u64,
     janitor_interval_ms: u64,
     reply_drain_ms: u64,
@@ -132,6 +141,9 @@ impl DaemonSettings {
             max_blocking_threads: self.max_blocking_threads,
             idle_grace_ms: self.idle_grace_ms,
             control_timeout_ms: self.control_timeout_ms,
+            start_timeout_ms: self.start_timeout_ms,
+            stop_timeout_ms: self.stop_timeout_ms,
+            no_listener_timeout_ms: cfg!(unix).then_some(self.no_listener_timeout_ms),
             poll_interval_ms: self.poll_interval_ms,
             janitor_interval_ms: self.janitor_interval_ms,
             reply_drain_ms: self.reply_drain_ms,
@@ -172,6 +184,12 @@ pub struct DaemonPatch {
     pub idle_grace_ms: Option<u64>,
     /// Explicit `control_timeout_ms` override.
     pub control_timeout_ms: Option<u64>,
+    /// Explicit launcher readiness timeout.
+    pub start_timeout_ms: Option<u64>,
+    /// Explicit stop operation timeout.
+    pub stop_timeout_ms: Option<u64>,
+    /// Explicit Unix stop timeout for an absent listener.
+    pub no_listener_timeout_ms: Option<u64>,
     /// Explicit `poll_interval_ms` override.
     pub poll_interval_ms: Option<u64>,
     /// Explicit `janitor_interval_ms` override.
@@ -200,6 +218,9 @@ impl DaemonSpec {
         max_blocking_threads: 512,
         idle_grace_ms: 5000,
         control_timeout_ms: 2000,
+        start_timeout_ms: 10000,
+        stop_timeout_ms: 15000,
+        no_listener_timeout_ms: 2000,
         poll_interval_ms: 50,
         janitor_interval_ms: 500,
         reply_drain_ms: 5000,
@@ -219,7 +240,7 @@ impl DaemonSpec {
         };
         let identity = |settings: &DaemonSettings| {
             Self::validate(settings, &Capabilities::current())?;
-            policy_identity("daemon-policy-v1", &settings.effective_policy())
+            policy_identity("daemon-policy-v2", &settings.effective_policy())
         };
         let mut assessment = runtime_assessment(
             "daemon",
@@ -300,34 +321,21 @@ impl DaemonSpec {
             serde_json::json!(settings.max_blocking_threads),
             None,
         )?;
+        for (key, milliseconds) in [
+            ("daemon.idle_grace_ms", settings.idle_grace_ms),
+            ("daemon.control_timeout_ms", settings.control_timeout_ms),
+            ("daemon.start_timeout_ms", settings.start_timeout_ms),
+            ("daemon.stop_timeout_ms", settings.stop_timeout_ms),
+            ("daemon.poll_interval_ms", settings.poll_interval_ms),
+            ("daemon.janitor_interval_ms", settings.janitor_interval_ms),
+            ("daemon.reply_drain_ms", settings.reply_drain_ms),
+            ("daemon.drain_poll_ms", settings.drain_poll_ms),
+        ] {
+            view.push(key, milliseconds.into(), None)?;
+        }
         view.push(
-            "daemon.idle_grace_ms",
-            serde_json::json!(settings.idle_grace_ms),
-            None,
-        )?;
-        view.push(
-            "daemon.control_timeout_ms",
-            serde_json::json!(settings.control_timeout_ms),
-            None,
-        )?;
-        view.push(
-            "daemon.poll_interval_ms",
-            serde_json::json!(settings.poll_interval_ms),
-            None,
-        )?;
-        view.push(
-            "daemon.janitor_interval_ms",
-            serde_json::json!(settings.janitor_interval_ms),
-            None,
-        )?;
-        view.push(
-            "daemon.reply_drain_ms",
-            serde_json::json!(settings.reply_drain_ms),
-            None,
-        )?;
-        view.push(
-            "daemon.drain_poll_ms",
-            serde_json::json!(settings.drain_poll_ms),
+            "daemon.no_listener_timeout_ms",
+            serde_json::json!(cfg!(unix).then_some(settings.no_listener_timeout_ms)),
             None,
         )?;
         Ok(())
@@ -354,6 +362,13 @@ impl SettingsSpec for DaemonSpec {
         FieldSpec::new("daemon.idle_grace_ms", Scope::Daemon, Unit::Milliseconds),
         FieldSpec::new(
             "daemon.control_timeout_ms",
+            Scope::Daemon,
+            Unit::Milliseconds,
+        ),
+        FieldSpec::new("daemon.start_timeout_ms", Scope::Daemon, Unit::Milliseconds),
+        FieldSpec::new("daemon.stop_timeout_ms", Scope::Daemon, Unit::Milliseconds),
+        FieldSpec::new(
+            "daemon.no_listener_timeout_ms",
             Scope::Daemon,
             Unit::Milliseconds,
         ),
@@ -439,6 +454,18 @@ impl SettingsSpec for DaemonSpec {
             settings.control_timeout_ms = value;
             origins.set("daemon.control_timeout_ms", source)?;
         }
+        if let Some(value) = patch.start_timeout_ms {
+            settings.start_timeout_ms = value;
+            origins.set("daemon.start_timeout_ms", source)?;
+        }
+        if let Some(value) = patch.stop_timeout_ms {
+            settings.stop_timeout_ms = value;
+            origins.set("daemon.stop_timeout_ms", source)?;
+        }
+        if let Some(value) = patch.no_listener_timeout_ms {
+            settings.no_listener_timeout_ms = value;
+            origins.set("daemon.no_listener_timeout_ms", source)?;
+        }
         if let Some(value) = patch.poll_interval_ms {
             settings.poll_interval_ms = value;
             origins.set("daemon.poll_interval_ms", source)?;
@@ -510,6 +537,13 @@ impl SettingsSpec for DaemonSpec {
             (
                 "daemon.control_timeout_ms",
                 settings.control_timeout_ms,
+                false,
+            ),
+            ("daemon.start_timeout_ms", settings.start_timeout_ms, false),
+            ("daemon.stop_timeout_ms", settings.stop_timeout_ms, false),
+            (
+                "daemon.no_listener_timeout_ms",
+                settings.no_listener_timeout_ms,
                 false,
             ),
             ("daemon.poll_interval_ms", settings.poll_interval_ms, false),

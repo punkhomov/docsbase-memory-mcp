@@ -11,7 +11,7 @@ use crate::daemon::settings::DaemonProfile;
 use crate::error::{Error, Result};
 use crate::index::async_job::catalog_sync::BuildContext;
 use crate::index::{
-    generation_job::GenerationJob,
+    generation_job::{GenerationBase, GenerationJob},
     job::{CaptureBudget, JobStats},
     outcome,
 };
@@ -136,7 +136,7 @@ impl Target {
         })? {
             return Ok(serde_json::json!({ "project_id": project_id, "stats": stats }));
         }
-        let prepared = job.stage(&mut capture, None)?;
+        let prepared = job.stage(&mut capture, GenerationBase::Observe)?;
         operation.check()?;
         let stats = prepared.publish(|commit| {
             self.with_current_recipe(&config_dir, &recipe, operation, || {

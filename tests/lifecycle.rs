@@ -164,6 +164,145 @@ fn first_start_creates_daemon() {
 }
 
 #[test]
+fn launcher_start_timeout_comes_from_global_config() {
+    const CHILD: &str = "DOCSBASE_TEST_LAUNCH_TIMEOUT_CHILD";
+    let test_binary = std::env::current_exe().unwrap();
+    if let Some(cache) = std::env::var_os(CHILD) {
+        // The test harness passed `serve --detached` exits without opening a
+        // listener, so this exercises the real launcher wait without a daemon.
+        let error = ensure_daemon_with(Path::new(&cache), Some(&test_binary)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("daemon did not start within 35ms"),
+            "{error}"
+        );
+        return;
+    }
+
+    let cache = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    fs::write(
+        config.path().join("config.toml"),
+        "config_version = 2\n[daemon]\nstart_timeout_ms = 35\n",
+    )
+    .unwrap();
+    assert_cmd::Command::new(test_binary)
+        .args(["--exact", "launcher_start_timeout_comes_from_global_config"])
+        .env(CHILD, cache.path())
+        .env("DOCSBASE_CONFIG_DIR", config.path())
+        .timeout(Duration::from_secs(5))
+        .assert()
+        .success();
+}
+
+#[test]
+fn launcher_stop_timeout_bounds_an_unanswered_native_exchange() {
+    let env = Env::new();
+    let config = TempDir::new().unwrap();
+    let path = config.path().join("config.toml");
+    fs::write(
+        &path,
+        "config_version = 2\n[daemon]\nstop_timeout_ms = 175\n",
+    )
+    .unwrap();
+    let endpoint = write_live_state(&env);
+    let _listener = platform::bind_blocking(&env.transport, &endpoint).unwrap();
+
+    let view = env
+        .cli()
+        .current_dir(env.cache())
+        .env("DOCSBASE_CONFIG_DIR", config.path())
+        .args(["config", "effective"])
+        .output()
+        .unwrap();
+    assert!(view.status.success(), "{view:?}");
+    let view: serde_json::Value = serde_json::from_slice(&view.stdout).unwrap();
+    for (key, value, source) in [
+        (
+            "daemon.start_timeout_ms",
+            serde_json::json!(10000),
+            "defaults",
+        ),
+        ("daemon.stop_timeout_ms", serde_json::json!(175), "global"),
+        (
+            "daemon.no_listener_timeout_ms",
+            serde_json::json!(cfg!(unix).then_some(2000)),
+            "defaults",
+        ),
+    ] {
+        let row = view["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .unwrap();
+        assert_eq!(row["value"], value);
+        assert_eq!(row["source"]["kind"], source);
+        assert_eq!(row["unit"], "milliseconds");
+        assert_eq!(row["scope"], "daemon");
+    }
+
+    let mut stop = assert_cmd::Command::from_std(env.cli());
+    let result = stop
+        .env("DOCSBASE_CONFIG_DIR", config.path())
+        .args(["daemon", "stop"])
+        .timeout(Duration::from_secs(5))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+    assert!(stderr.contains("did not stop within 175ms"), "{stderr}");
+    assert!(env.cache().join("state/daemon.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn launcher_no_listener_timeout_can_finish_before_stop_deadline() {
+    let env = Env::new();
+    let config = TempDir::new().unwrap();
+    let path = config.path().join("config.toml");
+    write_live_state(&env);
+    for (no_listener, success) in [(25, true), (750, false)] {
+        fs::write(
+            &path,
+            format!("config_version = 2\n[daemon]\nstop_timeout_ms = 500\nno_listener_timeout_ms = {no_listener}\n"),
+        )
+        .unwrap();
+        let mut stop = assert_cmd::Command::from_std(env.cli());
+        let result = stop
+            .env("DOCSBASE_CONFIG_DIR", config.path())
+            .args(["daemon", "stop"])
+            .timeout(Duration::from_secs(5))
+            .assert();
+        if success {
+            result.success();
+        } else {
+            let result = result.failure();
+            let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+            assert!(stderr.contains("did not stop within 500ms"), "{stderr}");
+        }
+        assert!(env.cache().join("state/daemon.json").exists());
+    }
+}
+
+fn write_live_state(env: &Env) -> platform::Endpoint {
+    let endpoint = platform::daemon_endpoint(env.cache());
+    let state_dir = env.cache().join("state");
+    fs::create_dir(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("daemon.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "pid": std::process::id(), "socket": endpoint,
+            "build_id": docsbase_memory::ipc::protocol::build_id(),
+            "schema_version": 5, "cache_root": env.cache(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    endpoint
+}
+
+#[test]
 fn second_start_reuses() {
     let env = Env::new();
     let first = env.start();

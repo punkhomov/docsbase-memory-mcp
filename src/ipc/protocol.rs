@@ -189,6 +189,9 @@ pub enum Request {
         path: PathBuf,
         plan_id: String,
         allow_remote: bool,
+        /// The caller will follow a nonterminal indexed-job acknowledgement.
+        #[serde(default)]
+        follow_job: bool,
     },
     /// Graceful daemon shutdown request.
     StopDaemon,

@@ -73,11 +73,28 @@ pub(crate) struct LiveProjectChange {
 }
 
 impl LiveProjectChange {
+    pub(crate) fn replaces_index(&self, action: &Action) -> bool {
+        self.rebuilds_artifact(action, "project_index")
+    }
+
+    pub(crate) fn rebuilds_ann(&self, action: &Action) -> bool {
+        self.rebuilds_artifact(action, "ann_graph")
+    }
+
+    fn rebuilds_artifact(&self, action: &Action, component: &str) -> bool {
+        action.effect == Effect::Rebuild
+            && matches!(&action.resource, ResourceId::Artifact(artifact)
+                if artifact.project_id == Some(self.reviewed.base.project_id)
+                    && artifact.component == component)
+    }
+
     fn supports(&self, action: &Action) -> bool {
-        self.active.ann_build == self.config.ann_build
-            && self.config.hybrid_cfg.providers_compiled()
-            && action.effect == Effect::ReconfigureRuntime
-            && matches!(&action.resource, ResourceId::Runtime(resource) if resource == "project_runtime")
+        self.config.hybrid_cfg.providers_compiled()
+            && (self.replaces_index(action)
+                || self.rebuilds_artifact(action, "document_vectors")
+                || self.rebuilds_ann(action)
+                || (action.effect == Effect::ReconfigureRuntime
+                    && matches!(&action.resource, ResourceId::Runtime(resource) if resource == "project_runtime")))
     }
 }
 

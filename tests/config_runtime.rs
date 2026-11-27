@@ -80,8 +80,11 @@ impl Env {
     }
 
     fn start_daemon(&mut self) {
-        let child = self
-            .cmd()
+        self.start_daemon_with(self.cmd());
+    }
+
+    fn start_daemon_with(&mut self, mut command: Command) {
+        let child = command
             .args(["serve", "--detached", "--grace-ms", "3000"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::inherit())
@@ -1085,6 +1088,119 @@ fn v2_live_config_applies_only_the_reviewed_project_runtime() {
         .unwrap();
     assert_eq!(refused.status.code(), Some(5));
     assert_eq!(env.run_json(&["config", "plan", "--live"]), restart);
+}
+
+#[test]
+fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
+    let mut env = Env::new(&[("guide.md", "reviewedliveindexwidget")]);
+    let initial = env.run_json(&["index"]);
+    env.start_daemon();
+    let project_id = initial["project_id"].as_i64().unwrap();
+    let selected = || -> i64 {
+        let registry = rusqlite::Connection::open_with_flags(
+            env.cache().join(docsbase_memory::store::DB_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        registry
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id = ?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let original_generation = selected();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let reviewed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(reviewed["blockers"], serde_json::json!([]));
+    let replacement = reviewed["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["resource"]["value"]["component"] == "project_index")
+        .expect("reviewed project index action");
+    assert_eq!(replacement["effect"], "rebuild");
+    let mut old_client = env.client();
+    old_client.handshake_registry().unwrap();
+    let old_request = serde_json::from_value(serde_json::json!({
+        "method": "ApplyProjectConfig", "params": {
+            "path": env.root(), "plan_id": reviewed["plan_id"], "allow_remote": false,
+        }
+    }))
+    .unwrap();
+    let docsbase_memory::ipc::protocol::Response::ToolResult { value: refused } =
+        old_client.call(old_request).unwrap()
+    else {
+        panic!("missing apply status for client without job acknowledgement support");
+    };
+    assert_eq!(refused["apply_status"], 5);
+    assert_eq!(selected(), original_generation);
+
+    let applied = env.run_json(&[
+        "config",
+        "apply",
+        "--live",
+        "--plan-id",
+        reviewed["plan_id"].as_str().unwrap(),
+    ]);
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["plan_id"], reviewed["plan_id"]);
+    assert_eq!(applied["project_id"], project_id);
+    assert_eq!(applied["stats"]["docs"], 1);
+    assert_ne!(selected(), original_generation);
+
+    let installed = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(installed["actions"], serde_json::json!([]));
+    assert_eq!(installed["blockers"], serde_json::json!([]));
+    assert_eq!(
+        search(&mut client, "reviewedliveindexwidget"),
+        vec!["guide.md"]
+    );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_live_config_apply_requires_remote_grant() {
+    let mut env = Env::new(&[("guide.md", "reviewedlivegrantwidget")]);
+    env.run_json(&["index"]);
+    let mut daemon = env.cmd();
+    daemon.env_remove("OPENROUTER_API_KEY");
+    env.start_daemon_with(daemon);
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    )
+    .unwrap();
+    let reviewed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(reviewed["blockers"], serde_json::json!([]));
+    assert_eq!(reviewed["required_grants"], serde_json::json!(["remote"]));
+    let refused = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            reviewed["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(5), "{stderr}");
+    assert!(refused.stdout.is_empty(), "{refused:?}");
+    assert!(!stderr.contains("OPENROUTER_API_KEY"), "{stderr}");
+    assert!(!env.cache().join("vectors.db").exists());
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), reviewed);
 }
 
 #[cfg(not(feature = "hybrid-remote"))]

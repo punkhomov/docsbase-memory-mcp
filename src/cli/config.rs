@@ -1,6 +1,15 @@
 //! Configuration inspection and explicit application of a reviewed plan.
+use anyhow::Context as _;
 use clap::{Subcommand, ValueEnum};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use crate::ipc::{
+    async_client::{AsyncClient, within_operation},
+    client::{Client, IO_TIMEOUT},
+    protocol::{self, Request, Response},
+};
 
 mod apply;
 pub(super) mod startup;
@@ -139,9 +148,10 @@ pub(super) fn run(
             allow_remote,
             live,
         } => {
+            let started = Instant::now();
             let paths = ProjectPaths::resolve(path.as_deref())?;
             if *live {
-                live_apply(paths.cache, paths.root, plan_id, *allow_remote)
+                live_apply(paths.cache, paths.root, plan_id, *allow_remote, started)
             } else {
                 apply::run(paths, plan_id, *allow_remote, db)
             }
@@ -191,16 +201,19 @@ pub(super) fn run(
 }
 
 fn live_plan(cache: PathBuf, root: PathBuf, check: bool) -> anyhow::Result<()> {
-    use crate::ipc::protocol::{self, Request};
-    let result = live_request(
-        cache,
-        Request::InspectProjectConfig {
-            protocol_version: protocol::PROTOCOL_VERSION,
-            build_id: protocol::build_id(),
-            path: root,
-        },
-        false,
-    )?;
+    let result = super::with_transport(move |transport| {
+        let mut client = Client::try_connect(&transport, &cache)
+            .context(CheckStatus::Unavailable)?
+            .ok_or(CheckStatus::DaemonUnavailable)?;
+        let response = client
+            .call(Request::InspectProjectConfig {
+                protocol_version: protocol::PROTOCOL_VERSION,
+                build_id: protocol::build_id(),
+                path: root,
+            })
+            .context(CheckStatus::Unavailable)?;
+        live_reply(response)
+    })?;
     let plan = result
         .get("plan")
         .filter(|value| value["basis"] == "live")
@@ -223,60 +236,135 @@ fn live_apply(
     root: PathBuf,
     plan_id: &str,
     allow_remote: bool,
+    started: Instant,
 ) -> anyhow::Result<()> {
-    let result = live_request(
-        cache,
-        crate::ipc::protocol::Request::ApplyProjectConfig {
-            path: root,
-            plan_id: plan_id.to_owned(),
-            allow_remote,
-        },
-        true,
-    )?;
-    match result["apply_status"].as_u64() {
-        Some(0) => {
-            println!("{}", serde_json::to_string(&result)?);
-            Ok(())
-        }
-        Some(4) => Err(CheckStatus::Stale.into()),
-        Some(5) => Err(CheckStatus::Unavailable.into()),
-        _ => anyhow::bail!("invalid live config apply status"),
-    }
+    let result = super::with_transport(move |transport| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build live configuration apply runtime")?;
+        runtime.block_on(async {
+            let mut client =
+                tokio::time::timeout(IO_TIMEOUT, AsyncClient::connect(&transport, &cache))
+                    .await
+                    .map_err(|_| CheckStatus::DaemonUnavailable)?
+                    .map_err(|_| CheckStatus::DaemonUnavailable)?;
+            tokio::time::timeout(IO_TIMEOUT, client.handshake_registry())
+                .await
+                .context(CheckStatus::Unavailable)?
+                .context(CheckStatus::Unavailable)?;
+            let response = tokio::time::timeout(
+                IO_TIMEOUT,
+                client.call(Request::ApplyProjectConfig {
+                    path: root,
+                    plan_id: plan_id.to_owned(),
+                    allow_remote,
+                    follow_job: true,
+                }),
+            )
+            .await
+            .context(CheckStatus::Unavailable)?
+            .context(CheckStatus::Unavailable)?;
+            let result = live_reply(response)?;
+            match result["apply_status"].as_u64() {
+                Some(0) => complete_live_apply(&mut client, plan_id, started, result).await,
+                Some(4) => Err(CheckStatus::Stale.into()),
+                Some(5) => Err(CheckStatus::Unavailable.into()),
+                _ => anyhow::bail!("invalid live config apply status"),
+            }
+        })
+    })?;
+    println!("{result}");
+    Ok(())
 }
 
-fn live_request(
-    cache: PathBuf,
-    request: crate::ipc::protocol::Request,
-    handshake: bool,
-) -> anyhow::Result<serde_json::Value> {
-    use crate::ipc::{client::Client, protocol::Response};
-    super::with_transport(move |transport| {
-        let mut client = Client::try_connect(&transport, &cache)
-            .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?
-            .ok_or(CheckStatus::DaemonUnavailable)?;
-        if handshake {
-            client
-                .handshake_registry()
-                .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?;
+async fn complete_live_apply(
+    client: &mut AsyncClient,
+    plan_id: &str,
+    started: Instant,
+    mut result: Value,
+) -> anyhow::Result<Value> {
+    use crate::{hybrid::work::Cancellation, search::operation::SearchOperation};
+
+    anyhow::ensure!(
+        result["plan_id"] == plan_id && result["applied"].is_boolean(),
+        "invalid live config apply reply"
+    );
+    let Some(job) = result.get_mut("job").map(Value::take) else {
+        anyhow::ensure!(
+            result.get("timeout_ms").is_none() && result.get("poll_ms").is_none(),
+            "live config apply reply missing job"
+        );
+        return Ok(result);
+    };
+    anyhow::ensure!(
+        result["applied"] == false,
+        "invalid live config apply job acknowledgement"
+    );
+    let job_id = job["job_id"]
+        .as_i64()
+        .filter(|&id| id > 0)
+        .context("invalid live config apply job ID")?;
+    let project_id = job["project_id"]
+        .as_i64()
+        .filter(|&id| id > 0)
+        .context("invalid live config apply project ID")?;
+    let timeout = Duration::from_millis(
+        result["timeout_ms"]
+            .as_u64()
+            .filter(|&ms| ms > 0)
+            .context("invalid live config apply timeout")?,
+    );
+    let poll = Duration::from_millis(
+        result["poll_ms"]
+            .as_u64()
+            .filter(|&ms| ms > 0)
+            .context("invalid live config apply poll interval")?,
+    );
+    let operation = SearchOperation::with_timeout(started, timeout, Cancellation::new())
+        .with_context(|| format!("wait for live configuration apply job {job_id}"))?;
+    let finished = within_operation(
+        &operation,
+        super::sync_command::await_job(client, &operation, poll, job),
+    )
+    .await
+    .with_context(|| format!("wait for live configuration apply job {job_id}"))?;
+    anyhow::ensure!(
+        finished["job_id"] == job_id && finished["project_id"] == project_id,
+        "unexpected identity for live configuration apply job {job_id}"
+    );
+    match finished["state"].as_str() {
+        Some("done") => {}
+        Some("error") => {
+            let error = finished["stats"]["error"]
+                .as_str()
+                .unwrap_or("unknown error");
+            anyhow::bail!("live configuration apply job {job_id} failed ({error})");
         }
-        let response = client
-            .call(request)
-            .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?;
-        match response {
-            Response::ToolResult { value } => Ok(value),
-            Response::Error {
-                code,
-                message,
-                instruction,
-            } => Err(anyhow::Error::from(crate::error::Error::from_mcp_code(
-                code,
-                message,
-                instruction,
-            ))
-            .context(CheckStatus::Unavailable)),
-            Response::Hello { .. } => anyhow::bail!("unexpected live configuration reply"),
-        }
-    })
+        _ => anyhow::bail!("unexpected state for live configuration apply job {job_id}"),
+    }
+    let stats: crate::index::job::JobStats = serde_json::from_value(finished["stats"].clone())
+        .context("invalid live config apply job statistics")?;
+    Ok(
+        json!({"apply_status": 0, "applied": true, "plan_id": plan_id, "project_id": project_id, "stats": stats}),
+    )
+}
+
+fn live_reply(response: Response) -> anyhow::Result<Value> {
+    match response {
+        Response::ToolResult { value } => Ok(value),
+        Response::Error {
+            code,
+            message,
+            instruction,
+        } => Err(anyhow::Error::from(crate::error::Error::from_mcp_code(
+            code,
+            message,
+            instruction,
+        ))
+        .context(CheckStatus::Unavailable)),
+        Response::Hello { .. } => anyhow::bail!("unexpected live configuration reply"),
+    }
 }
 
 struct ProjectPaths {

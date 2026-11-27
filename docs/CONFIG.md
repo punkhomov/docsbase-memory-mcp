@@ -798,18 +798,35 @@ inspection checks file presence, lengths and provenance without loading HNSW.
 Unconfirmed slots and absent runtime provenance report `unknown`.
 
 In live mode `--check` returns 3 for a reported change or restart and 5 when
-observation is blocked. Apply a live project runtime plan by its exact ID.
+observation is blocked. Apply a live project plan by its exact ID.
 
 ```sh
 docsbase config apply ./project --live --plan-id <id>
+docsbase config apply ./project --live --plan-id <id> --allow-remote
 ```
 
 The daemon checks the reviewed sources, active runtime and published index
-revision before changing project settings. You can apply changes such as
-lexical scoring and ANN traversal while retaining the same indexed data.
-Stale reviews exit with code 4. Plans requiring a daemon restart or an
-unavailable executor exit with code 5. Use a stopped plan with `config apply`
-for an offline replacement.
+revision before applying project settings. Lexical scoring and ANN traversal
+changes keep the selected index and compatible graph. Chunking and embedding
+recipe changes use a bounded background Index job. The CLI waits for its
+terminal result. Connected clients can use the selected generation during
+preparation. A failed preparation leaves the previous generation selected.
+The new index and its runtime become visible together after publication.
+`--allow-remote` is required when preparation may request remote embeddings.
+An accepted task can finish after its CLI connection closes. Its ID is shown
+in diagnostics if the CLI times out while waiting.
+
+ANN construction policy changes keep the index and compatible embeddings.
+For a confirmed graph, apply retires the old resident entry and attempts a
+background warm. An ANN-only reply reports `ann_warm` as `scheduled` or
+`deferred`. Cold search can build the new recipe when vectors and capacity
+permit. Search can use exact matching before the replacement graph is ready.
+The warm reuses cached vectors and makes no embedding requests.
+
+Stale reviews at preflight exit with code 4. Plans requiring a daemon restart,
+a missing grant or an unavailable executor exit with code 5. A job that fails
+before publishing returns its terminal error. Use a stopped plan with
+`config apply` for offline replacement.
 
 ### Start after configuration changes
 
@@ -844,9 +861,20 @@ Explicit policies and dry-run planning report unsettled state without
 changing SQLite.
 
 The remote grant covers the reviewed startup work. Opening an indexed project
-on a managed daemon leaves vector repair to an explicit Index or Sync.
-Older catalog formats retain their ordinary startup when no policy flag is
-passed. Existing indexes require a v5 catalog for an explicit startup review.
+on a managed daemon leaves vector repair to an explicit Index or Sync. Setting
+`auto_index = true` opts a newly registered project into its first Index with
+its configured embedding policy. An existing v5 head or a concurrent first
+publication requires an explicit Index or Sync to replace it. Startup compares
+selected index recipes. An ANN-only edit is picked up by a subsequent RRF query
+from compatible cached vectors. Older catalog formats retain their ordinary
+startup when no policy flag is passed.
+
+The global `[daemon]` settings `start_timeout_ms` (10,000) and
+`stop_timeout_ms` (15,000) bound the launcher wait and Stop operation. Unix
+also uses `no_listener_timeout_ms` (2,000) for continuous socket absence during
+Stop. On Windows, Stop checks process exit and `config effective` displays
+`null` for the Unix-only value. Stop uses standalone timing if loading the
+configuration fails, so a config error still permits cleanup.
 
 ## Observed migration plan (CF4c2)
 

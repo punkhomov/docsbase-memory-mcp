@@ -885,7 +885,14 @@ impl Shared {
                     message: "another writer holds the project sync slot".into(),
                     instruction: Some("wait for the running index to finish".into()),
                 })?;
-            prepare_catalog_project_sync(&shared, project, epoch, false, revision, owner)
+            prepare_catalog_project_sync(
+                &shared,
+                project,
+                epoch,
+                CatalogSyncConfig::Current,
+                revision,
+                owner,
+            )
         });
         let context = request::run(capture, Some(operation)).await?;
         let revision = context.revision.clone();
@@ -2511,17 +2518,19 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
             path,
             plan_id,
             allow_remote,
+            follow_job,
         } => {
             if !peer.hello_done {
                 return (hello_required(), true);
             }
-            let result = live_config::apply(shared, scope, path, plan_id, allow_remote).await;
+            let result =
+                live_config::apply(shared, scope, path, plan_id, allow_remote, follow_job).await;
             (
                 result.map_or_else(
                     |error| error_response(&error),
                     |value| Response::ToolResult { value },
                 ),
-                true,
+                false,
             )
         }
         Request::BindReadOnly { pid, project_id } => {
@@ -3232,6 +3241,17 @@ async fn start_catalog_sync(
         Err(existing) => return Ok(existing),
     };
 
+    run_catalog_sync(shared, service, context, activity, operation, detached).await
+}
+
+async fn run_catalog_sync(
+    shared: &Arc<Shared>,
+    service: &super::job_service::JobService,
+    context: catalog_sync::Context,
+    activity: Arc<Activity>,
+    operation: crate::search::operation::SearchOperation,
+    detached: bool,
+) -> Result<Value> {
     let project_id = context.build.project.id;
     let warm = (shared.website.is_none()
         && context.build.stages.ranking == Ranking::Rrf
@@ -3321,13 +3341,13 @@ impl CatalogAnnWarm {
         service: &super::job_service::JobService,
         operation: &crate::search::operation::SearchOperation,
         published: ObservedProjectIndex,
-    ) {
+    ) -> bool {
         let shutdown = service.shutdown_token();
         if shared.stopping.load(Ordering::SeqCst) || shutdown.is_cancelled() {
-            return;
+            return false;
         }
         let Ok(reservation) = shared.workers.reserve_background(operation) else {
-            return;
+            return false;
         };
         let owner = shared.clone();
         let activity = shared.activity.track();
@@ -3358,6 +3378,7 @@ impl CatalogAnnWarm {
                 eprintln!("warning: catalog ANN warm for project {project_id}: {error}");
             }
         }));
+        true
     }
 
     fn run(
@@ -3445,23 +3466,103 @@ fn capture_catalog_sync(
             message: "project sync is starting or retiring; retry sync".into(),
         });
     };
-    prepare_catalog_project_sync(shared, project, epoch, refresh, revision, owner).map(Ok)
+    let config = if refresh {
+        CatalogSyncConfig::Reload
+    } else {
+        CatalogSyncConfig::Current
+    };
+    prepare_catalog_project_sync(shared, project, epoch, config, revision, owner).map(Ok)
+}
+
+fn capture_catalog_first_index(shared: &Shared, project: Project) -> Result<catalog_sync::Context> {
+    let epoch = shared
+        .catalog_epoch
+        .ok_or_else(|| Error::internal("first index has no registry epoch"))?;
+    registry::ensure_root_present(&project)?;
+    let revision = shared.project_slot(project.id);
+    let owner = revision
+        .catalog_sync
+        .try_own()
+        .ok_or_else(crate::index::async_job::active_sync_conflict)?;
+    let mut context = prepare_catalog_project_sync(
+        shared,
+        project,
+        epoch,
+        CatalogSyncConfig::Current,
+        revision,
+        owner,
+    )?;
+    context.first_generation = true;
+    Ok(context)
+}
+
+// Captured plans retain reviewed source identity through provider work.
+enum CatalogSyncConfig {
+    Current,
+    Reload,
+    Reviewed(Box<crate::config::observe::LiveProjectChange>),
+}
+
+fn capture_reviewed_catalog_sync(
+    shared: &Shared,
+    project: Project,
+    change: crate::config::observe::LiveProjectChange,
+) -> Result<catalog_sync::Context> {
+    let epoch = shared
+        .catalog_epoch
+        .ok_or_else(|| Error::internal("catalog epoch absent"))?;
+    registry::ensure_root_present(&project)?;
+    let revision = shared.project_slot(project.id);
+    let owner = revision
+        .catalog_sync
+        .try_own()
+        .ok_or_else(crate::index::async_job::active_sync_conflict)?;
+    prepare_catalog_project_sync(
+        shared,
+        project,
+        epoch,
+        CatalogSyncConfig::Reviewed(Box::new(change)),
+        revision,
+        owner,
+    )
 }
 
 fn prepare_catalog_project_sync(
     shared: &Shared,
     project: Project,
     epoch: [u8; 16],
-    refresh: bool,
+    capture: CatalogSyncConfig,
     revision: ProjectSlot,
     owner: catalog_sync::Owner,
 ) -> Result<catalog_sync::Context> {
+    let refresh = !matches!(capture, CatalogSyncConfig::Current);
     let active = shared.project_config(&project)?;
-    let (config, stages) = if refresh {
-        shared.stage_catalog_config(&project, &active)?
-    } else {
-        shared.project_runtime_for_search(&project)?
+    let (config, stages, reviewed) = match capture {
+        CatalogSyncConfig::Current => {
+            let (config, stages) = shared.project_runtime_for_search(&project)?;
+            (config, stages, None)
+        }
+        CatalogSyncConfig::Reload => {
+            let (config, stages) = shared.stage_catalog_config(&project, &active)?;
+            (config, stages, None)
+        }
+        CatalogSyncConfig::Reviewed(change) => {
+            revision.check_config_revision(&change.active)?;
+            {
+                let reader = shared.readers.try_acquire()?;
+                if !change.reviewed.head.is_selected(reader.connection())? {
+                    return Err(Error::Admission {
+                        message: "reviewed catalog head changed before preparation; run config plan again".into(),
+                    });
+                }
+            }
+            change.reviewed.verify_sources()?;
+            let stages = Arc::new(shared.async_stages(&change.config)?);
+            catalog_stage_model(&change.config, &stages)?;
+            (change.config, stages, Some(Box::new(change.reviewed)))
+        }
     };
+    let reuse_unchanged = shared.website.is_none() && reviewed.is_none();
     let active_model = {
         let state = revision
             .state
@@ -3488,6 +3589,7 @@ fn prepare_catalog_project_sync(
                 Arc::clone(&stages),
                 source.clone(),
             )),
+            reviewed,
         })
     } else {
         None
@@ -3507,7 +3609,8 @@ fn prepare_catalog_project_sync(
         revision,
         owner,
         refresh,
-        reuse_unchanged: shared.website.is_none(),
+        reuse_unchanged,
+        first_generation: false,
     })
 }
 

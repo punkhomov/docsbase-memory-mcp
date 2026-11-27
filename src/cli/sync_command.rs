@@ -146,10 +146,15 @@ pub(super) async fn await_job(
     })?;
     while matches!(job["state"].as_str(), Some("queued" | "running")) {
         operation.check()?;
-        tokio::time::sleep(poll).await;
         job = client
             .call_tool("sync_status", json!({"job_id":id}))
             .await?;
+        if matches!(job["state"].as_str(), Some("queued" | "running")) {
+            // Leave time for another exchange when the poll interval is
+            // greater than the remaining command budget.
+            let wait = poll.min(operation.remaining()? / 2);
+            tokio::time::sleep(wait).await;
+        }
     }
     Ok(job)
 }

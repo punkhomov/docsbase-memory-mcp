@@ -1,4 +1,4 @@
-//! Read-only snapshot of a live project's configuration and selected artifacts.
+//! Reviewed configuration plans and publication for running projects.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
@@ -34,7 +34,8 @@ pub(super) async fn inspect(
             message: "restart the daemon with the same docsbase build before planning".into(),
         });
     }
-    control(shared, scope, move |shared, operation| {
+    let operation = inspection_operation(shared)?;
+    control(shared, scope, &operation, move |shared, operation| {
         report(shared, &path, operation)
     })
     .await
@@ -46,19 +47,89 @@ pub(super) async fn apply(
     path: PathBuf,
     plan_id: String,
     allow_remote: bool,
+    follow_job: bool,
 ) -> Result<serde_json::Value> {
-    control(shared, scope, move |shared, operation| {
-        apply_runtime(shared, &path, &plan_id, allow_remote, operation)
+    let started = Instant::now();
+    let inspection = inspection_operation(shared)?;
+    let reviewed_id = plan_id.clone();
+    let work = control(shared, scope, &inspection, move |shared, operation| {
+        prepare_apply(
+            shared,
+            &path,
+            &reviewed_id,
+            allow_remote,
+            follow_job,
+            operation,
+        )
     })
+    .await?;
+    let context = match work {
+        Apply::Reply(reply) => return Ok(reply),
+        Apply::Index(context) => *context,
+        Apply::Ann { warm, index } => {
+            let scheduled = shared.jobs.get().is_some_and(|service| {
+                shared
+                    .watch_operation()
+                    .is_ok_and(|operation| warm.schedule(shared, service, &operation, index))
+            });
+            return Ok(serde_json::json!({
+                "apply_status": 0,
+                "applied": true,
+                "plan_id": plan_id,
+                "ann_warm": if scheduled { "scheduled" } else { "deferred" },
+            }));
+        }
+    };
+    let service = shared
+        .jobs
+        .get()
+        .ok_or_else(|| unavailable("catalog index executor is unavailable"))?;
+    let timeout_ms = shared.global_config.remote.background_timeout_ms;
+    let operation = SearchOperation::with_timeout(
+        started,
+        Duration::from_millis(timeout_ms),
+        Cancellation::new(),
+    )?;
+    let mut cancel = request::CancelOnDrop(Some(operation.cancellation().clone()));
+    let job = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(inspection.deadline()),
+        super::run_catalog_sync(
+            shared,
+            service,
+            context,
+            Arc::clone(&scope.activity),
+            operation,
+            true,
+        ),
+    )
     .await
+    .map_err(|_| unavailable("live config index admission exceeded the control deadline"))??;
+    cancel.0 = None;
+    Ok(serde_json::json!({
+        "apply_status": 0,
+        "applied": false,
+        "plan_id": plan_id,
+        "job": job,
+        "timeout_ms": timeout_ms,
+        "poll_ms": shared.daemon_settings().poll_interval_ms,
+    }))
 }
 
-async fn control(
+enum Apply {
+    Reply(serde_json::Value),
+    Index(Box<crate::index::async_job::catalog_sync::Context>),
+    Ann {
+        warm: super::CatalogAnnWarm,
+        index: crate::store::registry_inspect::ObservedProjectIndex,
+    },
+}
+
+async fn control<T: Send + 'static>(
     shared: &Arc<Shared>,
     scope: &scoped::Scope,
-    execute: impl FnOnce(&Shared, &SearchOperation) -> Result<serde_json::Value> + Send + 'static,
-) -> Result<serde_json::Value> {
-    let operation = inspection_operation(shared)?;
+    operation: &SearchOperation,
+    execute: impl FnOnce(&Shared, &SearchOperation) -> Result<T> + Send + 'static,
+) -> Result<T> {
     let permit = tokio::time::timeout_at(
         tokio::time::Instant::from_std(operation.deadline()),
         shared.workers.control(),
@@ -70,7 +141,7 @@ async fn control(
     let worker = request::spawn(Some(permit), Some(Arc::clone(&scope.activity)), move || {
         execute(&shared, &work)
     });
-    request::run(worker, Some(&operation)).await
+    request::run(worker, Some(operation)).await
 }
 
 pub(super) fn inspection_operation(shared: &Shared) -> Result<SearchOperation> {
@@ -175,17 +246,22 @@ pub(super) fn snapshot(
     Ok((project, plan))
 }
 
-fn apply_runtime(
+fn prepare_apply(
     shared: &Shared,
     path: &Path,
     plan_id: &str,
     allow_remote: bool,
+    follow_job: bool,
     operation: &SearchOperation,
-) -> Result<serde_json::Value> {
+) -> Result<Apply> {
     use crate::config::bootstrap::{Entrypoint, EntrypointFacts};
 
     let (project, report) = snapshot(shared, path, operation)?;
-    let reply = |status, applied| serde_json::json!({"apply_status": status, "applied": applied, "plan_id": plan_id});
+    let reply = |status, applied| {
+        Apply::Reply(
+            serde_json::json!({"apply_status": status, "applied": applied, "plan_id": plan_id}),
+        )
+    };
     if report.plan.plan_id != plan_id {
         return Ok(reply(4, false));
     }
@@ -207,6 +283,21 @@ fn apply_runtime(
             "live configuration requires an explicit apply policy",
         ));
     };
+    let change = report
+        .live_change
+        .ok_or_else(|| unavailable("live project change is unavailable"))?;
+    let replace_index = report
+        .plan
+        .body
+        .actions
+        .iter()
+        .any(|action| change.replaces_index(action));
+    let rebuild_ann = report
+        .plan
+        .body
+        .actions
+        .iter()
+        .any(|action| change.rebuilds_ann(action));
     let review = ConsentReview::from_compiled(report.plan);
     if !matches!(
         review.evaluate(policy, GrantSet::new(allow_remote, false, false)),
@@ -214,15 +305,29 @@ fn apply_runtime(
     ) {
         return Ok(reply(5, false));
     }
-    let change = report
-        .live_change
-        .ok_or_else(|| unavailable("live project change is unavailable"))?;
-    if publish_runtime(shared, &project, change, operation, |config| {
+    if replace_index {
+        if !follow_job {
+            return Ok(reply(5, false));
+        }
+        let context = super::capture_reviewed_catalog_sync(shared, project, change)?;
+        return Ok(Apply::Index(Box::new(context)));
+    }
+    let index = change.reviewed.base;
+    let config = Arc::clone(&change.config);
+    let stages = publish_runtime(shared, &project, change, operation, |config| {
         shared.async_stages(config)
-    })? {
-        Ok(reply(0, true))
-    } else {
-        Ok(reply(4, false))
+    })?;
+    match stages {
+        Some(stages) if rebuild_ann => Ok(Apply::Ann {
+            warm: super::CatalogAnnWarm {
+                project,
+                config,
+                stages,
+            },
+            index,
+        }),
+        Some(_) => Ok(reply(0, true)),
+        None => Ok(reply(4, false)),
     }
 }
 
@@ -232,9 +337,9 @@ pub(super) fn publish_runtime(
     change: LiveProjectChange,
     operation: &SearchOperation,
     build_stages: impl FnOnce(&crate::config::Config) -> Result<crate::hybrid::HybridStages>,
-) -> Result<bool> {
+) -> Result<Option<Arc<crate::hybrid::HybridStages>>> {
     let Some(slot) = existing_slot(shared, project.id) else {
-        return Ok(false);
+        return Ok(None);
     };
     let config = change.config;
     operation.check()?;
@@ -247,7 +352,7 @@ pub(super) fn publish_runtime(
             .as_ref()
             .is_some_and(|active| Arc::ptr_eq(active, &change.active))
         {
-            return Ok(false);
+            return Ok(None);
         }
         state
             .search_stages
@@ -282,7 +387,7 @@ pub(super) fn publish_runtime(
             operation.check()?;
             let reader = shared.readers.try_acquire()?;
             if !change.reviewed.head.is_selected(reader.connection())? {
-                return Ok(false);
+                return Ok(None);
             }
             let installed =
                 project_index::with_catalog_pair(reader, project, |registry, local, index| {
@@ -303,11 +408,14 @@ pub(super) fn publish_runtime(
                         return Ok(None);
                     }
                     operation.check()?;
+                    if config.ann_build != change.active.ann_build {
+                        shared.dense.invalidate_memory(project.id);
+                    }
                     let old = publication.install(Arc::clone(&config), Arc::clone(&stages));
                     Ok(Some((publication.release_preparation(), old)))
                 })?;
             let Some((_reload, _old)) = installed else {
-                return Ok(false);
+                return Ok(None);
             };
             if let Some(runtime) = watch_runtime
                 && let Err(error) =
@@ -320,7 +428,7 @@ pub(super) fn publish_runtime(
                     project.id
                 );
             }
-            Ok(true)
+            Ok(Some(stages))
         },
     )
 }

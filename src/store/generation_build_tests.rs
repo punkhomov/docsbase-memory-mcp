@@ -553,7 +553,10 @@ impl RevisablePair {
             config: &config,
         };
         rebuild
-            .stage(&mut capture, None)?
+            .stage(
+                &mut capture,
+                crate::index::generation_job::GenerationBase::Observe,
+            )?
             .publish(|commit| commit.commit(admit))
     }
 }

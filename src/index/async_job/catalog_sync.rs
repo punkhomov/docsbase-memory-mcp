@@ -17,7 +17,7 @@ use crate::hybrid::{
     async_jobs::{self, EmbeddingBatch},
 };
 use crate::index::{
-    generation_job::GenerationJob,
+    generation_job::{GenerationBase, GenerationJob},
     job::{CaptureBudget, JobStats},
 };
 use crate::search::budget::PayloadBudget;
@@ -72,6 +72,7 @@ pub(crate) struct Context {
     pub(crate) owner: Owner,
     pub(crate) refresh: Option<RuntimeUpdate>,
     pub(crate) reuse_unchanged: bool,
+    pub(crate) first_generation: bool,
 }
 
 pub(crate) struct RuntimeUpdate {
@@ -80,6 +81,7 @@ pub(crate) struct RuntimeUpdate {
     pub(crate) global_path: Option<PathBuf>,
     pub(crate) watchers: Arc<crate::watch::Watchers>,
     pub(crate) watch_runtime: Arc<crate::watch::WatchRuntime>,
+    pub(crate) reviewed: Option<Box<ReviewedReplacement>>,
 }
 
 impl RuntimeUpdate {
@@ -92,7 +94,9 @@ impl RuntimeUpdate {
         let root = &context.project.canonical_root;
         with_index_config_write_locks(self.global_path.as_deref(), root, || {
             operation.check()?;
-            if Config::for_project(&self.global_config, root)? != *context.config {
+            if let Some(reviewed) = &self.reviewed {
+                reviewed.verify_sources()?;
+            } else if Config::for_project(&self.global_config, root)? != *context.config {
                 return Err(Error::Admission {
                     message: "project index configuration changed before publication; retry index"
                         .into(),
@@ -184,6 +188,7 @@ struct SyncPublication {
     _owner: Owner,
     refresh: Option<RuntimeUpdate>,
     reuse_unchanged: bool,
+    first_generation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +232,13 @@ impl SyncPublication {
 }
 
 impl Publication {
+    fn reviewed(&self) -> Option<&ReviewedReplacement> {
+        match self {
+            Self::Sync(sync) => sync.refresh.as_ref()?.reviewed.as_deref(),
+            Self::Direct(direct) => direct.reviewed.as_ref(),
+        }
+    }
+
     fn preparation_lease(&self, config: &Arc<Config>) -> Result<Option<RwLockReadGuard<'_, ()>>> {
         match self {
             Self::Sync(sync) => sync
@@ -258,6 +270,7 @@ impl IndexState {
             owner,
             refresh,
             reuse_unchanged,
+            first_generation,
         } = context;
         let db = open_index_registry(&build.cache, &build.settings, build.epoch)?;
         // Context holds the sole native owner slot through retirement. Any
@@ -281,6 +294,7 @@ impl IndexState {
             _owner: owner,
             refresh,
             reuse_unchanged,
+            first_generation,
         });
         self.catalog_job = Some(CatalogJob::new(build, publication));
         repo::mark_sync_running(db.connection(), id)?;
@@ -400,7 +414,8 @@ impl CatalogJob {
             return Ok(None);
         };
         let config = &self.context.config;
-        if !sync.reuse_unchanged || self.context.stages.embedder.is_some() {
+        if sync.first_generation || !sync.reuse_unchanged || self.context.stages.embedder.is_some()
+        {
             return Ok(None);
         }
         let watermark = sync.revision.source_watermark();
@@ -557,17 +572,18 @@ impl CatalogJob {
             observed: None,
         };
         drop(self.publication.preparation_lease(config)?);
-        let reviewed = match &self.publication {
-            Publication::Direct(direct) => direct.reviewed.as_ref(),
-            Publication::Sync(_) => None,
-        };
+        let reviewed = self.publication.reviewed();
         if let Some(reviewed) = reviewed {
             reviewed.verify_sources()?;
         }
-        let prepared = self
-            .context
-            .generation_job()
-            .stage(&mut capture, reviewed.map(|reviewed| reviewed.base))?;
+        let base = if let Some(reviewed) = reviewed {
+            GenerationBase::Reviewed(reviewed.base)
+        } else if matches!(&self.publication, Publication::Sync(sync) if sync.first_generation) {
+            GenerationBase::Missing
+        } else {
+            GenerationBase::Observe
+        };
+        let prepared = self.context.generation_job().stage(&mut capture, base)?;
         if let Some(reviewed) = reviewed {
             reviewed.verify_sources()?;
         }
@@ -896,6 +912,12 @@ impl CatalogJob {
         } else {
             (Some(sync.revision.catalog_publication(active)?), None)
         };
+        let reviewed = self.publication.reviewed();
+        let commit = if let Some(reviewed) = reviewed {
+            commit.with_reviewed_head(reviewed.head)
+        } else {
+            commit
+        };
         let result = commit.commit_with(
             || {
                 admit()?;
@@ -914,7 +936,13 @@ impl CatalogJob {
                 )?;
                 repo::finish_sync_job(conn, sync.id, SyncState::Done, Some(&record))
             },
-            &admit,
+            || {
+                admit()?;
+                if let Some(reviewed) = reviewed {
+                    reviewed.verify_sources()?;
+                }
+                Ok(())
+            },
             |result| {
                 if let Some(publication) = &publication {
                     match result {
