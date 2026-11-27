@@ -2172,11 +2172,19 @@ pub(super) fn project_entry_with_counts(
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
+    enqueue_sync_with_retention(db, project, repo::MAX_SYNC_JOBS)
+}
+
+pub(crate) fn enqueue_sync_with_retention(
+    db: &Db,
+    project: &Project,
+    max_sync_jobs: usize,
+) -> Result<(i64, bool)> {
     for _ in 0..3 {
         if let Some(id) = repo::create_sync_job(db.connection(), project.id)? {
             // Best effort: a prune failure must not strand a queued job with
             // no runner blocking later syncs (FR-17).
-            if let Err(err) = repo::prune_sync_jobs(db.connection(), project.id) {
+            if let Err(err) = repo::prune_sync_jobs_to(db.connection(), project.id, max_sync_jobs) {
                 eprintln!("warning: cannot prune sync jobs: {err}");
             }
             return Ok((id, true));

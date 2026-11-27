@@ -302,7 +302,11 @@ impl IndexState {
                 Some(r#"{"orphaned":true}"#),
             )?;
         }
-        let (id, created) = tools::enqueue_sync(&db, &build.project)?;
+        let (id, created) = tools::enqueue_sync_with_retention(
+            &db,
+            &build.project,
+            build.config.daemon.max_sync_jobs,
+        )?;
         if !created {
             return Err(super::active_sync_conflict());
         }

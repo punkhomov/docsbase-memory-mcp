@@ -217,7 +217,11 @@ impl IndexState {
                 return Err(crate::store::repo::db_error(error));
             }
             self.owns_sync = true;
-            if let Err(error) = repo::prune_sync_jobs(db.connection(), context.project.id) {
+            if let Err(error) = repo::prune_sync_jobs_to(
+                db.connection(),
+                context.project.id,
+                context.config.daemon.max_sync_jobs,
+            ) {
                 eprintln!("warning: cannot prune sync jobs: {error}");
             }
         }

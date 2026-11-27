@@ -541,6 +541,23 @@ independent of persisted index formats. With the Shared daemon stopped,
 `status` and `list` use their standalone SQLite policy even if `[store]`
 or `[read_pool]` is invalid. The Website profile still requires the daemon.
 
+### Daemon job history and log rotation
+
+```toml
+[daemon]
+max_sync_jobs = 50
+log_rotate_bytes = 8388608
+```
+
+Both settings are positive global values. After enqueueing a Sync job, the
+daemon keeps the newest `max_sync_jobs` job receipts per project. An active
+job takes a slot in that count and is always preserved. The policy applies
+after daemon restart and leaves indexed data intact.
+
+The autostart launcher rotates `logs/daemon.log` to `daemon.log.old` before
+spawning a daemon when the file exceeds `log_rotate_bytes`. It keeps one
+rotated copy. The separate conflict log keeps its fixed 8 MiB threshold.
+
 ### Watcher debounce
 
 Shared starts watchers for indexed projects by default. To disable them for

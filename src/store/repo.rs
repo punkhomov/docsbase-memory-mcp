@@ -708,8 +708,8 @@ pub fn has_pending_docs(conn: &Connection, project_id: i64) -> Result<bool> {
     .map_err(db_error)
 }
 
-/// Finished sync jobs retained per project (T46).
-pub const MAX_SYNC_JOBS: usize = 50;
+/// Recent sync job receipts retained per project by default (T46).
+pub const MAX_SYNC_JOBS: usize = crate::daemon::settings::DaemonSpec::DEFAULTS.max_sync_jobs;
 
 /// Drops finished (`done`/`error`) jobs older than the newest
 /// [`MAX_SYNC_JOBS`] rows of a project; active jobs are never touched.
@@ -717,7 +717,15 @@ pub const MAX_SYNC_JOBS: usize = 50;
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn prune_sync_jobs(conn: &Connection, project_id: i64) -> Result<usize> {
-    let keep = i64::try_from(MAX_SYNC_JOBS).unwrap_or(i64::MAX);
+    prune_sync_jobs_to(conn, project_id, MAX_SYNC_JOBS)
+}
+
+pub(crate) fn prune_sync_jobs_to(conn: &Connection, project_id: i64, keep: usize) -> Result<usize> {
+    let offset = i64::try_from(keep)
+        .ok()
+        .filter(|&count| count > 0)
+        .ok_or_else(|| Error::internal("invalid Sync job retention limit"))?
+        - 1;
     conn.execute(
         "DELETE FROM sync_jobs
          WHERE project_id = ?1
@@ -732,7 +740,7 @@ pub fn prune_sync_jobs(conn: &Connection, project_id: i64) -> Result<usize> {
             project_id,
             SyncState::Done.as_str(),
             SyncState::Error.as_str(),
-            keep - 1
+            offset
         ],
     )
     .map_err(db_error)

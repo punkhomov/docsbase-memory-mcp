@@ -100,7 +100,7 @@ fn global_daemon_fields_have_owner_units_scope_and_provenance() {
     let path = dir.path().join("config.toml");
     std::fs::write(
         &path,
-        "[daemon]\nprofile={mode='shared'}\nidle_grace_ms=0\nmax_connections=3\nsearch_pending=0\n",
+        "[daemon]\nprofile={mode='shared'}\nidle_grace_ms=0\nmax_connections=3\nsearch_pending=0\nmax_sync_jobs=2\nlog_rotate_bytes=32\n",
     )
     .unwrap();
     let snapshot = docsbase_memory::config::resolve::global_from(dir.path()).unwrap();
@@ -111,6 +111,8 @@ fn global_daemon_fields_have_owner_units_scope_and_provenance() {
         "daemon.profile",
         "daemon.idle_grace_ms",
         "daemon.max_connections",
+        "daemon.max_sync_jobs",
+        "daemon.log_rotate_bytes",
     ] {
         let origin = snapshot.provenance().get(key).unwrap();
         assert_eq!(origin.source, SourceId::Global(path.clone()));
@@ -125,14 +127,15 @@ fn global_daemon_fields_have_owner_units_scope_and_provenance() {
         Unit::Milliseconds
     );
     let view = docsbase_memory::config::view::from_resolved(&snapshot).unwrap();
-    assert_eq!(
-        view.fields
-            .iter()
-            .find(|f| f.key == "daemon.max_connections")
-            .unwrap()
-            .value,
-        3
-    );
+    for (key, unit, value) in [
+        ("daemon.max_connections", Unit::Count, 3),
+        ("daemon.max_sync_jobs", Unit::Count, 2),
+        ("daemon.log_rotate_bytes", Unit::Bytes, 32),
+    ] {
+        let field = view.fields.iter().find(|field| field.key == key).unwrap();
+        assert_eq!(field.origin.unit, unit);
+        assert_eq!(field.value, value);
+    }
     std::fs::write(&path, "").unwrap();
     let omitted = docsbase_memory::config::resolve::global_from(dir.path()).unwrap();
     assert_eq!(omitted.settings().daemon.profile, DaemonProfile::Shared);
@@ -282,6 +285,14 @@ fn owner_rejects_actual_consumer_overflow_and_closed_inventory_shortfall() {
         },
         DaemonPatch {
             max_sessions: Some(usize::MAX),
+            ..DaemonPatch::default()
+        },
+        DaemonPatch {
+            max_sync_jobs: Some(0),
+            ..DaemonPatch::default()
+        },
+        DaemonPatch {
+            log_rotate_bytes: Some(0),
             ..DaemonPatch::default()
         },
         DaemonPatch {

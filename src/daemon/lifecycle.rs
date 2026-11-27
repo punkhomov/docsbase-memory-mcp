@@ -105,7 +105,7 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
         return wait_for_daemon(cache, settings);
     }
     cleanup_stale(cache)?;
-    spawn_detached(cache, exe, &bootstrap)?;
+    spawn_detached(cache, exe, &bootstrap, settings.log_rotate_bytes)?;
     wait_for_daemon(cache, settings)
 }
 
@@ -891,7 +891,12 @@ fn cleanup_stale(cache: &Path) -> Result<()> {
     Ok(())
 }
 
-fn spawn_detached(cache: &Path, exe: Option<&Path>, bootstrap: &BootstrapContext) -> Result<()> {
+fn spawn_detached(
+    cache: &Path,
+    exe: Option<&Path>,
+    bootstrap: &BootstrapContext,
+    log_rotate_bytes: u64,
+) -> Result<()> {
     let mut command = Command::new(exe.map_or_else(
         || crate::config::paths::daemon_exe_from(bootstrap.daemon_exe.as_ref()).value,
         Path::to_path_buf,
@@ -904,7 +909,7 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>, bootstrap: &BootstrapContext
         .stdin(Stdio::null());
     // NFR-8: the detached daemon's diagnostics belong in logs/daemon.log
     // (0600), not /dev/null; a missing log file is a setup error.
-    let log = open_daemon_log(cache)?;
+    let log = open_daemon_log(cache, log_rotate_bytes)?;
     let log_err = log
         .try_clone()
         .map_err(|err| Error::internal_with_source("clone daemon log", err))?;
@@ -921,14 +926,14 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>, bootstrap: &BootstrapContext
 }
 
 /// Opens (creating if needed) `logs/daemon.log` with owner-only permissions.
-fn open_daemon_log(cache: &Path) -> Result<File> {
+fn open_daemon_log(cache: &Path, log_rotate_bytes: u64) -> Result<File> {
     let dir = cache.join("logs");
     platform::fs::secure_dir(&dir)
         .map_err(|err| Error::internal_with_source("create logs dir", err))?;
     let path = dir.join("daemon.log");
     // The daemon holds this file as stdout/stderr for its whole life, so it
     // can only be rotated between processes — here, before spawning (T48).
-    match crate::limits::rotate_log(&path) {
+    match crate::limits::rotate_log_after(&path, log_rotate_bytes) {
         Ok(true) => eprintln!("rotated {}", path.display()),
         Ok(false) => {}
         Err(err) => eprintln!("warning: cannot rotate {}: {err}", path.display()),

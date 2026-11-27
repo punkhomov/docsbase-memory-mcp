@@ -1538,7 +1538,8 @@ impl Shared {
             );
             return Ok(());
         }
-        let (job_id, created) = crate::daemon::tools::enqueue_sync(&db, project)?;
+        let (job_id, created) =
+            tools::enqueue_sync_with_retention(&db, project, self.daemon_settings().max_sync_jobs)?;
         if created {
             spawn_sync_job(
                 Arc::clone(self),
@@ -3974,7 +3975,11 @@ fn route_metadata_tool_in(
             let project = registry::ensure_project(&mut job_db, &root)?;
             let (config, stages) = shared.project_runtime(&project)?;
             let source = shared.vector_source_for(project.id, &config);
-            let (job_id, created) = tools::enqueue_sync(&job_db, &project)?;
+            let (job_id, created) = tools::enqueue_sync_with_retention(
+                &job_db,
+                &project,
+                shared.daemon_settings().max_sync_jobs,
+            )?;
             let mut just_indexed = false;
             if created {
                 tools::run_sync_job_in_with_vectors(
@@ -4043,7 +4048,11 @@ fn route_metadata_tool_in(
             } else {
                 None
             };
-            let (job_id, created) = tools::enqueue_sync(&db, &project)?;
+            let (job_id, created) = tools::enqueue_sync_with_retention(
+                &db,
+                &project,
+                shared.daemon_settings().max_sync_jobs,
+            )?;
             if created {
                 spawn_sync_job(
                     Arc::clone(shared),

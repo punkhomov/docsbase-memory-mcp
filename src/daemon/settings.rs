@@ -61,6 +61,10 @@ pub struct DaemonSettings {
     pub max_events: usize,
     /// Owner policy: `max_sessions`.
     pub max_sessions: usize,
+    /// Number of recent Sync job receipts retained per project.
+    pub max_sync_jobs: usize,
+    /// Size above which the launcher rotates the detached daemon log.
+    pub log_rotate_bytes: u64,
     /// Owner policy: `search_active`.
     pub search_active: usize,
     /// Owner policy: `search_pending`.
@@ -106,6 +110,8 @@ struct EffectiveDaemonPolicy<'a> {
     max_connections: usize,
     max_events: usize,
     max_sessions: usize,
+    max_sync_jobs: usize,
+    log_rotate_bytes: u64,
     search_active: usize,
     search_pending: usize,
     control_active: usize,
@@ -131,6 +137,8 @@ impl DaemonSettings {
             max_connections: self.max_connections,
             max_events: self.max_events,
             max_sessions: self.max_sessions,
+            max_sync_jobs: self.max_sync_jobs,
+            log_rotate_bytes: self.log_rotate_bytes,
             search_active: self.search_active,
             search_pending: self.search_pending,
             control_active: self.control_active,
@@ -164,6 +172,10 @@ pub struct DaemonPatch {
     pub max_events: Option<usize>,
     /// Explicit `max_sessions` override.
     pub max_sessions: Option<usize>,
+    /// Explicit Sync job receipt retention.
+    pub max_sync_jobs: Option<usize>,
+    /// Explicit detached daemon log rotation threshold.
+    pub log_rotate_bytes: Option<u64>,
     /// Explicit `search_active` override.
     pub search_active: Option<usize>,
     /// Explicit `search_pending` override.
@@ -208,6 +220,8 @@ impl DaemonSpec {
         max_connections: 64,
         max_events: 1024,
         max_sessions: 256,
+        max_sync_jobs: 50,
+        log_rotate_bytes: crate::limits::MAX_LOG_BYTES,
         search_active: 4,
         search_pending: 32,
         control_active: 2,
@@ -296,6 +310,12 @@ impl DaemonSpec {
             serde_json::json!(settings.max_sessions),
             None,
         )?;
+        view.push("daemon.max_sync_jobs", settings.max_sync_jobs.into(), None)?;
+        view.push(
+            "daemon.log_rotate_bytes",
+            settings.log_rotate_bytes.into(),
+            None,
+        )?;
         view.push(
             "daemon.search_active",
             serde_json::json!(settings.search_active),
@@ -351,6 +371,8 @@ impl SettingsSpec for DaemonSpec {
         FieldSpec::new("daemon.max_connections", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.max_events", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.max_sessions", Scope::Daemon, Unit::Count),
+        FieldSpec::new("daemon.max_sync_jobs", Scope::Daemon, Unit::Count),
+        FieldSpec::new("daemon.log_rotate_bytes", Scope::Daemon, Unit::Bytes),
         FieldSpec::new("daemon.search_active", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.search_pending", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.control_active", Scope::Daemon, Unit::Count),
@@ -426,6 +448,14 @@ impl SettingsSpec for DaemonSpec {
             settings.max_sessions = value;
             origins.set("daemon.max_sessions", source)?;
         }
+        if let Some(value) = patch.max_sync_jobs {
+            settings.max_sync_jobs = value;
+            origins.set("daemon.max_sync_jobs", source)?;
+        }
+        if let Some(value) = patch.log_rotate_bytes {
+            settings.log_rotate_bytes = value;
+            origins.set("daemon.log_rotate_bytes", source)?;
+        }
         if let Some(value) = patch.search_active {
             settings.search_active = value;
             origins.set("daemon.search_active", source)?;
@@ -487,6 +517,7 @@ impl SettingsSpec for DaemonSpec {
     fn validate(settings: &Self::Settings, _: &Capabilities) -> Result<()> {
         settings.profile.validate()?;
         validate_applicability(settings)?;
+        validate_retention(settings)?;
         let max = tokio::sync::Semaphore::MAX_PERMITS;
         for (key, value, zero_allowed) in [
             ("daemon.max_connections", settings.max_connections, false),
@@ -590,6 +621,17 @@ impl SettingsSpec for DaemonSpec {
             &next.effective_policy(),
         )
     }
+}
+fn validate_retention(settings: &DaemonSettings) -> Result<()> {
+    if settings.max_sync_jobs == 0 || i64::try_from(settings.max_sync_jobs).is_err() {
+        return Err(invalid(
+            "daemon.max_sync_jobs must be positive and fit SQLite",
+        ));
+    }
+    if settings.log_rotate_bytes == 0 {
+        return Err(invalid("daemon.log_rotate_bytes must be positive"));
+    }
+    Ok(())
 }
 fn validate_applicability(settings: &DaemonSettings) -> Result<()> {
     if matches!(settings.profile, DaemonProfile::Website { .. })
