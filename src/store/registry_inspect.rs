@@ -412,6 +412,18 @@ pub(super) fn configure_connection(
     )
 }
 
+/// Switch a private, already checked local connection to chunk payloads.
+/// Atomic Markdown blocks can use the file-size allowance within the IPC
+/// frame ceiling. The consumer accounts for its own total work and memory.
+pub(super) fn allow_chunk_values(
+    connection: &Connection,
+) -> std::result::Result<(), UnavailableReason> {
+    let limit = i32::try_from(crate::ipc::protocol::MAX_FRAME_BYTES)
+        .map_err(|_| UnavailableReason::LimitExceeded)?;
+    lease::set_value_limit(connection, limit);
+    Ok(())
+}
+
 fn schema_version(connection: &Connection) -> std::result::Result<u32, UnavailableReason> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))

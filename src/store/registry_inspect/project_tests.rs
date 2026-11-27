@@ -31,7 +31,7 @@ fn live_ann_chunk_read_has_room_for_a_large_atomic_chunk() {
     let observe =
         || crate::hybrid::ann_store::catalog_chunk_set(&connection, 7, 2_000_000, || Ok(()));
     assert!(observe().is_err());
-    super::project::allow_live_chunk_values(&connection).unwrap();
+    super::allow_chunk_values(&connection).unwrap();
     assert_eq!(observe().unwrap().0, 1);
 }
 

@@ -136,7 +136,7 @@ pub(crate) fn inspect_live_project_recipes<T>(
                         .as_ref()
                         .and_then(|recipes| recipes.embedding);
                     if let Some(metadata) = metadata {
-                        allow_live_chunk_values(metadata)?;
+                        super::allow_chunk_values(metadata)?;
                     }
                     Ok(observe(index, embedding, metadata))
                 },
@@ -145,15 +145,6 @@ pub(crate) fn inspect_live_project_recipes<T>(
         })
     };
     evidence().map_err(live_unavailable)
-}
-
-pub(super) fn allow_live_chunk_values(metadata: &Connection) -> Observed<()> {
-    // A legal atomic Markdown chunk can be larger than an inspector
-    // metadata value. This is the final phase of the private connection.
-    let limit =
-        i32::try_from(crate::ipc::protocol::MAX_FRAME_BYTES).map_err(|_| Why::LimitExceeded)?;
-    super::lease::set_value_limit(metadata, limit);
-    Ok(())
 }
 
 fn live_unavailable(reason: Why) -> crate::error::Error {

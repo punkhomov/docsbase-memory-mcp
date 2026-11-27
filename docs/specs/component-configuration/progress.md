@@ -2240,3 +2240,28 @@ Carry the indexing case into the remaining settings-consumer acceptance.
 Rust 1.100.0 Linux cli-full passed 1,960 tests and lean passed 1,620,
 including the search baseline and offline checks. Linux and Windows GNU
 cross-Clippy and formatting passed.
+
+## 2026-11-27 — CF11/CF14, атомарные чанки в hybrid v5
+
+Task CF11 atomic chunk embedding: complete (real Index, ANN warm and
+detached Sync regression, local verification and independent review).
+Native PR checks remain pending.
+
+Ruling: the expanded Shared fixture reproduced `SQLITE_TOOBIG` during
+embedding shape inspection of an inactive pair, before the provider
+received any text. The prepared metadata reader now verifies the pair
+under inspection limits and then switches to the existing IPC frame
+ceiling for shape and batch reads. It shares the SQLite value-limit
+helper used for the live ANN digest. Workspace admission and each
+provider batch account for the actual chunk size.
+
+Ruling: the 1.1 MB fenced block reaches the test embedder in full.
+ANN warms with two vectors after Index and with three after detached
+Sync adds another document. The provider sees the fenced block once,
+confirming vector reuse. Linux cli-full passed 1,960 tests. Linux and
+Windows GNU cross-Clippy and formatting passed.
+
+Ruling: two legacy ANN warm tests hit their watchdogs in the initial lean
+run with default parallelism. Both passed in isolation with the same
+binary. The complete lean rerun passed 1,620 tests with four harness
+threads, including offline and search baseline checks.

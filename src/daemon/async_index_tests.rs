@@ -1474,11 +1474,12 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         let config = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("guide.md"), "catalogwarmguide").unwrap();
-        std::fs::write(root.path().join("reference.md"), "catalogwarmreference").unwrap();
+        let fence = format!("```text\n{}\n```\n", "a".repeat(1_100_000));
+        std::fs::write(root.path().join("reference.md"), &fence).unwrap();
         let mut shared = open_v5_index_shared(
             cache.path(),
             config.path(),
-            "config_version = 2\n[dense]\nmin_vectors = 1\n[daemon]\nbackground_active = 1\nbackground_pending = 0\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'test/catalog-warm'\ndimensions = 3\n",
+            "config_version = 2\nmax_file_size = 2000000\n[search]\nmax_request_payload_bytes = 268435456\n[dense]\nmin_vectors = 1\n[daemon]\nbackground_active = 1\nbackground_pending = 0\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'test/catalog-warm'\ndimensions = 3\n",
         );
         let warm_gate = Arc::get_mut(&mut shared).unwrap().dense.pause_job_builds_for_test();
         shared.activate_jobs(service).unwrap();
@@ -1552,6 +1553,10 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         assert_eq!(sync["state"], "done");
         let view = catalog_diagnostics(&shared, session).await;
         assert_eq!(view["ann"]["vectors"], 3);
+        let batches = provider.batches.lock().unwrap();
+        let long = batches.iter().flatten().filter(|text| text.len() > 1_048_576).collect::<Vec<_>>();
+        assert_eq!(long.len(), 1, "Sync reuses the long chunk's vector");
+        assert!(long[0].contains(fence.trim_end()));
         assert_eq!(provider.queries.load(Ordering::SeqCst), 0);
         Ok(())
     })
