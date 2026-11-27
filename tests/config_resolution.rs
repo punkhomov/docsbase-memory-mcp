@@ -770,6 +770,65 @@ fn v2_watcher_window_layers_and_reports_provenance() {
 }
 
 #[test]
+fn v2_watcher_enable_is_global_and_preserves_watcher_bounds() {
+    use docsbase_memory::config::schema::{Scope, Unit};
+
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let view = || docsbase_memory::config::view::load_from(global.path(), Some(project.path()));
+    let defaults = view().unwrap();
+    let enabled = defaults
+        .fields
+        .iter()
+        .find(|field| field.key == "watch.enabled")
+        .unwrap();
+    assert_eq!(enabled.value, true);
+    assert_eq!(enabled.origin.source, SourceId::Defaults);
+
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2\n[watch]\nenabled = false\n",
+    );
+    let disabled = view().unwrap();
+    let enabled = disabled
+        .fields
+        .iter()
+        .find(|field| field.key == "watch.enabled")
+        .unwrap();
+    assert_eq!(enabled.value, false);
+    assert_eq!(enabled.origin.scope, Scope::Daemon);
+    assert_eq!(enabled.origin.unit, Unit::Boolean);
+    assert_eq!(
+        enabled.origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[watch]\nenabled = true\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(error.to_string().contains("watch.enabled"), "{error}");
+
+    for (setting, key) in [
+        ("max_debounce_ms = 2001", "watch.debounce_ms"),
+        ("batch_queue_capacity = 4097", "watch queue capacities"),
+        ("lease_retry_ms = 0", "watch retry durations"),
+        ("max_expand_depth = 33", "max_expand_depth"),
+    ] {
+        layer(
+            &global,
+            "config.toml",
+            &format!("config_version = 2\n[watch]\nenabled = false\n{setting}\n"),
+        );
+        let error = Config::load_from(global.path(), None).unwrap_err();
+        assert!(error.to_string().contains(key), "{error}");
+    }
+}
+
+#[test]
 fn v2_watcher_resource_policy_separates_project_retries_from_daemon_queues() {
     let global = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

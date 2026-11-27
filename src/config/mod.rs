@@ -284,6 +284,13 @@ impl Config {
         self
     }
 
+    pub(crate) const fn watchers_enabled(&self) -> bool {
+        matches!(
+            self.daemon.profile,
+            crate::daemon::settings::DaemonProfile::Shared
+        ) && self.watch.enabled()
+    }
+
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
         if self.ann_search == previous.ann_search
             && self.watch == previous.watch
@@ -666,7 +673,7 @@ impl ConfigSpec {
         ] {
             view.push(key, serde_json::json!(value), None)?;
         }
-        WatchSpec::view_fields(settings.watch, view)?;
+        WatchSpec::view_fields(settings.watch, settings.watchers_enabled(), view)?;
         LexicalSpec::view_fields(settings.lexical, view)?;
         RrfSpec::view_fields(settings.rrf, view)
     }

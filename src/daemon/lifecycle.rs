@@ -559,7 +559,7 @@ async fn serve(
     )?);
     let (activity, events) = super::request::ActivitySource::channel(policy.daemon.max_events);
     let watchers = Arc::new(crate::watch::Watchers::with_diagnostics(
-        launch.website.is_none(),
+        policy.watchers_enabled(),
         launch.launch.watch_debug,
     ));
     jobs.retain_watchers(watchers.clone(), activity.clone())?;

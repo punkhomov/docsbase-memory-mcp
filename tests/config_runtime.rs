@@ -995,6 +995,69 @@ fn assert_restart_follows_replacement(env: &Env) {
 }
 
 #[test]
+fn v2_shared_watcher_toggle_takes_effect_on_restart_and_keeps_sync() {
+    let mut env = Env::new(&[("guide.md", "initialwatcherwidget")]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\nauto_index = true\n",
+    )
+    .unwrap();
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let status = |client: &mut Client| client.call_tool("status", serde_json::json!({})).unwrap();
+    assert_eq!(status(&mut client)["watchers"], 1);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\nauto_index = true\n[watch]\nenabled = false\n",
+    )
+    .unwrap();
+    let changed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(changed["restart_required"], true, "{changed}");
+    let actions = changed["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{changed}");
+    assert_eq!(actions[0]["resource"]["value"], "daemon_global");
+    assert_eq!(status(&mut client)["restart_required"], true);
+
+    write_file(env.root(), "watched.md", b"automaticwatcherwidget");
+    let deadline = Instant::now() + watcher_deadline();
+    loop {
+        if search_before(&mut client, "automaticwatcherwidget", deadline) == ["watched.md"] {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    drop(client);
+    env.restart_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let disabled = status(&mut client);
+    assert_eq!(disabled["restart_required"], false);
+    assert_eq!(disabled["watchers"], 0);
+    assert_eq!(disabled["projects"][0]["watched"], false);
+    let settled = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(settled["actions"], serde_json::json!([]));
+
+    let another = tempfile::tempdir().unwrap();
+    write_file(another.path(), "fresh.md", b"freshwatcherwidget");
+    let mut registered = env.client();
+    registered.handshake(another.path()).unwrap();
+    assert_eq!(search(&mut registered, "freshwatcherwidget"), ["fresh.md"]);
+    assert_eq!(status(&mut client)["watchers"], 0);
+
+    write_file(env.root(), "manual.md", b"manualwatcherwidget");
+    assert_eq!(
+        search(&mut client, "manualwatcherwidget"),
+        Vec::<String>::new()
+    );
+    assert_eq!(env.run_json(&["sync"])["state"], "done");
+    assert_eq!(search(&mut client, "manualwatcherwidget"), ["manual.md"]);
+    assert_eq!(status(&mut client)["watchers"], 0);
+}
+
+#[test]
 fn v2_live_plan_uses_effective_global_settings_for_restart() {
     let mut env = Env::new(&[("guide.md", "semanticglobalwidget")]);
     let write_global = |grace, note: &str| {

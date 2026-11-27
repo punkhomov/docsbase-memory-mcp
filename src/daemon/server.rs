@@ -376,7 +376,6 @@ type RuntimeOwners = (
 fn prepare_runtime_owners(
     owners: Option<AsyncDaemonOwners>,
     global_config: &Config,
-    watch_enabled: bool,
     watch_debug: bool,
 ) -> Result<RuntimeOwners> {
     Ok(if let Some(owners) = owners {
@@ -399,7 +398,7 @@ fn prepare_runtime_owners(
             activity,
             events,
             workers,
-            Arc::new(Watchers::with_diagnostics(watch_enabled, watch_debug)),
+            Arc::new(Watchers::with_diagnostics(global_config.watchers_enabled(), watch_debug)),
             None,
         )
     })
@@ -638,12 +637,8 @@ impl Shared {
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
-        let (activity, activity_events, workers, watchers, jobs) = prepare_runtime_owners(
-            owners,
-            &global_config,
-            website.is_none(),
-            launch.watch_debug,
-        )?;
+        let (activity, activity_events, workers, watchers, jobs) =
+            prepare_runtime_owners(owners, &global_config, launch.watch_debug)?;
         #[cfg(feature = "hybrid-remote")]
         let remote = Arc::new(crate::hybrid::remote::RemoteExecution::real_with_owners(
             &global_config.remote,
@@ -1944,7 +1939,7 @@ impl Shared {
         if cached {
             return Ok((config, stages));
         }
-        let watch_runtime = if self.website.is_none() {
+        let watch_runtime = if self.website.is_none() && self.watchers.enabled() {
             let source = self.vector_source_for(project.id, &config);
             source.validate_root(&self.cache)?;
             Some(Arc::new(crate::watch::WatchRuntime::new(
@@ -2103,7 +2098,7 @@ impl Shared {
         before_admission: impl FnOnce(),
     ) -> Result<bool> {
         self.admit_project(project)?;
-        if self.website.is_some() {
+        if self.website.is_some() || !self.watchers.enabled() {
             return Ok(false);
         }
         let local;
@@ -3091,7 +3086,10 @@ async fn finish_index_watch(
     operation: &crate::search::operation::SearchOperation,
     activity: &Arc<Activity>,
 ) {
-    if shared.stopping.load(Ordering::SeqCst) || operation.check().is_err() {
+    if !shared.watchers.enabled()
+        || shared.stopping.load(Ordering::SeqCst)
+        || operation.check().is_err()
+    {
         return;
     }
     let permit = tokio::select! {
