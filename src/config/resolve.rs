@@ -104,8 +104,11 @@ pub fn resolve_component<S: SettingsSpec>(
 use super::source::{SourceLayer, invalid};
 use super::{Config, ConfigSpec, read_capped, read_capped_if_exists, read_project};
 
-fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
-    let mut resolution = Resolution::new(&DefaultsContext::for_host());
+fn global_resolution(
+    config_dir: &Path,
+    defaults: &DefaultsContext,
+) -> Result<Resolution<ConfigSpec>> {
+    let mut resolution = Resolution::new(defaults);
     let path = config_dir.join("config.toml");
     if let Some(text) = read_capped_if_exists(&path)? {
         let document = super::parse_global_document(&path, &text)?;
@@ -374,7 +377,15 @@ pub(super) fn resolve_observed_global_v2(
 /// # Errors
 /// File errors, invalid settings or project provider records.
 pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Resolved<Config>> {
-    let mut resolution = global_resolution(config_dir)?;
+    load_from_with_defaults(config_dir, project_root, &DefaultsContext::for_host())
+}
+
+pub(crate) fn load_from_with_defaults(
+    config_dir: &Path,
+    project_root: Option<&Path>,
+    defaults: &DefaultsContext,
+) -> Result<Resolved<Config>> {
+    let mut resolution = global_resolution(config_dir, defaults)?;
     if let Some(root) = project_root {
         resolution.apply_project(root)?;
     }
@@ -385,7 +396,7 @@ pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Resol
 /// # Errors
 /// File errors or invalid settings.
 pub fn global_from(config_dir: &Path) -> Result<Resolved<Config>> {
-    global_resolution(config_dir)?.finish()
+    global_resolution(config_dir, &DefaultsContext::for_host())?.finish()
 }
 
 #[derive(Clone, Copy)]

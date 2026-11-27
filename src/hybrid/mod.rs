@@ -14,6 +14,7 @@ pub mod ann;
 pub mod ann_settings;
 pub mod ann_store;
 pub mod config;
+pub(crate) mod cpu;
 pub mod dense;
 pub mod dense_metadata;
 pub mod dense_settings;

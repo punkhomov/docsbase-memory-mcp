@@ -38,7 +38,7 @@ pub use settings::{DEBOUNCE, MAX_DEBOUNCE, WatchSettings};
 
 /// Watcher tracing: set `DOCSBASE_WATCH_DEBUG=1` to log raw events and
 /// batches to stderr (diagnostics; no behavior change).
-fn watch_debug() -> bool {
+fn capture_compatibility_debug() -> bool {
     std::env::var_os("DOCSBASE_WATCH_DEBUG").is_some()
 }
 
@@ -171,6 +171,7 @@ pub fn spawn_watcher(
         move |batch| tx.send(batch).map_err(|error| error.0),
         ProducerOwner::Caller,
         crate::hybrid::work::Cancellation::new(),
+        capture_compatibility_debug(),
     )
 }
 
@@ -179,6 +180,7 @@ fn spawn_watcher_using(
     cache: &Path,
     current_config: impl Fn() -> Arc<Config> + Send + 'static,
     tx: std::sync::mpsc::SyncSender<Vec<PathBuf>>,
+    debug: bool,
 ) -> Result<WatcherGuard> {
     let cancel = crate::hybrid::work::Cancellation::new();
     let sender_cancel = cancel.clone();
@@ -189,6 +191,7 @@ fn spawn_watcher_using(
         move |batch| send_cancellable(&tx, batch, &sender_cancel),
         ProducerOwner::Managed,
         cancel,
+        debug,
     )
 }
 
@@ -221,6 +224,7 @@ fn native_watcher(
     event_tx: std::sync::mpsc::SyncSender<Option<PathBuf>>,
     stop: Option<crate::hybrid::work::Cancellation>,
     state: Option<WatchConfigCandidate>,
+    debug: bool,
 ) -> Result<RecommendedWatcher> {
     let watch_cache = cache.to_path_buf();
     let watch_root = root.to_path_buf();
@@ -231,6 +235,7 @@ fn native_watcher(
             &event_tx,
             stop.as_ref(),
             state.as_deref(),
+            debug,
             result,
         );
     })
@@ -250,6 +255,7 @@ fn handle_native_event(
     event_tx: &std::sync::mpsc::SyncSender<Option<PathBuf>>,
     stop: Option<&crate::hybrid::work::Cancellation>,
     state: Option<&WatchState>,
+    debug: bool,
     result: notify::Result<Event>,
 ) {
     let Ok(event) = result else {
@@ -271,7 +277,7 @@ fn handle_native_event(
     if matches!(event.kind, EventKind::Access(_)) {
         return;
     }
-    if watch_debug() {
+    if debug {
         eprintln!("watch-debug: event {:?} {:?}", event.kind, event.paths);
     }
     for path in event.paths {
@@ -333,6 +339,7 @@ fn spawn_watcher_sink_owned(
     send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>> + Send + 'static,
     owner: ProducerOwner,
     cancel: crate::hybrid::work::Cancellation,
+    debug: bool,
 ) -> Result<WatcherGuard> {
     let root = project.canonical_root.clone();
     // Canonicalize once: notify reports verbatim paths on Windows, while the
@@ -367,6 +374,7 @@ fn spawn_watcher_sink_owned(
                 event_tx,
                 caller.then(|| cancel.clone()),
                 candidate.clone(),
+                debug,
             )
         })
         .transpose()?;
@@ -431,6 +439,7 @@ fn spawn_watcher_sink_owned(
                 send,
                 Some(&cancel),
                 Instant::now,
+                debug,
             );
             drop(resources);
         })
@@ -465,6 +474,7 @@ fn forward_batches(
     send: impl Fn(Vec<PathBuf>) -> std::result::Result<(), Vec<PathBuf>>,
     cancel: Option<&crate::hybrid::work::Cancellation>,
     now: impl Fn() -> Instant,
+    debug: bool,
 ) {
     while let Ok(Some(first)) = receive(None) {
         if cancel.is_some_and(crate::hybrid::work::Cancellation::is_cancelled) {
@@ -489,7 +499,7 @@ fn forward_batches(
         let batch = match &mut filter {
             BatchFilter::ExpandDirectories(filter) => {
                 filter.set_config(&current_config());
-                finalize(filter, raw)
+                finalize(filter, raw, debug)
             }
             BatchFilter::RetainDirectoryEvents {
                 root,
@@ -835,10 +845,11 @@ fn report_batch_event(
     policy: &BatchRetryPolicy,
     index_dir: &Path,
     event: BatchEvent,
+    debug: bool,
 ) {
     match event {
         BatchEvent::LeaseRetry { attempt } => {
-            if watch_debug() {
+            if debug {
                 eprintln!(
                     "watch: project {project_id} batch waits for the writer lease (attempt {attempt})"
                 );
@@ -908,6 +919,7 @@ pub(crate) fn report_async_event(
     event: BatchEvent,
     policy: BatchRetryPolicy,
     pending: Option<&WatchPayload>,
+    debug: bool,
     open_registry: impl FnOnce() -> Result<Db>,
 ) -> Result<()> {
     let dropped = match &event {
@@ -941,6 +953,7 @@ pub(crate) fn report_async_event(
         &policy,
         &lifecycle::index_dir(cache, project.id),
         event,
+        debug,
     );
     Ok(())
 }
@@ -1013,8 +1026,8 @@ impl IndexFilter {
 /// directories are expanded now (not on receipt) so files that raced the
 /// recursive watch registration are still found; missing paths stay as purge
 /// markers, resolved by the incremental job (FR-16).
-fn finalize(filter: &mut IndexFilter, raw: Batch) -> Vec<PathBuf> {
-    let raw_paths = raw.paths.clone();
+fn finalize(filter: &mut IndexFilter, raw: Batch, debug: bool) -> Vec<PathBuf> {
+    let raw_paths = debug.then(|| raw.paths.clone());
     let mut batch = Batch::new();
     for path in raw.into_vec() {
         if path.is_dir() {
@@ -1028,7 +1041,7 @@ fn finalize(filter: &mut IndexFilter, raw: Batch) -> Vec<PathBuf> {
         }
     }
     let finished = batch.into_vec();
-    if watch_debug() {
+    if let Some(raw_paths) = raw_paths {
         eprintln!("watch-debug: finalize raw={raw_paths:?} batch={finished:?}");
     }
     finished
@@ -1454,6 +1467,7 @@ type CopyObserver = Arc<dyn Fn(&Arc<crate::search::budget::PayloadPermit>) + Sen
 pub struct Watchers {
     inner: Mutex<HashMap<i64, WatcherEntry>>,
     disabled: bool,
+    debug: bool,
     async_owner: OnceLock<AsyncOwner>,
     close: crate::hybrid::work::Cancellation,
     #[cfg(test)]
@@ -1471,6 +1485,7 @@ impl Default for Watchers {
         Self {
             inner: Mutex::new(HashMap::new()),
             disabled: false,
+            debug: false,
             async_owner: OnceLock::new(),
             close: crate::hybrid::work::Cancellation::new(),
             #[cfg(test)]
@@ -1574,16 +1589,25 @@ impl Watchers {
     /// Empty set.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_enabled(true)
     }
 
     /// Immutable owner policy. Disabled owners cannot start or revise watchers.
     #[must_use]
     pub fn with_enabled(enabled: bool) -> Self {
+        Self::with_diagnostics(enabled, capture_compatibility_debug())
+    }
+
+    pub(crate) fn with_diagnostics(enabled: bool, debug: bool) -> Self {
         Self {
             disabled: !enabled,
+            debug,
             ..Self::default()
         }
+    }
+
+    pub(crate) const fn debug(&self) -> bool {
+        self.debug
     }
 
     pub(crate) const fn enabled(&self) -> bool {
@@ -1750,6 +1774,7 @@ impl Watchers {
                         .load(std::sync::atomic::Ordering::Relaxed),
                 },
                 cancel.clone(),
+                self.debug,
             )?;
             let consumer = owner.runtime.spawn(async_runtime::consume(
                 owner.shared.clone(),
@@ -1763,7 +1788,7 @@ impl Watchers {
             (guard, ConsumerHandle::Async { _join: consumer })
         } else {
             let (tx, rx) = std::sync::mpsc::sync_channel(batch_queue_capacity);
-            let guard = spawn_watcher_using(project, cache, current, tx)?;
+            let guard = spawn_watcher_using(project, cache, current, tx, self.debug)?;
             let consumer = spawn_consumer(
                 cache.to_path_buf(),
                 project.clone(),
@@ -1883,6 +1908,7 @@ fn spawn_consumer(
     watchers: Weak<Watchers>,
 ) -> Result<std::thread::JoinHandle<()>> {
     let project_id = project.id;
+    let debug = watchers.upgrade().is_some_and(|owner| owner.debug);
     std::thread::Builder::new()
         .name(format!("docsbase-watch-{project_id}"))
         .spawn(move || {
@@ -1906,7 +1932,7 @@ fn spawn_consumer(
                 let policy = captured_retry_policy(&context);
                 let index_dir = lifecycle::index_dir(&cache, project_id);
                 let mut report =
-                    |event: BatchEvent| report_batch_event(project_id, &policy, &index_dir, event);
+                    |event: BatchEvent| report_batch_event(project_id, &policy, &index_dir, event, debug);
                 let outcome = run_pending_batch(
                     &mut pending,
                     &policy,
@@ -2027,6 +2053,7 @@ fn run_batch_using(
                 config,
             ),
             raw,
+            false,
         );
         let mut check_config = || {
             if context.same_revision(&current_context()) {
@@ -2094,7 +2121,8 @@ mod tests {
         let cache = root.join("cache");
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         let state = WatchState::default();
-        let notify = |event| handle_native_event(root, &cache, &tx, None, Some(&state), Ok(event));
+        let notify =
+            |event| handle_native_event(root, &cache, &tx, None, Some(&state), false, Ok(event));
 
         for name in [
             ".gitignore",
@@ -2178,6 +2206,7 @@ mod tests {
                     config,
                 ),
                 raw,
+                false,
             )
         }
 
@@ -2249,6 +2278,7 @@ mod tests {
             },
             None,
             Instant::now,
+            false,
         );
         assert_eq!(
             received.into_inner(),
@@ -2417,6 +2447,7 @@ mod tests {
             },
             ProducerOwner::Managed,
             cancel,
+            false,
         )
         .unwrap();
         fs::write(root.path().join("changed.md"), "# Change").unwrap();
@@ -2560,6 +2591,7 @@ mod tests {
             },
             None,
             || clock.get(),
+            false,
         );
         assert_eq!(
             results.into_inner(),

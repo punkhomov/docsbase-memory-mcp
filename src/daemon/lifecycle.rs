@@ -72,7 +72,12 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    let launch = crate::daemon::launch::require_shared_without_daemon(
+    let bootstrap = BootstrapContext::capture_host(EntrypointFacts {
+        mode: crate::config::bootstrap::Entrypoint::Autostart,
+        is_tty: false,
+    })?;
+    let launch = crate::daemon::launch::require_shared_snapshot(
+        &LaunchSnapshot::capture_with_bootstrap(&bootstrap),
         crate::config::resolve::LaunchUse::Runtime,
     )?;
     let settings = &launch.config.settings().daemon;
@@ -100,7 +105,7 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
         return wait_for_daemon(cache, settings);
     }
     cleanup_stale(cache)?;
-    spawn_detached(cache, exe)?;
+    spawn_detached(cache, exe, &bootstrap)?;
     wait_for_daemon(cache, settings)
 }
 
@@ -272,25 +277,19 @@ pub fn run_daemon_with_launch_and_bootstrap(
 }
 
 // The existing CLI retains its documented warning/default startup adapter.
-pub(crate) fn run_daemon_from_launch(cache: &Path, launch: LaunchConfig) -> Result<()> {
+pub(crate) fn run_daemon_from_launch(
+    cache: &Path,
+    launch: LaunchConfig,
+    bootstrap: &BootstrapContext,
+) -> Result<()> {
     let settings = crate::store::settings::db_from_config(&launch.config)?;
     let pool = crate::store::settings::pool_from_config(&launch.config)?;
     let dense = launch.config.settings().dense.clone();
-    run_with_launch(
-        cache,
-        &settings,
-        &pool,
-        &dense,
-        launch,
-        &runtime_bootstrap()?,
-    )
+    run_with_launch(cache, &settings, &pool, &dense, launch, bootstrap)
 }
 
 fn runtime_bootstrap() -> Result<BootstrapContext> {
-    let cores = std::thread::available_parallelism().map_err(|error| {
-        Error::internal_with_source("capture daemon runtime parallelism", error)
-    })?;
-    BootstrapContext::capture_with(cores.get(), EntrypointFacts::standalone(), std::env::var_os)
+    BootstrapContext::capture_host(EntrypointFacts::standalone())
 }
 
 fn run_with_launch(
@@ -302,6 +301,22 @@ fn run_with_launch(
     bootstrap: &BootstrapContext,
 ) -> Result<()> {
     use crate::config::schema::SettingsSpec;
+    let mut launch = launch;
+    let cpu_pool = Arc::new(crate::hybrid::cpu::CpuPool::new(
+        bootstrap.rayon_threads.value,
+    ));
+    #[cfg(feature = "hybrid-local")]
+    {
+        let mut settings = launch.config.settings().clone();
+        settings
+            .providers
+            .bind_runtime_bootstrap(bootstrap, cache, Arc::clone(&cpu_pool));
+        launch.config =
+            crate::config::schema::Resolved::new(settings, launch.config.provenance().clone());
+    }
+    launch.cpu_pool = Some(cpu_pool);
+    launch.ipc_debug = bootstrap.ipc_debug.value;
+    launch.watch_debug = bootstrap.watch_debug.value;
     launch.config.settings().validate()?;
     crate::hybrid::dense_settings::DenseSpec::validate(
         dense_settings,
@@ -543,8 +558,9 @@ async fn serve(
         &policy.remote,
     )?);
     let (activity, events) = super::request::ActivitySource::channel(policy.daemon.max_events);
-    let watchers = Arc::new(crate::watch::Watchers::with_enabled(
+    let watchers = Arc::new(crate::watch::Watchers::with_diagnostics(
         launch.website.is_none(),
+        launch.launch.watch_debug,
     ));
     jobs.retain_watchers(watchers.clone(), activity.clone())?;
     let permit = workers.control().await?;
@@ -874,8 +890,11 @@ fn cleanup_stale(cache: &Path) -> Result<()> {
     Ok(())
 }
 
-fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
-    let mut command = Command::new(exe.map_or_else(daemon_exe, Path::to_path_buf));
+fn spawn_detached(cache: &Path, exe: Option<&Path>, bootstrap: &BootstrapContext) -> Result<()> {
+    let mut command = Command::new(exe.map_or_else(
+        || crate::config::paths::daemon_exe_from(bootstrap.daemon_exe.as_ref()).value,
+        Path::to_path_buf,
+    ));
     platform::process::detach(&mut command);
     command
         .arg("serve")
@@ -891,8 +910,8 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
     command
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    if let Some(config_dir) = std::env::var_os("DOCSBASE_CONFIG_DIR") {
-        command.env("DOCSBASE_CONFIG_DIR", config_dir);
+    if let Some(config_dir) = &bootstrap.config_dir {
+        command.env("DOCSBASE_CONFIG_DIR", &config_dir.value);
     }
     command
         .spawn()
@@ -915,13 +934,6 @@ fn open_daemon_log(cache: &Path) -> Result<File> {
     }
     platform::fs::open_private_log(&path)
         .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))
-}
-
-fn daemon_exe() -> PathBuf {
-    std::env::var_os("DOCSBASE_DAEMON_EXE").map_or_else(
-        || std::env::current_exe().unwrap_or_else(|_| PathBuf::from("docsbase")),
-        PathBuf::from,
-    )
 }
 
 fn wait_for_daemon(cache: &Path, settings: &DaemonSettings) -> Result<()> {

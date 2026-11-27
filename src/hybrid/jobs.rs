@@ -386,6 +386,18 @@ pub fn coverage_from(
     .map(Some)
 }
 
+pub(crate) fn configured_coverage(
+    db: &Db,
+    config: &crate::config::Config,
+    project_id: i64,
+    source: &VectorCacheSource,
+) -> Result<Option<Coverage>> {
+    let Some(key) = config.embedding_model_key()? else {
+        return Ok(None);
+    };
+    coverage_for_key_from(db, &key, project_id, source).map(Some)
+}
+
 /// [`coverage`] with an explicit embedder (tests).
 ///
 /// # Errors

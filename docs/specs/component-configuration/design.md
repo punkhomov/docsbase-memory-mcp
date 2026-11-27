@@ -1288,3 +1288,28 @@ deadline перед её фиксацией. Завершение ошибки �
 Для запущенного v5 Website MCP получает фиксированный проект через
 реестровый read-only вызов, проверяет канонический cwd и использует
 `BindReadOnly`. Допуск генеративных задач в v5 относится к Shared daemon.
+
+## Delta 2026-11-27 — Bootstrap dependency ownership and vector inputs
+
+The CLI captures whitelisted bootstrap values, with origin, before daemon
+launch. A daemon-owned lazy CPU pool serves HNSW insertion and FastEmbed
+tokenization/inference. Sessions acquire their mutex on the caller before
+entering Rayon. CLI entrypoints freeze the existing tokenizers parallelism
+switch without changing process environment. The embedded constructors keep
+their compatibility policy. The process-global ORT library is loaded once,
+with its actual path retained under the same lock. A different path is an
+admission error requiring restart. Failed native loads are retryable.
+
+ADR amendment for the existing HNSW and FastEmbed dependencies. The already
+locked `rayon = 1.12.0` and `tokenizers = 0.23.2` become direct dependencies
+for their explicit execution APIs. No package/version is added or changed.
+Tokenizers remains optional under `hybrid-local` with defaults disabled.
+
+A v5 generation can carry an optional document-input fingerprint in its seal.
+The fingerprint binds traversal and chunk policy but excludes Tantivy
+tokenization. Consumers still bind vectors to the embedding recipe and the
+hash of each actual input. The planner requests a vector action when the
+recipe changes or the old seal cannot prove equality. An index-only reviewed
+replacement fails safely on a cache miss, without invoking inference.
+Generation preparation, source checks, old reader leases and CAS keep their
+existing publication boundary.

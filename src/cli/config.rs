@@ -192,8 +192,8 @@ pub(super) fn run(
             format: ViewFormat::Json,
         } => {
             let cwd = std::env::current_dir()?;
-            let directory = crate::config::paths::config_dir()?;
-            let view = crate::config::view::load_from(&directory, Some(&cwd))?;
+            let bootstrap = super::capture_bootstrap(false)?;
+            let view = crate::config::view::load_with_bootstrap(&bootstrap, Some(&cwd))?;
             println!("{}", serde_json::to_string_pretty(&view)?);
             Ok(())
         }

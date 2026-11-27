@@ -1,4 +1,4 @@
-//! Machine-local `FastEmbed` inference policy, independent of vector recipes.
+//! Machine-local `FastEmbed` inference settings and their configuration owner.
 
 use std::num::NonZeroUsize;
 
@@ -10,7 +10,13 @@ use super::config::{PROVIDER_FASTEMBED, ProviderRecord, ProvidersCfg, type_error
 
 /// Default inference batch size.
 pub const DEFAULT_BATCH_SIZE: usize = 64;
-pub(crate) const INFERENCE_KEYS: [&str; 2] = ["batch_size", "intra_threads"];
+/// Default and maximum input length of the pinned embedding models.
+pub const DEFAULT_MAX_LENGTH: usize = 512;
+// Accommodates both special tokens and the longest registry role prefix,
+// with room for document/query text after the prefix.
+const MIN_EMBEDDING_LENGTH: i64 = 16;
+pub(crate) const INFERENCE_KEYS: [&str; 3] =
+    ["batch_size", "intra_threads", "embedding_max_length"];
 pub(crate) const INFERENCE_FIELDS: &[FieldSpec] = &[
     FieldSpec::new(
         "providers.fastembed.batch_size",
@@ -19,6 +25,11 @@ pub(crate) const INFERENCE_FIELDS: &[FieldSpec] = &[
     ),
     FieldSpec::new(
         "providers.fastembed.intra_threads",
+        Scope::Machine,
+        Unit::Count,
+    ),
+    FieldSpec::new(
+        "providers.fastembed.embedding_max_length",
         Scope::Machine,
         Unit::Count,
     ),
@@ -39,23 +50,30 @@ impl From<InvalidCount> for Error {
 pub(super) struct InferencePatch {
     batch_size: Option<usize>,
     intra_threads: Option<usize>,
+    embedding_max_length: Option<usize>,
 }
 
 impl InferencePatch {
     pub(super) fn from_record(record: &ProviderRecord) -> std::result::Result<Self, InvalidCount> {
         Ok(Self {
-            batch_size: positive(
+            batch_size: bounded(
                 record,
                 INFERENCE_KEYS[0],
-                i64::MAX,
+                1..=i64::MAX,
                 "a positive integer that fits usize",
             )?,
             // ORT's session builder forwards a signed native int.
-            intra_threads: positive(
+            intra_threads: bounded(
                 record,
                 INFERENCE_KEYS[1],
-                i64::from(i32::MAX),
+                1..=i64::from(i32::MAX),
                 "a positive 32-bit signed integer",
+            )?,
+            embedding_max_length: bounded(
+                record,
+                INFERENCE_KEYS[2],
+                MIN_EMBEDDING_LENGTH..=512,
+                "an integer between 16 and 512 tokens",
             )?,
         })
     }
@@ -64,6 +82,9 @@ impl InferencePatch {
         InferenceSettings {
             batch_size: self.batch_size.unwrap_or(defaults.batch_size),
             intra_threads: self.intra_threads.unwrap_or(defaults.intra_threads),
+            embedding_max_length: self
+                .embedding_max_length
+                .unwrap_or(defaults.embedding_max_length),
         }
     }
 }
@@ -72,6 +93,7 @@ impl InferencePatch {
 pub(crate) struct InferenceSettings {
     pub(super) batch_size: usize,
     pub(super) intra_threads: usize,
+    pub(super) embedding_max_length: usize,
 }
 
 impl InferenceSettings {
@@ -79,6 +101,7 @@ impl InferenceSettings {
         Self {
             batch_size: DEFAULT_BATCH_SIZE,
             intra_threads: cpu_count.get().min(4),
+            embedding_max_length: DEFAULT_MAX_LENGTH,
         }
     }
 }
@@ -111,14 +134,19 @@ pub(crate) fn view_fields(providers: &ProvidersCfg, view: &mut ViewBuilder<'_>) 
     view.push(
         INFERENCE_FIELDS[1].key,
         inference.intra_threads.into(),
+        provider.clone(),
+    )?;
+    view.push(
+        INFERENCE_FIELDS[2].key,
+        inference.embedding_max_length.into(),
         provider,
     )
 }
 
-fn positive(
+fn bounded(
     record: &ProviderRecord,
     key: &'static str,
-    max: i64,
+    range: std::ops::RangeInclusive<i64>,
     description: &'static str,
 ) -> std::result::Result<Option<usize>, InvalidCount> {
     record
@@ -127,7 +155,7 @@ fn positive(
         .map(|value| {
             value
                 .as_integer()
-                .filter(|&value| value > 0 && value <= max)
+                .filter(|value| range.contains(value))
                 .and_then(|value| usize::try_from(value).ok())
                 .ok_or(InvalidCount { key, description })
         })

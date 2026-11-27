@@ -352,11 +352,12 @@ pub trait Provider: Sync {
 /// `fastembed` — local ONNX inference behind `hybrid-local` (ADR-17).
 struct FastembedProvider;
 
-const FASTEMBED_RECORD_KEYS: [&str; 4] = [
+const FASTEMBED_RECORD_KEYS: [&str; 5] = [
     "runtime",
     "runtime_path",
     super::local_settings::INFERENCE_KEYS[0],
     super::local_settings::INFERENCE_KEYS[1],
+    super::local_settings::INFERENCE_KEYS[2],
 ];
 
 impl Provider for FastembedProvider {

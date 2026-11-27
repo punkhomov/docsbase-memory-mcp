@@ -736,6 +736,17 @@ impl CatalogJob {
             texts,
             Some(embedding.dimension),
         )?;
+        if !batch.texts.is_empty()
+            && self
+                .publication
+                .reviewed()
+                .is_some_and(|reviewed| reviewed.reuse_vectors_only)
+        {
+            return Err(Error::Admission {
+                message: "reviewed replacement can only reuse vectors, but some are missing; run index to update the project"
+                    .into(),
+            });
+        }
         Ok((Some(batch), Some(embedder.clone()), account))
     }
 
@@ -852,8 +863,7 @@ impl CatalogJob {
                 Arc::new(Config::load_from(config_dir, Some(root))?)
             };
             let current_recipe = current
-                .hybrid_cfg
-                .embedding_model_key()
+                .embedding_model_key()?
                 .as_deref()
                 .map(EmbeddingRecipe::for_model);
             if current != self.context.config || current_recipe != recipe {

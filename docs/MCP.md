@@ -35,8 +35,9 @@ tools bind correctly.
 
 Project tools require a session bound to a registered project; otherwise the
 server returns a `Project` error with a fix-up instruction (e.g. run
-`docsbase index`). `index_project` may take the full indexing budget —
-clients must allow the 600 s IPC timeout; `sync_*` only enqueue/read rows.
+`docsbase index`). Allow the configured `client.mcp_long_timeout_ms` exchange
+budget for `index_project`. The default is 600 s. The `sync_*` tools enqueue
+work and read its status.
 
 When the backend advertises `chunk-ref-v1`, set `chunk_ref: true` on
 `search_docs` to obtain opaque references for `read_neighbors_at`. Search
@@ -203,7 +204,9 @@ claiming the tier is off.
 - `search_docs`: one global `search.request_timeout_ms` budget (default 30 s),
   shared by daemon startup, connection admission, search, reply and at most one
   MCP reconnect. Configure it in [global config](CONFIG.md#search-request-policy-global-only).
-- Other quick tools: the existing 30 s exchange budget; `index_project`: 600 s.
+- Other quick tools use `client.mcp_quick_timeout_ms` (default 30 s).
+  `index_project` uses `client.mcp_long_timeout_ms` (default 600 s).
+  See [client deadlines](CONFIG.md#client-deadlines).
 - CLI `sync` polls `sync_status` up to ~610 s.
 
 MCP request cancellation closes that caller's active scoped search connection.

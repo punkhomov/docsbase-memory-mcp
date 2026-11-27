@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::bootstrap::DefaultsContext;
+use crate::config::bootstrap::{BootstrapContext, DefaultsContext};
 use crate::config::capture::{ReadFailure, path_is_absent, read_prefix};
 use crate::config::resolve::{LaunchFailure, LaunchUse, has_version_header};
 use crate::config::schema::Resolved;
@@ -40,6 +40,9 @@ pub(crate) struct LaunchConfig {
     pub stamp: ConfigStamp,
     pub overrides: DaemonPatch,
     pub defaults: DefaultsContext,
+    pub cpu_pool: Option<std::sync::Arc<crate::hybrid::cpu::CpuPool>>,
+    pub ipc_debug: bool,
+    pub watch_debug: bool,
     pub error: Option<String>,
     pub invalidation: crate::config::policy::PolicyContext,
     pub startup: Option<preflight::StartupExpectations>,
@@ -215,23 +218,38 @@ impl LaunchSnapshot {
     /// Capture the explicit global source once, using the existing trusted bootstrap cap.
     #[must_use]
     pub fn capture_from(config_dir: &Path) -> Self {
+        Self::capture_from_with_defaults(config_dir, DefaultsContext::for_host())
+    }
+
+    fn capture_from_with_defaults(config_dir: &Path, defaults: DefaultsContext) -> Self {
         let path = config_dir.join("config.toml");
         let bytes = capture(&path);
         Self {
             path: Some(path),
             bytes,
-            defaults: DefaultsContext::for_host(),
+            defaults,
         }
+    }
+
+    pub(crate) fn capture_with_bootstrap(bootstrap: &BootstrapContext) -> Self {
+        Self::capture_directory(
+            paths::config_dir_from(bootstrap).map(|directory| directory.value),
+            bootstrap.defaults,
+        )
     }
 
     /// Capture the system-selected global source once. Errors remain visible to adapters.
     #[must_use]
     pub fn capture() -> Self {
-        match paths::config_dir() {
-            Ok(path) => Self::capture_from(&path),
+        Self::capture_directory(paths::config_dir(), DefaultsContext::for_host())
+    }
+
+    fn capture_directory(directory: Result<PathBuf>, defaults: DefaultsContext) -> Self {
+        match directory {
+            Ok(path) => Self::capture_from_with_defaults(&path, defaults),
             Err(error) => Self {
                 path: None,
-                defaults: DefaultsContext::for_host(),
+                defaults,
                 bytes: CapturedBytes::Unavailable {
                     reason: error.to_string(),
                     versioned: false,
@@ -280,6 +298,9 @@ impl LaunchSnapshot {
             stamp: self.stamp(),
             overrides: patch,
             defaults: self.defaults,
+            cpu_pool: None,
+            ipc_debug: false,
+            watch_debug: false,
             error: None,
             invalidation: crate::config::policy::PolicyContext::Legacy,
             startup: None,
@@ -297,6 +318,9 @@ impl LaunchSnapshot {
                 stamp: self.stamp(),
                 overrides: patch,
                 defaults: self.defaults,
+                cpu_pool: None,
+                ipc_debug: false,
+                watch_debug: false,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -320,6 +344,9 @@ impl LaunchSnapshot {
                 stamp: self.stamp(),
                 overrides: patch,
                 defaults: self.defaults,
+                cpu_pool: None,
+                ipc_debug: false,
+                watch_debug: false,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -347,6 +374,9 @@ impl LaunchSnapshot {
                     stamp: self.stamp(),
                     overrides: patch,
                     defaults: self.defaults,
+                    cpu_pool: None,
+                    ipc_debug: false,
+                    watch_debug: false,
                     error: Some(error.to_string()),
                     invalidation: crate::config::policy::PolicyContext::Legacy,
                     startup: None,
@@ -389,7 +419,14 @@ pub(crate) fn website_unavailable() -> Error {
 }
 
 pub(crate) fn require_shared_without_daemon(launch_use: LaunchUse) -> Result<LaunchConfig> {
-    let launch = LaunchSnapshot::capture().legacy_for(DaemonPatch::default(), launch_use)?;
+    require_shared_snapshot(&LaunchSnapshot::capture(), launch_use)
+}
+
+pub(crate) fn require_shared_snapshot(
+    snapshot: &LaunchSnapshot,
+    launch_use: LaunchUse,
+) -> Result<LaunchConfig> {
+    let launch = snapshot.legacy_for(DaemonPatch::default(), launch_use)?;
     if matches!(
         launch.config.settings().daemon.profile,
         crate::daemon::settings::DaemonProfile::Website { .. }

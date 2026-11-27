@@ -712,6 +712,7 @@ pub struct DenseCache {
     limits: DenseCacheLimits,
     policy: AnnPolicy,
     ann_build: AnnBuildSettings,
+    cpu_pool: Option<Arc<super::cpu::CpuPool>>,
     store: Option<AnnStore>,
     bound_root: Arc<Mutex<Option<PathBuf>>>,
     cold_flights: Arc<Flights<ColdKey, DenseRows>>,
@@ -806,6 +807,10 @@ impl DenseCache {
         };
         dense.ann_build = config.ann_build;
         Ok(dense)
+    }
+
+    pub(crate) fn set_cpu_pool(&mut self, pool: Option<Arc<super::cpu::CpuPool>>) {
+        self.cpu_pool = pool;
     }
 
     /// Explicit connection policy for jobs, coverage and streaming fallback.
@@ -926,6 +931,7 @@ impl DenseCache {
             limits,
             policy,
             ann_build: AnnBuildSettings::owner_defaults(),
+            cpu_pool: None,
             store,
             bound_root: Arc::new(Mutex::new(root.map(Path::to_path_buf))),
             cold_flights: Arc::new(Flights::default()),
@@ -1256,6 +1262,7 @@ impl DenseCache {
             limits: self.limits,
             policy: self.policy,
             ann_build: self.ann_build,
+            cpu_pool: self.cpu_pool.clone(),
             store: self.store.clone(),
             bound_root: Arc::new(Mutex::new(
                 self.bound_root
@@ -1673,7 +1680,7 @@ impl DenseCache {
             }
             BuildReservation::new(self.active_build_bytes.clone(), bytes)
         };
-        let loaded = AnnIndex::load(&slot);
+        let loaded = AnnIndex::load_with_cpu_pool(&slot, self.cpu_pool.as_deref());
         #[cfg(test)]
         self.observe_ann_load(&slot, loaded.is_ok());
         check()?;
@@ -2305,6 +2312,7 @@ impl DenseCache {
             limits: self.limits,
             policy: self.policy,
             ann_build: self.ann_build,
+            cpu_pool: self.cpu_pool.clone(),
             store: self.store.clone(),
             bound_root: Arc::clone(&self.bound_root),
             cold_flights: Arc::clone(&self.cold_flights),
@@ -2456,7 +2464,8 @@ fn build_in_background(
     // build hit a Windows sharing violation on `vectors.db` (CI run
     // 41043371926, `cold_start_loads_persisted_ann_without_vectors_db`).
     let result: Result<(Arc<AnnIndex>, u64)> = catch_unwind(AssertUnwindSafe(|| {
-        let ann = AnnIndex::build_with_settings(&rows, dim, cache.ann_build)?;
+        let ann =
+            AnnIndex::build_with_cpu_pool(&rows, dim, cache.ann_build, cache.cpu_pool.as_deref())?;
         let slot = ann.dump_artifact(store, AnnArtifact::for_index(&key, index))?;
         // Loading must not hold the source rows, the built graph and the loaded
         // copy at once: on the heap-reload path that would add a third full
@@ -2464,7 +2473,8 @@ fn build_in_background(
         let published_bytes = ann.estimated_bytes() as u64;
         drop(ann);
         drop(rows);
-        let loaded = AnnIndex::load(&slot)?.with_disk_pin(pin.finish_build());
+        let loaded = AnnIndex::load_with_cpu_pool(&slot, cache.cpu_pool.as_deref())?
+            .with_disk_pin(pin.finish_build());
         Ok((Arc::new(loaded), published_bytes))
     }))
     .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));

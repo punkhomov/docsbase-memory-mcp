@@ -2385,3 +2385,24 @@ file resolution. The portable migration proposal uses one explicit defaults
 context for both sides of its equivalence check and does not write the host's
 thread count to TOML. The full run exposed the previous one-CPU preview
 mismatch. All 18 migration tests passed after separating the two contexts.
+
+## 2026-11-27 — bootstrap, FastEmbed and dependent artifacts
+
+Task I36: complete (typed FastEmbed limit, captured execution, byte-identical
+default vector key, config view and sealed catalog consumers).
+Ruling: the setting affects embeddings. Reranking keeps its own input limit.
+
+Task I56/I58/I64: complete (bootstrap diagnostic flags, local runtime provenance,
+native module identity, and one lazy daemon-owned Rayon pool across ANN and local
+inference). A real loaded-symbol lookup passed on Linux. Fresh review identified
+relative loader paths, runtime rebinding after a source edit and ambient Rayon
+teardown. The implementation rejects ambiguous relative module identities,
+retains the installed policy and holds the owned pool through graph teardown.
+Ruling: embedded adapters preserve host ownership. No new package versions.
+
+Task CF11-vector-inputs: complete (plan action follows the document input and
+embedding recipes, and a selected compatible pair authorizes reuse-only).
+Ruling: an absent vector fails before publication. The existing generation
+continues serving reads. Older seals provide unknown vector-input evidence.
+A native v5 fixture proved reuse, refusal on a cache miss and zero provider calls
+for the reviewed lexical-only path. Existing source, head and pin checks remain.

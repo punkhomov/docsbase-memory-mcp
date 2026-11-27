@@ -1,10 +1,12 @@
 //! Pure, versioned effective settings views. No provisioning or runtime observation.
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::bootstrap::{BootstrapContext, BootstrapValue};
 use super::schema::{FieldOrigin, Provenance, Resolved};
 use super::{Config, ConfigSpec};
 use crate::error::{Error, Result};
@@ -68,6 +70,26 @@ pub struct EffectiveView {
     pub fields: Vec<EffectiveField>,
     /// Existing registry capabilities, including feature-disabled providers.
     pub provider_capabilities: Vec<ProviderCapability>,
+    /// Launch inputs captured locally by the CLI when this view is requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<BootstrapView>,
+}
+
+/// Machine inputs observed by the CLI, with their original source.
+#[derive(Debug, Clone, Serialize)]
+pub struct BootstrapView {
+    cache_dir: Option<BootstrapValue<PathBuf>>,
+    config_dir: BootstrapValue<PathBuf>,
+    data_dir: Option<BootstrapValue<PathBuf>>,
+    daemon_exe: BootstrapValue<PathBuf>,
+    ort_dylib_path: Option<BootstrapValue<PathBuf>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ort_path_derived_from: Option<&'static str>,
+    tokio_workers: BootstrapValue<NonZeroUsize>,
+    rayon_threads: BootstrapValue<NonZeroUsize>,
+    tokenizers_parallelism: BootstrapValue<bool>,
+    ipc_debug: BootstrapValue<bool>,
+    watch_debug: BootstrapValue<bool>,
 }
 
 /// Displays already resolved values without consulting files or environment.
@@ -90,6 +112,7 @@ pub fn from_resolved(snapshot: &Resolved<Config>) -> Result<EffectiveView> {
         provisioning_checked: false,
         fields: builder.finish()?,
         provider_capabilities,
+        bootstrap: None,
     })
 }
 
@@ -146,6 +169,81 @@ pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Effec
         .map_err(|_| invalid("cannot describe resolved configuration for effective view"))?;
     view.basis = ViewBasis::SourceResolution;
     Ok(view)
+}
+
+pub(crate) fn load_with_bootstrap(
+    bootstrap: &BootstrapContext,
+    project_root: Option<&Path>,
+) -> Result<EffectiveView> {
+    use super::paths;
+    let config_dir = paths::config_dir_from(bootstrap)?;
+    let snapshot = super::resolve::load_from_with_defaults(
+        &config_dir.value,
+        project_root,
+        &bootstrap.defaults,
+    )
+    .map_err(|_| invalid("cannot resolve configuration for effective view"))?;
+    let mut view = from_resolved(&snapshot)
+        .map_err(|_| invalid("cannot describe resolved configuration for effective view"))?;
+    view.basis = ViewBasis::SourceResolution;
+    view.coverage = "file_settings_and_bootstrap";
+    let data_dir = paths::data_dir_from(bootstrap).ok();
+    let (ort_dylib_path, ort_path_derived_from) =
+        resolved_ort_path(bootstrap, &snapshot, data_dir.as_ref())?;
+    view.bootstrap = Some(BootstrapView {
+        cache_dir: paths::cache_dir_from(bootstrap).ok(),
+        config_dir,
+        data_dir,
+        daemon_exe: paths::daemon_exe_from(bootstrap.daemon_exe.as_ref()),
+        ort_dylib_path,
+        ort_path_derived_from,
+        tokio_workers: bootstrap.tokio_workers.clone(),
+        rayon_threads: bootstrap.rayon_threads.clone(),
+        tokenizers_parallelism: bootstrap.tokenizers_parallelism.clone(),
+        ipc_debug: bootstrap.ipc_debug.clone(),
+        watch_debug: bootstrap.watch_debug.clone(),
+    });
+    Ok(view)
+}
+
+type OrtPath = (Option<BootstrapValue<PathBuf>>, Option<&'static str>);
+
+fn resolved_ort_path(
+    bootstrap: &BootstrapContext,
+    snapshot: &Resolved<Config>,
+    data_dir: Option<&BootstrapValue<PathBuf>>,
+) -> Result<OrtPath> {
+    use super::schema::SourceId;
+    #[cfg(not(feature = "hybrid-local"))]
+    let _ = data_dir;
+    if let Some(path) = &bootstrap.ort_dylib_path {
+        return Ok((Some(path.clone()), None));
+    }
+    let Some(provider) = crate::hybrid::config::fastembed_record(&snapshot.settings().providers)?
+        .filter(|provider| provider.enabled)
+    else {
+        return Ok((None, None));
+    };
+    if let Some(value) = provider.runtime_path {
+        let source = snapshot
+            .provenance()
+            .get("providers")
+            .map_or(SourceId::ProvidedSnapshot, |origin| origin.source.clone());
+        return Ok((Some(BootstrapValue { value, source }), None));
+    }
+    #[cfg(feature = "hybrid-local")]
+    if let Some(data_dir) = data_dir
+        && let Some(value) = crate::hybrid::runtime::install_path_candidate(&data_dir.value)
+    {
+        return Ok((
+            Some(BootstrapValue {
+                value,
+                source: data_dir.source.clone(),
+            }),
+            Some("data_dir"),
+        ));
+    }
+    Ok((None, None))
 }
 
 pub(crate) fn capability(name: &str) -> Result<ProviderCapability> {

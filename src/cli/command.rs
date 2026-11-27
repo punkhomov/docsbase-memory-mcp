@@ -17,6 +17,10 @@ pub(super) struct Context {
     pub(super) global: Arc<Config>,
     pub(super) transport: crate::platform::transport::Transport,
     pub(super) cache: std::path::PathBuf,
+    #[cfg(feature = "hybrid-local")]
+    bootstrap: Arc<crate::config::bootstrap::BootstrapContext>,
+    #[cfg(feature = "hybrid-local")]
+    cpu_pool: Arc<crate::hybrid::cpu::CpuPool>,
     pub(super) workers: Arc<WorkerAdmission>,
     pub(super) activity: ActivitySource,
     pub(super) jobs: JobService,
@@ -28,24 +32,34 @@ pub(super) struct Context {
 }
 impl Context {
     #[cfg_attr(
-        not(feature = "hybrid-remote"),
+        not(any(feature = "hybrid-remote", feature = "hybrid-local")),
         expect(
             clippy::unused_self,
             reason = "Only the remote factory needs this command execution owner"
         )
     )]
     pub(super) fn stages(&self, config: &Config) -> Result<crate::hybrid::HybridStages> {
+        #[cfg(feature = "hybrid-local")]
+        let providers = {
+            let mut providers = config.providers.clone();
+            providers.bind_runtime_bootstrap(&self.bootstrap, &self.cache, self.cpu_pool.clone());
+            providers
+        };
+        #[cfg(not(feature = "hybrid-local"))]
+        let providers = &config.providers;
+        #[cfg(feature = "hybrid-local")]
+        let providers = &providers;
         #[cfg(feature = "hybrid-remote")]
         {
             crate::hybrid::config::from_config_with_execution(
                 &config.hybrid_cfg,
-                &config.providers,
+                providers,
                 &self.remote,
             )
         }
         #[cfg(not(feature = "hybrid-remote"))]
         {
-            crate::hybrid::from_config(&config.hybrid_cfg, &config.providers)
+            crate::hybrid::from_config(&config.hybrid_cfg, providers)
         }
     }
     pub(super) fn admit_daemon(
@@ -80,6 +94,12 @@ pub(super) fn run<T: Send, F: Future<Output = Result<T>>>(
     global: Config,
     work: impl FnOnce(Context) -> F + Send,
 ) -> Result<T> {
+    use crate::config::bootstrap::{BootstrapContext, Entrypoint, EntrypointFacts};
+    let bootstrap = BootstrapContext::capture_current_thread(EntrypointFacts {
+        mode: Entrypoint::Cli,
+        is_tty: false,
+    })?;
+    let cache = crate::config::paths::cache_dir_from(&bootstrap)?.value;
     let native_policy =
         crate::ipc::transport::policy(global.daemon.max_connections, &global.daemon)?;
     let run = move || {
@@ -104,7 +124,13 @@ pub(super) fn run<T: Send, F: Future<Output = Result<T>>>(
             let mut root = JobRoot::new(&global.daemon);
             let context = Context {
                 transport,
-                cache: crate::config::paths::cache_dir()?,
+                cache,
+                #[cfg(feature = "hybrid-local")]
+                cpu_pool: Arc::new(crate::hybrid::cpu::CpuPool::new(
+                    bootstrap.rayon_threads.value,
+                )),
+                #[cfg(feature = "hybrid-local")]
+                bootstrap: Arc::new(bootstrap),
                 budget: PayloadBudget::new(global.search.clone())?,
                 jobs: root.service(),
                 global: Arc::new(global),

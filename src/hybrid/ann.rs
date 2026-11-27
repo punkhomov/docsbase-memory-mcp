@@ -66,7 +66,8 @@ enum Kind {
 /// memory or loaded from a persisted slot. Both variants answer cosine
 /// nearest-neighbour searches.
 pub struct AnnIndex {
-    kind: Kind,
+    kind: Option<Kind>,
+    pool: Option<Arc<rayon::ThreadPool>>,
     dim: usize,
     count: usize,
     build_settings: AnnBuildSettings,
@@ -81,6 +82,17 @@ impl std::fmt::Debug for AnnIndex {
             .field("count", &self.count)
             .field("build_settings", &self.build_settings)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for AnnIndex {
+    fn drop(&mut self) {
+        // HNSW parallelizes teardown as well as insertion. The graph needs
+        // the same pool and can still read mmap files until this returns.
+        if let Some(pool) = &self.pool {
+            let kind = self.kind.take();
+            pool.install(move || drop(kind));
+        }
     }
 }
 
@@ -103,6 +115,37 @@ impl AnnIndex {
     /// # Errors
     /// Empty input, a zero or mismatched dimension, or an unrepresentable ID.
     pub fn build_with_settings(
+        rows: &[(u64, Arc<[f32]>)],
+        dim: usize,
+        settings: AnnBuildSettings,
+    ) -> Result<Self> {
+        Self::build_inner(rows, dim, settings)
+    }
+
+    pub(super) fn build_with_cpu_pool(
+        rows: &[(u64, Arc<[f32]>)],
+        dim: usize,
+        settings: AnnBuildSettings,
+        cpu_pool: Option<&super::cpu::CpuPool>,
+    ) -> Result<Self> {
+        Self::in_pool(cpu_pool, || Self::build_inner(rows, dim, settings))
+    }
+
+    fn in_pool(
+        cpu_pool: Option<&super::cpu::CpuPool>,
+        build: impl FnOnce() -> Result<Self> + Send,
+    ) -> Result<Self> {
+        if let Some(cpu_pool) = cpu_pool {
+            let pool = cpu_pool.acquire()?;
+            let mut index = pool.install(build)?;
+            index.pool = Some(pool);
+            Ok(index)
+        } else {
+            build()
+        }
+    }
+
+    fn build_inner(
         rows: &[(u64, Arc<[f32]>)],
         dim: usize,
         settings: AnnBuildSettings,
@@ -143,7 +186,8 @@ impl AnnIndex {
         }
         hnsw.set_searching_mode(true);
         Ok(Self {
-            kind: Kind::Built(hnsw),
+            kind: Some(Kind::Built(hnsw)),
+            pool: None,
             dim,
             count: rows.len(),
             build_settings: settings,
@@ -208,7 +252,11 @@ impl AnnIndex {
         if fetch == 0 {
             return Ok(Vec::new());
         }
-        let neighbours = match &self.kind {
+        let kind = self
+            .kind
+            .as_ref()
+            .ok_or_else(|| Error::internal("ANN graph is absent"))?;
+        let neighbours = match kind {
             Kind::Built(hnsw) => run_unwind(|| hnsw.search(query, fetch, ef))?,
             Kind::Loaded(loaded) => {
                 loaded.with_index(|index| run_unwind(|| index.search(query, fetch, ef)))?
@@ -246,7 +294,7 @@ impl AnnIndex {
         artifact: AnnArtifact<'_>,
     ) -> Result<AnnSlot> {
         let key = artifact.key;
-        let Kind::Built(hnsw) = &self.kind else {
+        let Some(Kind::Built(hnsw)) = &self.kind else {
             return Err(Error::internal("ann dump requires a built index"));
         };
         if self.dim != key.dim || self.count != key.chunk_count {
@@ -266,6 +314,17 @@ impl AnnIndex {
     /// # Errors
     /// The dump is unreadable or its actual graph differs from its metadata.
     pub fn load(slot: &AnnSlot) -> Result<Self> {
+        Self::load_inner(slot)
+    }
+
+    pub(super) fn load_with_cpu_pool(
+        slot: &AnnSlot,
+        cpu_pool: Option<&super::cpu::CpuPool>,
+    ) -> Result<Self> {
+        Self::in_pool(cpu_pool, || Self::load_inner(slot))
+    }
+
+    fn load_inner(slot: &AnnSlot) -> Result<Self> {
         let settings = AnnBuildSettings::new(slot.meta.m, slot.meta.ef_construction)?;
         let loaded = match load_loaded(&slot.dir, true) {
             Ok(loaded) => loaded,
@@ -282,7 +341,8 @@ impl AnnIndex {
             return Err(Error::internal("ANN dump does not match its metadata"));
         }
         Ok(Self {
-            kind: Kind::Loaded(loaded),
+            kind: Some(Kind::Loaded(loaded)),
+            pool: None,
             dim: slot.meta.dim,
             count: slot.meta.count,
             build_settings: settings,
@@ -296,11 +356,10 @@ impl AnnIndex {
         self.build_settings
     }
 
-    pub(crate) fn with_disk_pin(self, pin: AnnSlotPin) -> Self {
-        Self {
-            _disk_pin: Some(pin),
-            ..self
-        }
+    #[allow(clippy::used_underscore_binding)] // The pin is an ownership guard, never read.
+    pub(crate) fn with_disk_pin(mut self, pin: AnnSlotPin) -> Self {
+        self._disk_pin = Some(pin);
+        self
     }
 
     /// Number of vectors in the graph.
@@ -425,7 +484,10 @@ mod tests {
 
         let mmap = AnnIndex::load(&slot).expect("mmap load");
         let heap = AnnIndex {
-            kind: Kind::Loaded(load_loaded(&slot.dir, false).expect("heap load")),
+            kind: Some(Kind::Loaded(
+                load_loaded(&slot.dir, false).expect("heap load"),
+            )),
+            pool: None,
             dim: TEST_DIM,
             count: TEST_COUNT,
             build_settings: ann.build_settings(),

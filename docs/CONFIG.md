@@ -445,6 +445,11 @@ docsbase config   # effective values for the current directory (JSON)
   their OpenMP thread policy. `docsbase config effective` reports the resolved
   counts even when the provider has no record. Daemon workers pick up settings
   and CPU availability when the daemon starts.
+- `embedding_max_length` is the input limit for the pinned FastEmbed embedding
+  models. It accepts 16–512 tokens, including special tokens and any query or
+  passage prefix. The default 512 preserves existing vector keys. A different
+  limit changes the document and query vector recipe, so review the new plan
+  and publish a matching project index. The reranker has its own input limit.
 - Local inference stages share one ORT session per cache key while they
   hold it (~model size, int8 rows are the small case referred to by NFR-4).
   The last stage releases the session and its shared model lock. The
@@ -537,6 +542,17 @@ independent of persisted index formats. With the Shared daemon stopped,
 or `[read_pool]` is invalid. The Website profile still requires the daemon.
 
 ### Watcher debounce
+
+Shared starts watchers for indexed projects by default. To disable them for
+the installation, set `enabled = false` under `[watch]` in the global v2 file
+and restart the daemon. The running owner follows its launch policy until
+shutdown. Live configuration plans report the restart when the effective
+policy changes. Website keeps watching disabled. The effective view attributes
+that derived value to `daemon.profile`.
+
+Explicit `docsbase sync` and automatic first indexing remain available with
+watching disabled. Other watcher settings are still validated, and the toggle
+leaves the stored index recipe intact.
 
 Set these fields in a v2 global or project file. Each project field can
 override its global value independently.
@@ -682,6 +698,30 @@ output omits file text; explicit before/after views should be treated as source
 files. The draft has no side effects. Automatic application and recovery are
 later #78 milestones.
 
+## Client deadlines
+
+The global `[client]` table works in both supported source formats.
+
+```toml
+[client]
+ipc_io_timeout_ms = 2000
+mcp_quick_timeout_ms = 30000
+mcp_long_timeout_ms = 600000
+```
+
+Each value accepts 1–4,294,967,294 milliseconds. Blocking IPC applies its
+timeout to each native read and write and to busy-pipe connection admission
+on Windows. Live CLI plan/apply also use it for their setup exchanges.
+Daemon inspection uses the smaller of the IPC timeout and its control budget.
+The effective view reports each setting's origin and the platform's
+`blocking_ipc_timeout_capability`.
+
+An MCP frontend captures its policy at startup. The quick budget governs
+setup and ordinary tool exchanges. The long budget governs the indexing
+exchange. Search and Ask keep their operation deadlines. New CLI invocations
+use the new client settings. Restart the daemon to change its live inspection
+budget. These settings leave persistent recipes intact.
+
 ## Effective values with origins
 
 ```sh
@@ -691,9 +731,17 @@ docsbase config effective --format=json
 This versioned view resolves the current global/project files and shows each
 file setting's typed value, unit, scope and source. It does not contact the daemon:
 a running process can still hold its earlier configuration. The output therefore
-identifies its basis as `source_resolution`, sets `live_runtime_observed` to
-`false`, and limits coverage to `file_settings`. Bare `docsbase config` keeps its
-existing JSON format.
+identifies its basis as `source_resolution` and sets `live_runtime_observed` to
+`false`. The CLI reports `file_settings_and_bootstrap` coverage. The `bootstrap`
+object shows the current invocation's cache, configuration and data paths,
+selected executable and ONNX Runtime path, dependency thread settings and
+diagnostic flags with their origins. Missing paths are reported as null.
+The ONNX path follows `ORT_DYLIB_PATH`, the configured provider path, then the
+installation slot derived from the data directory. It is a path selection,
+with no check of what a running daemon loaded. The daemon captures its startup
+policy once, shares a lazy Rayon pool between ANN builds and local inference,
+and requires a restart to load a different ONNX Runtime library.
+Bare `docsbase config` keeps its existing JSON format.
 
 `view_version` is `1`. Fields appear in key order; for example:
 
@@ -743,7 +791,13 @@ The JSON report includes the bounded action graph and a `plan_id` bound to
 the observed sources, installation and generation. A document-vector action
 prepares any missing entries using the new recipe. Existing entries with
 compatible keys remain reusable. The `remote` grant marks possible provider
-usage at application time. The preview reads existing files without starting
+usage at application time. New hybrid generations record a document-input
+recipe independently from the lexical tokenizer. When only the lexical
+recipe changes and the sealed vector recipe matches, apply verifies and reuses
+cached vectors. Missing vectors stop that reviewed replacement before
+publication. Run an explicit `docsbase index` to prepare the missing vectors.
+Generations with an older seal use the conservative plan until their next
+replacement. The preview reads existing files without starting
 the daemon, loading models, or contacting providers. For an unavailable registry
 it reports `observation_failure`, and an existing legacy pair without recipe
 evidence produces an `unsupported_identity` blocker. Invalid effective settings,

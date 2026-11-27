@@ -9,7 +9,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use sha2::Digest;
 
@@ -217,8 +217,8 @@ pub struct RuntimeStatus {
 /// (round-6/round-7 C4). `Err` carries the platform admission (unsupported
 /// target, macOS below the minimum) so `resolve` can fail loudly, while the
 /// status surfaces degrade to "not installed".
-fn data_dir_library_checked() -> Result<Option<PathBuf>> {
-    let installed = library_path(platform_target()?);
+fn data_dir_library_checked(root: &Path) -> Result<Option<PathBuf>> {
+    let installed = library_path_in(root, platform_target()?);
     Ok(installed.exists().then_some(installed))
 }
 
@@ -227,7 +227,7 @@ fn data_dir_library_checked() -> Result<Option<PathBuf>> {
 /// provider-free to avoid a `provider_status` ↔ `runtime_status` cycle.
 #[must_use]
 pub(crate) fn data_dir_library_path() -> Option<PathBuf> {
-    data_dir_library_checked().ok().flatten()
+    data_dir_library_checked(&runtime_root()).ok().flatten()
 }
 
 /// Computes the fastembed runtime status from the global providers entry and
@@ -363,9 +363,22 @@ impl RuntimeSource for HttpRuntimeSource {
 /// Runtime install root: `<data>/runtimes/onnxruntime/<version>`.
 #[must_use]
 pub fn runtime_root() -> PathBuf {
-    let data = crate::config::paths::data_dir()
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    runtime_root_from(crate::config::paths::data_dir())
+}
+
+fn runtime_root_from(data: Result<PathBuf>) -> PathBuf {
+    let data =
+        data.unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    runtime_root_under(&data)
+}
+
+fn runtime_root_under(data: &Path) -> PathBuf {
     data.join("runtimes").join("onnxruntime").join(ORT_VERSION)
+}
+
+pub(crate) fn install_path_candidate(data: &Path) -> Option<PathBuf> {
+    let target = select_target(&triple()).ok()?;
+    Some(library_path_in(&runtime_root_under(data), target))
 }
 
 /// Final library path for a target: `<root>/<triple>/<library file name>`.
@@ -749,6 +762,34 @@ fn promote_inner(root: &Path, target: &Target, staging: &Path, final_dir: &Path)
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RuntimeBootstrap {
+    override_path: Option<PathBuf>,
+    root: PathBuf,
+    pub(super) cache_root: Option<PathBuf>,
+    pub(super) cpu_pool: Option<Arc<super::cpu::CpuPool>>,
+}
+
+impl RuntimeBootstrap {
+    pub(super) fn new(
+        bootstrap: &crate::config::bootstrap::BootstrapContext,
+        cache: &Path,
+        cpu_pool: Arc<super::cpu::CpuPool>,
+    ) -> Self {
+        Self {
+            override_path: bootstrap
+                .ort_dylib_path
+                .as_ref()
+                .map(|path| path.value.clone()),
+            root: runtime_root_from(
+                crate::config::paths::data_dir_from(bootstrap).map(|dir| dir.value),
+            ),
+            cache_root: Some(cache.to_path_buf()),
+            cpu_pool: Some(cpu_pool),
+        }
+    }
+}
+
 /// Runtime resolution (FR-11): `ORT_DYLIB_PATH` → connected provider
 /// `runtime_path` → data-dir install (only with an enabled provider entry) →
 /// admission.
@@ -759,8 +800,19 @@ fn promote_inner(root: &Path, target: &Target, staging: &Path, final_dir: &Path)
 /// # Panics
 /// Never panics; missing entries degrade to admission errors.
 pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
-    if let Some(override_path) = std::env::var_os("ORT_DYLIB_PATH") {
-        let path = PathBuf::from(override_path);
+    let compatibility;
+    let bootstrap = if let Some(bootstrap) = cfg.runtime_bootstrap() {
+        bootstrap
+    } else {
+        compatibility = RuntimeBootstrap {
+            override_path: std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from),
+            root: runtime_root(),
+            cache_root: None,
+            cpu_pool: None,
+        };
+        &compatibility
+    };
+    if let Some(path) = &bootstrap.override_path {
         if !path.exists() {
             return Err(Error::Admission {
                 message: format!(
@@ -769,7 +821,7 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
                 ),
             });
         }
-        return Ok(path);
+        return Ok(path.clone());
     }
     let record = super::config::fastembed_record(cfg)?;
     match &record {
@@ -790,10 +842,10 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
             // order: env → runtime_path → data-dir → admission). The
             // computation is shared with the status surfaces so the two can
             // never disagree about which path counts as installed.
-            if let Some(installed) = data_dir_library_checked()? {
+            if let Some(installed) = data_dir_library_checked(&bootstrap.root)? {
                 return Ok(installed);
             }
-            let slot = library_path(platform_target()?);
+            let slot = library_path_in(&bootstrap.root, platform_target()?);
             Err(Error::Admission {
                 message: format!(
                     "fastembed has no runtime path and the data-dir install {} is missing; run `docsbase connect fastembed`",
@@ -817,31 +869,69 @@ pub fn resolve(cfg: &ProvidersCfg) -> Result<PathBuf> {
 /// # Errors
 /// Returns [`Error::Admission`] when the library cannot be loaded.
 pub fn init(path: &Path) -> Result<()> {
-    // Only SUCCESS is memoized (round-3 muse-2): a transient first-load
-    // failure (briefly absent/corrupt dylib, later fixed by `connect
-    // fastembed --force`) must be retryable without a daemon restart. A
-    // failed `init_from` is re-attempted on every call; `ort::commit` is
-    // idempotent per process after a success, so re-committing is safe.
-    static INIT: OnceLock<()> = OnceLock::new();
-    if INIT.get().is_some() {
-        return Ok(());
-    }
-    // `init_from` returns an EnvironmentBuilder; `commit()` registers the
-    // global environment (ort 2.0.0-rc.13). Load failure must surface as
-    // an admission error — `ort::api()` must never panic on an
-    // uninitialized library (FR-11).
-    match ort::init_from(path) {
-        Ok(env) => {
-            env.commit();
-            let _ = INIT.set(());
-            Ok(())
-        }
-        Err(err) => Err(Error::Admission {
+    static INITIALIZED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    init_once(&INITIALIZED, path, |path| {
+        let environment = ort::init_from(path).map_err(|error| Error::Admission {
             message: format!(
-                "failed to load the ONNX Runtime from {}: {err}",
+                "failed to load the ONNX Runtime from {}: {error}",
                 path.display()
             ),
-        }),
+        })?;
+        // init_from may reuse a host-loaded library. Its builder says
+        // nothing about that library; inspect the location of the actual API
+        // table before committing or recording the path.
+        let api = std::panic::catch_unwind(ort::api)
+            .map_err(|_| Error::internal("ONNX Runtime did not expose its API table"))?;
+        let loaded = crate::platform::loaded_module::path_of(api).map_err(|error| {
+            Error::internal_with_source("verify loaded ONNX Runtime library", error)
+        })?;
+        if crate::platform::paths::normalize_for_compare(&loaded)
+            != crate::platform::paths::normalize_for_compare(path)
+        {
+            return Err(runtime_path_changed(&loaded, path));
+        }
+        // A host may already own the environment for this very library.
+        let _ = environment.commit();
+        Ok(())
+    })
+}
+
+fn init_once(
+    initialized: &std::sync::Mutex<Option<PathBuf>>,
+    path: &Path,
+    load: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    // ORT otherwise resolves some relative paths against the executable.
+    // Canonicalize the same file that admission checked before loading it.
+    let path = path.canonicalize().map_err(|error| Error::Admission {
+        message: format!(
+            "cannot resolve the ONNX Runtime at {}: {error}",
+            path.display()
+        ),
+    })?;
+    let mut initialized = initialized
+        .lock()
+        .map_err(|_| Error::internal("ONNX Runtime initialization lock poisoned"))?;
+    if let Some(loaded) = initialized.as_ref() {
+        if loaded != &path {
+            return Err(runtime_path_changed(loaded, &path));
+        }
+        return Ok(());
+    }
+    // Failed loads remain retryable. Store the selected identity under the
+    // same lock that serialized the successful native initialization.
+    load(&path)?;
+    *initialized = Some(path);
+    Ok(())
+}
+
+fn runtime_path_changed(loaded: &Path, desired: &Path) -> Error {
+    Error::Admission {
+        message: format!(
+            "ONNX Runtime is already loaded from {}; restart to use {}",
+            loaded.display(),
+            desired.display()
+        ),
     }
 }
 
@@ -961,6 +1051,43 @@ mod tests {
 
     use super::test_env::{TestDataDir, runtime_test_guard};
     use super::*;
+
+    #[test]
+    fn initialized_runtime_rejects_a_different_library_and_retries_failed_loads() {
+        let fixture = tempfile::tempdir().unwrap();
+        let first = fixture.path().join("first.dll");
+        let second = fixture.path().join("second.dll");
+        std::fs::write(&first, []).unwrap();
+        std::fs::write(&second, []).unwrap();
+        let slot = std::sync::Mutex::new(None);
+        assert!(init_once(&slot, &first, |_| Err(Error::internal("temporary failure"))).is_err());
+        init_once(&slot, &second, |_| Ok(())).unwrap();
+        init_once(&slot, &second, |_| panic!("must not reload")).unwrap();
+        let error = init_once(&slot, &first, |_| panic!("must not switch")).unwrap_err();
+        assert!(error.to_string().contains("restart"));
+        assert_eq!(
+            slot.lock().unwrap().as_ref(),
+            Some(&second.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn captured_runtime_override_reaches_resolver_without_reading_ambient_env() {
+        use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
+        let tmp = tempfile::tempdir().unwrap();
+        let library = tmp.path().join("captured-runtime");
+        std::fs::write(&library, []).unwrap();
+        let bootstrap = BootstrapContext::capture_with(2, EntrypointFacts::standalone(), |key| {
+            (key == "ORT_DYLIB_PATH").then(|| library.as_os_str().to_owned())
+        })
+        .unwrap();
+        let mut providers = ProvidersCfg::default();
+        let pool = Arc::new(super::super::cpu::CpuPool::new(
+            bootstrap.rayon_threads.value,
+        ));
+        providers.bind_runtime_bootstrap(&bootstrap, tmp.path(), pool);
+        assert_eq!(resolve(&providers).unwrap(), library);
+    }
 
     /// Fake source that serves a real tar.gz containing the wanted library
     /// with the right size. Produced from the target table itself.

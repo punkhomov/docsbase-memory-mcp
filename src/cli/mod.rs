@@ -223,6 +223,11 @@ pub enum DaemonCommand {
 #[allow(clippy::too_many_lines)] // Exhaustive CLI dispatcher; runtime owners remain explicit per command.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    #[cfg(feature = "hybrid-local")]
+    if !matches!(&cli.command, Command::Serve { .. }) {
+        let parallelism = crate::config::bootstrap::tokenizer_parallelism(std::env::var_os);
+        tokenizers::utils::parallelism::set_parallelism(parallelism.value);
+    }
     let db_settings = crate::store::settings::standalone()?;
     match cli.command {
         #[cfg(feature = "web")]
@@ -333,6 +338,21 @@ pub fn error_exit_code(error: &anyhow::Error) -> u8 {
         .map_or(1, config::CheckStatus::exit_code)
 }
 
+fn capture_bootstrap(
+    detached: bool,
+) -> crate::error::Result<crate::config::bootstrap::BootstrapContext> {
+    use crate::config::bootstrap::{BootstrapContext, Entrypoint, EntrypointFacts};
+    use std::io::IsTerminal;
+    BootstrapContext::capture_host(EntrypointFacts {
+        mode: if detached {
+            Entrypoint::Autostart
+        } else {
+            Entrypoint::Cli
+        },
+        is_tty: !detached && std::io::stdin().is_terminal(),
+    })
+}
+
 fn serve(
     detached: bool,
     grace_ms: Option<u64>,
@@ -346,14 +366,16 @@ fn serve(
         (None | Some(ServeProfile::Website), Some(project_root)) => Some(crate::daemon::settings::DaemonProfile::Website { project_root }),
         _ => return Err(Error::Admission { message: "serve --profile website requires its own --project ABS; --profile shared cannot have --project".to_owned() }.into()),
     };
-    let cache = paths::cache_dir()?;
-    let mut launch = crate::daemon::launch::LaunchSnapshot::capture().legacy(
-        crate::daemon::settings::DaemonPatch {
+    let bootstrap = capture_bootstrap(detached)?;
+    #[cfg(feature = "hybrid-local")]
+    tokenizers::utils::parallelism::set_parallelism(bootstrap.tokenizers_parallelism.value);
+    let cache = paths::cache_dir_from(&bootstrap)?.value;
+    let mut launch = crate::daemon::launch::LaunchSnapshot::capture_with_bootstrap(&bootstrap)
+        .legacy(crate::daemon::settings::DaemonPatch {
             profile: selected_profile,
             idle_grace_ms: grace_ms,
             ..crate::daemon::settings::DaemonPatch::default()
-        },
-    )?;
+        })?;
     if detached
         && matches!(
             launch.config.settings().daemon.profile,
@@ -363,7 +385,7 @@ fn serve(
         return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() }.into());
     }
     config::startup::prepare(&cache, &mut launch, detached, startup)?;
-    crate::daemon::lifecycle::run_daemon_from_launch(&cache, launch)?;
+    crate::daemon::lifecycle::run_daemon_from_launch(&cache, launch, &bootstrap)?;
     Ok(())
 }
 

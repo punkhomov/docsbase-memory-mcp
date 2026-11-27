@@ -91,13 +91,6 @@ impl HybridCfg {
                 .all(|name| crate::hybrid::provider::provider(name).is_ok_and(Provider::enabled))
     }
 
-    pub(crate) fn embedding_model_key(&self) -> Option<String> {
-        self.embedding
-            .as_ref()
-            .filter(|_| self.enabled)
-            .map(embedding_model_id)
-    }
-
     /// Both stages with defaults; the `hybrid = true` shorthand (FR-13).
     #[must_use]
     pub fn enabled_with_defaults() -> Self {
@@ -476,6 +469,8 @@ pub struct ProvidersCfg {
 struct ResolvedFastembedInference {
     defaults: InferenceSettings,
     settings: std::result::Result<InferenceSettings, InvalidCount>,
+    #[cfg(feature = "hybrid-local")]
+    runtime_bootstrap: Option<Arc<super::runtime::RuntimeBootstrap>>,
 }
 
 impl Default for ProvidersCfg {
@@ -494,12 +489,55 @@ impl ProvidersCfg {
             fastembed: Arc::new(ResolvedFastembedInference {
                 defaults,
                 settings: Ok(defaults),
+                #[cfg(feature = "hybrid-local")]
+                runtime_bootstrap: None,
             }),
         }
     }
 
+    #[cfg(feature = "hybrid-local")]
+    pub(crate) fn bind_runtime_bootstrap(
+        &mut self,
+        bootstrap: &crate::config::bootstrap::BootstrapContext,
+        cache: &std::path::Path,
+        cpu_pool: Arc<super::cpu::CpuPool>,
+    ) {
+        Arc::make_mut(&mut self.fastembed).runtime_bootstrap = Some(Arc::new(
+            super::runtime::RuntimeBootstrap::new(bootstrap, cache, cpu_pool),
+        ));
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(super) fn cpu_pool(&self) -> Option<Arc<super::cpu::CpuPool>> {
+        self.runtime_bootstrap()
+            .and_then(|runtime| runtime.cpu_pool.clone())
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(super) fn runtime_bootstrap(&self) -> Option<&super::runtime::RuntimeBootstrap> {
+        self.fastembed.runtime_bootstrap.as_deref()
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(crate) fn inherit_runtime_bootstrap(&mut self, active: &Self) {
+        Arc::make_mut(&mut self.fastembed)
+            .runtime_bootstrap
+            .clone_from(&active.fastembed.runtime_bootstrap);
+    }
+
     pub(crate) fn fastembed_inference(&self) -> Result<InferenceSettings> {
         self.fastembed.settings.map_err(Error::from)
+    }
+
+    pub(crate) fn embedding_model_id(&self, embedding: &EmbeddingCfg) -> Result<String> {
+        if embedding.provider == PROVIDER_FASTEMBED {
+            let inference = self.fastembed_inference()?;
+            return Ok(fastembed_embedding_model_id(
+                embedding,
+                inference.embedding_max_length,
+            ));
+        }
+        Ok(embedding_model_id(embedding))
     }
 
     /// The record of `name`, when the global config has one.
@@ -778,6 +816,16 @@ pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
         .ok()
         .and_then(|provider| provider.cache_model_id(cfg))
         .unwrap_or_else(|| legacy_cache_model_id(cfg))
+}
+
+pub(super) fn fastembed_embedding_model_id(cfg: &EmbeddingCfg, max_length: usize) -> String {
+    use std::fmt::Write as _;
+    let mut key = embedding_model_id(cfg);
+    // Preserve all existing cache, seal and ANN identities for the default.
+    if max_length != super::local_settings::DEFAULT_MAX_LENGTH {
+        let _ = write!(key, "@t{max_length}");
+    }
+    key
 }
 
 /// Concrete stages handed to the index and search paths.

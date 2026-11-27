@@ -458,6 +458,8 @@ fn bootstrap_captures_only_whitelisted_inputs_and_never_secrets() {
             "DOCSBASE_DATA_DIR",
             "ORT_DYLIB_PATH",
             "DOCSBASE_DAEMON_EXE",
+            "DOCSBASE_IPC_DEBUG",
+            "DOCSBASE_WATCH_DEBUG",
         ]
         .contains(key)
     }));

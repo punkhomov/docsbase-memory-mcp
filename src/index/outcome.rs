@@ -71,6 +71,21 @@ pub fn recipe_id(config: &Config) -> String {
     hash.update(b"docsbase-index-outcome-recipe\0");
     hash.update(&RECIPE_VERSION.to_le_bytes());
     hash.update(&super::tokenizer::TOKENIZER_VERSION.to_le_bytes());
+    hash_survey_inputs(&mut hash, config);
+    format!("{RECIPE_PREFIX}{}", hash.finalize().to_hex())
+}
+
+/// Identity of the configuration and algorithms that select and chunk text.
+/// Lexical tokenization affects only Tantivy. Live source text is verified
+/// separately through the content-addressed vector cache during preparation.
+pub(crate) fn vector_inputs_id(config: &Config) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new_derive_key("docsbase.document-vector-inputs.v1");
+    hash.update(&RECIPE_VERSION.to_le_bytes());
+    hash_survey_inputs(&mut hash, config);
+    *hash.finalize().as_bytes()
+}
+
+fn hash_survey_inputs(hash: &mut blake3::Hasher, config: &Config) {
     hash.update(&config.chunk.recipe_id().to_le_bytes());
     hash.update(&config.max_file_size.to_le_bytes());
     hash.update(&(config.max_docs_per_project as u64).to_le_bytes());
@@ -78,7 +93,6 @@ pub fn recipe_id(config: &Config) -> String {
         hash.update(&(pattern.len() as u64).to_le_bytes());
         hash.update(pattern.as_bytes());
     }
-    format!("{RECIPE_PREFIX}{}", hash.finalize().to_hex())
 }
 
 /// Read bounded evidence in one metadata SELECT without providers or writes.

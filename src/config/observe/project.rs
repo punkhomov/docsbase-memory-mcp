@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::config::change::{
-    self, Action, Assessment, Blocker, BlockerCode, ChangePlan, Effect, ExpectedState, Grant,
-    Observation, PlanLimits, Reason, ResourceId, Target,
+    self, Action, Assessment, Blocker, BlockerCode, ChangePlan, Effect, ExpectedState, Observation,
+    PlanLimits, Reason, ResourceId, Target,
 };
 use crate::config::schema::{ArtifactId, Resolved, SourceId};
 use crate::daemon::settings::DaemonProfile;
@@ -17,7 +17,10 @@ use crate::store::{
     generation_build::CatalogHead, registry_inspect, registry_inspect::ObservedProjectIndex,
     settings::DbSettings,
 };
-use crate::vector_cache::EmbeddingRecipe;
+use crate::vector_cache::{
+    EmbeddingRecipe,
+    inputs::{self, DocumentVectorInputs},
+};
 
 use super::{PlanningLimits, source};
 
@@ -124,6 +127,7 @@ pub(crate) struct ProjectReplacement {
 pub(crate) struct ReviewedReplacement {
     pub(crate) base: ObservedProjectIndex,
     pub(crate) head: CatalogHead,
+    pub(crate) reuse_vectors_only: bool,
     sources: [source::SourceObservation; 2],
 }
 
@@ -251,6 +255,7 @@ fn project_plan_using(
                                     reviewed: reviewed_replacement(
                                         selected,
                                         [global.observation, project.observation],
+                                        &assessment,
                                     )?,
                                 });
                             }
@@ -262,6 +267,7 @@ fn project_plan_using(
                                 config,
                                 selected,
                                 [global.observation, project.observation],
+                                &assessment,
                             )?);
                         }
                         (survey, None)
@@ -353,6 +359,17 @@ fn resolve_plan_sources(
         &defaults,
     )?;
     Ok(global.map(|global| {
+        #[cfg(feature = "hybrid-local")]
+        let global = if let Some(active) = active {
+            let origins = global.provenance().clone();
+            let mut settings = global.into_settings();
+            settings
+                .providers
+                .inherit_runtime_bootstrap(&active.daemon.providers);
+            Resolved::new(settings, origins)
+        } else {
+            global
+        };
         let settings =
             crate::config::resolve::for_observed_project(&global, project.layer.as_ref()).and_then(
                 |config| {
@@ -421,21 +438,28 @@ fn replacement_for(
     config: Config,
     selected: &registry_inspect::SelectedIndexEvidence,
     sources: [source::SourceObservation; 2],
+    assessment: &Assessment,
 ) -> Result<ProjectReplacement> {
     Ok(ProjectReplacement {
         global,
         config,
-        reviewed: reviewed_replacement(selected, sources)?,
+        reviewed: reviewed_replacement(selected, sources, assessment)?,
     })
 }
 
 fn reviewed_replacement(
     selected: &registry_inspect::SelectedIndexEvidence,
     sources: [source::SourceObservation; 2],
+    assessment: &Assessment,
 ) -> Result<ReviewedReplacement> {
+    let vectors = artifact("document_vectors", Some(selected.index.project_id));
     Ok(ReviewedReplacement {
         base: selected.index,
         head: CatalogHead::from_observed_seal(selected.index, selected.seal)?,
+        reuse_vectors_only: !assessment
+            .actions
+            .iter()
+            .any(|action| action.resource == vectors),
         sources,
     })
 }
@@ -607,8 +631,7 @@ fn assess_ann(
                 selected.seal,
             ));
             let embedding = config
-                .hybrid_cfg
-                .embedding_model_key()
+                .embedding_model_key()?
                 .as_deref()
                 .map(EmbeddingRecipe::for_model);
             assessment.actions.push(Action {
@@ -721,12 +744,36 @@ fn assess_selected(
     };
     let lexical = crate::index::outcome::recipe_id(config);
     let embedding = config
-        .hybrid_cfg
-        .embedding_model_key()
+        .embedding_model_key()?
         .as_deref()
         .map(EmbeddingRecipe::for_model);
     if recipes.lexical != lexical || recipes.embedding != embedding {
-        push_replacement(assessment, identity.project_id, &lexical, embedding, config)?;
+        let previous = recipes
+            .vector_inputs
+            .zip(recipes.embedding)
+            .map(|(chunks, embedding)| DocumentVectorInputs { chunks, embedding });
+        let desired = embedding.map(|embedding| DocumentVectorInputs {
+            chunks: crate::index::outcome::vector_inputs_id(config),
+            embedding,
+        });
+        let vectors = desired
+            .map(|desired| {
+                inputs::assess_replacement(
+                    identity.project_id,
+                    previous,
+                    desired,
+                    has_remote_embedding(config),
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+        push_replacement(
+            assessment,
+            identity.project_id,
+            &lexical,
+            embedding,
+            vectors,
+        )?;
     }
     Ok(Some(recipes.full_survey))
 }
@@ -736,39 +783,16 @@ fn push_replacement(
     project_id: i64,
     lexical: &str,
     embedding: Option<EmbeddingRecipe>,
-    config: &Config,
+    vectors: Assessment,
 ) -> Result<()> {
-    let mut dependencies = Vec::new();
-    if let Some(recipe) = embedding {
-        let vectors = artifact("document_vectors", Some(project_id));
-        // The seal identifies the model recipe. It does not count vectors
-        // present in the separately owned, live cache.
-        assessment.expected.push(Observation {
-            resource: vectors.clone(),
-            state: ExpectedState::Unknown,
-        });
-        let remote = config
-            .hybrid_cfg
-            .embedding
-            .as_ref()
-            .is_some_and(|stage| stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER);
-        assessment.actions.push(Action {
-            resource: vectors.clone(),
-            effect: Effect::Rebuild,
-            target: Some(Target::Identity(change::policy_identity(
-                "document-vector-inputs-v1",
-                &(lexical, recipe),
-            )?)),
-            reasons: vec![Reason::SettingsChanged],
-            dependencies: Vec::new(),
-            required_grants: if remote {
-                vec![Grant::Remote]
-            } else {
-                Vec::new()
-            },
-        });
-        dependencies.push(vectors);
-    }
+    let dependencies = vectors
+        .actions
+        .iter()
+        .map(|action| action.resource.clone())
+        .collect();
+    assessment.expected.extend(vectors.expected);
+    assessment.actions.extend(vectors.actions);
+    assessment.blockers.extend(vectors.blockers);
     assessment.actions.push(Action {
         resource: artifact("project_index", Some(project_id)),
         effect: Effect::Rebuild,
@@ -783,6 +807,14 @@ fn push_replacement(
     Ok(())
 }
 
+fn has_remote_embedding(config: &Config) -> bool {
+    config
+        .hybrid_cfg
+        .embedding
+        .as_ref()
+        .is_some_and(|stage| stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER)
+}
+
 fn artifact(component: &str, project_id: Option<i64>) -> ResourceId {
     ResourceId::Artifact(ArtifactId {
         component: component.into(),
@@ -795,4 +827,73 @@ fn block(assessment: &mut Assessment, resource: &ResourceId, code: BlockerCode) 
         resource: Some(resource.clone()),
         code,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::change::Grant;
+
+    #[test]
+    fn lexical_only_replacement_leaves_compatible_vector_inputs_unchanged() {
+        use crate::store::registry_inspect::{
+            IndexRecipeEvidence, ObservedProjectIndex, ProjectIndexLayout,
+        };
+
+        let mut config = Config {
+            hybrid_cfg: crate::hybrid::config::HybridCfg::enabled_with_defaults(),
+            ..Config::default()
+        };
+        let model = config.embedding_model_key().unwrap().unwrap();
+        let mut selected = registry_inspect::SelectedIndexEvidence {
+            index: ObservedProjectIndex {
+                project_id: 1,
+                epoch: Some([1; 16]),
+                generation_id: Some(1),
+                content_revision: 1,
+                layout: ProjectIndexLayout::Local,
+            },
+            seal: Some([1; 32]),
+            recipes: Some(IndexRecipeEvidence {
+                lexical: "previous-tokenizer-recipe".into(),
+                vector_inputs: Some(crate::index::outcome::vector_inputs_id(&config)),
+                embedding: Some(EmbeddingRecipe::for_model(&model)),
+                full_survey: true,
+            }),
+        };
+        let mut assessment = Assessment::default();
+        assert_eq!(
+            assess_selected(&selected, &config, &mut assessment).unwrap(),
+            Some(true)
+        );
+        assert_eq!(assessment.actions.len(), 1);
+        assert_eq!(
+            assessment.actions[0].resource,
+            artifact("project_index", Some(1))
+        );
+        assert_eq!(assessment.actions[0].dependencies, [] as [ResourceId; 0]);
+        assert_eq!(assessment.actions[0].required_grants, [] as [Grant; 0]);
+
+        selected.recipes.as_mut().unwrap().vector_inputs = None;
+        let mut unknown = Assessment::default();
+        assess_selected(&selected, &config, &mut unknown).unwrap();
+        assert_eq!(unknown.actions.len(), 2);
+        assert_eq!(unknown.actions[0].required_grants, vec![Grant::Remote]);
+
+        config.max_file_size += 1;
+        selected.recipes.as_mut().unwrap().vector_inputs =
+            Some(crate::index::outcome::vector_inputs_id(&Config::default()));
+        let mut changed = Assessment::default();
+        assess_selected(&selected, &config, &mut changed).unwrap();
+        assert_eq!(changed.actions.len(), 2);
+        assert_eq!(
+            changed.actions[0].resource,
+            artifact("document_vectors", Some(1))
+        );
+        assert_eq!(changed.actions[0].required_grants, vec![Grant::Remote]);
+        assert_eq!(
+            changed.actions[1].dependencies,
+            vec![changed.actions[0].resource.clone()]
+        );
+    }
 }

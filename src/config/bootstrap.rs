@@ -73,7 +73,7 @@ impl DefaultsContext {
 }
 
 /// Resolved dependency input plus its source; no raw env string is retained.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BootstrapValue<T> {
     /// Validated value.
     pub value: T,
@@ -102,9 +102,34 @@ pub struct BootstrapContext {
     pub rayon_threads: BootstrapValue<NonZeroUsize>,
     /// Process-wide tokenizers parallelism.
     pub tokenizers_parallelism: BootstrapValue<bool>,
+    /// IPC diagnostics, enabled by presence of its environment switch.
+    pub ipc_debug: BootstrapValue<bool>,
+    /// Watcher diagnostics, enabled by presence of its environment switch.
+    pub watch_debug: BootstrapValue<bool>,
 }
 
 impl BootstrapContext {
+    /// Capture the whitelisted inputs at an executable launch boundary.
+    /// # Errors
+    /// Invalid executor settings or unavailable host parallelism.
+    pub(crate) fn capture_host(entrypoint: EntrypointFacts) -> Result<Self> {
+        let cores = std::thread::available_parallelism()
+            .map_err(|error| Error::internal_with_source("capture runtime parallelism", error))?;
+        Self::capture_with(cores.get(), entrypoint, std::env::var_os)
+    }
+
+    pub(crate) fn capture_current_thread(entrypoint: EntrypointFacts) -> Result<Self> {
+        let cores = DefaultsContext::for_host().available_parallelism;
+        // The current-thread executor has no Tokio worker-count setting.
+        Self::capture_with(cores.get(), entrypoint, |key| {
+            if key == "TOKIO_WORKER_THREADS" {
+                None
+            } else {
+                std::env::var_os(key)
+            }
+        })
+    }
+
     /// Captures only supported bootstrap inputs through an injectable lookup.
     /// Credentials such as `OPENROUTER_API_KEY` are never requested.
     ///
@@ -129,27 +154,11 @@ impl BootstrapContext {
                 source: SourceId::Os,
             },
         };
-        let rayon_threads = rayon_threads(cores, &mut lookup);
-        let tokenizers_parallelism = match lookup("TOKENIZERS_PARALLELISM") {
-            Some(value) => {
-                // tokenizers treats unrecognised spellings as true. Preserve
-                // that policy without retaining or logging the raw value.
-                let enabled = value.to_str().is_none_or(|value| {
-                    !matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "" | "off" | "false" | "f" | "no" | "n" | "0"
-                    )
-                });
-                BootstrapValue {
-                    value: enabled,
-                    source: SourceId::Environment("TOKENIZERS_PARALLELISM"),
-                }
-            }
-            None => BootstrapValue {
-                value: true,
-                source: SourceId::Defaults,
-            },
-        };
+        let mut rayon_threads = rayon_threads(cores, &mut lookup);
+        rayon_threads.value =
+            NonZeroUsize::new(rayon_threads.value.get().min(rayon::max_num_threads()))
+                .unwrap_or(NonZeroUsize::MIN);
+        let tokenizers_parallelism = tokenizer_parallelism(&mut lookup);
         Ok(Self {
             defaults: DefaultsContext {
                 available_parallelism: cores,
@@ -164,8 +173,48 @@ impl BootstrapContext {
             tokio_workers,
             rayon_threads,
             tokenizers_parallelism,
+            ipc_debug: debug_flag("DOCSBASE_IPC_DEBUG", &mut lookup),
+            watch_debug: debug_flag("DOCSBASE_WATCH_DEBUG", &mut lookup),
         })
     }
+}
+
+pub(crate) fn tokenizer_parallelism(
+    mut lookup: impl FnMut(&'static str) -> Option<OsString>,
+) -> BootstrapValue<bool> {
+    match lookup("TOKENIZERS_PARALLELISM") {
+        Some(value) => {
+            // tokenizers treats unrecognised spellings as true. Preserve
+            // that policy without retaining or logging the raw value.
+            let enabled = value.to_str().is_none_or(|value| {
+                !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "" | "off" | "false" | "f" | "no" | "n" | "0"
+                )
+            });
+            BootstrapValue {
+                value: enabled,
+                source: SourceId::Environment("TOKENIZERS_PARALLELISM"),
+            }
+        }
+        None => BootstrapValue {
+            value: true,
+            source: SourceId::Defaults,
+        },
+    }
+}
+
+fn debug_flag(
+    key: &'static str,
+    lookup: &mut impl FnMut(&'static str) -> Option<OsString>,
+) -> BootstrapValue<bool> {
+    let value = lookup(key).is_some();
+    let source = if value {
+        SourceId::Environment(key)
+    } else {
+        SourceId::Defaults
+    };
+    BootstrapValue { value, source }
 }
 
 fn parse_positive(name: &str, value: &std::ffi::OsStr) -> Result<NonZeroUsize> {

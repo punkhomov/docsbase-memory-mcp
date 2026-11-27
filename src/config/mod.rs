@@ -231,6 +231,15 @@ impl Config {
         resolve::for_provided_project(global, root).map(schema::Resolved::into_settings)
     }
 
+    pub(crate) fn embedding_model_key(&self) -> Result<Option<String>> {
+        self.hybrid_cfg
+            .embedding
+            .as_ref()
+            .filter(|_| self.hybrid_cfg.enabled)
+            .map(|embedding| self.providers.embedding_model_id(embedding))
+            .transpose()
+    }
+
     /// Same as [`Config::load`] but with an explicit config directory (testable).
     ///
     /// # Errors

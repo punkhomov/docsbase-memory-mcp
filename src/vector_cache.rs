@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::{Error, Result};
 
+pub(crate) mod inputs;
 mod job_pin;
 mod owner;
 pub(crate) use job_pin::{JobPinAuthority, PinVerification};

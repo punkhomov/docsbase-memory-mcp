@@ -168,7 +168,7 @@ async fn run_in(
                 std::sync::Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
             if db.has_generation_catalog()
                 && config.hybrid_cfg.ranking == crate::hybrid::config::Ranking::Rrf
-                && let Some(model) = config.hybrid_cfg.embedding_model_key()
+                && let Some(model) = config.embedding_model_key()?
             {
                 use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
                 with_catalog_pair(&db, &project, |_, local, _| {

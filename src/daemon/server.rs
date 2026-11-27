@@ -25,7 +25,7 @@ use crate::daemon::tools;
 use crate::daemon::{lifecycle, registry};
 use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
-use crate::hybrid::config::{Ranking, embedding_model_id};
+use crate::hybrid::config::Ranking;
 #[cfg(test)]
 use crate::hybrid::dense::DenseCacheLimits;
 #[cfg(test)]
@@ -112,6 +112,7 @@ pub struct Shared {
     stopping: AtomicBool,
     /// Global config snapshot taken at daemon start (OQ-6).
     global_config: Config,
+    ipc_debug: bool,
     website: Option<FixedProject>,
     /// Why the global config could not be loaded; surfaced by `status`.
     global_config_error: Option<String>,
@@ -376,6 +377,7 @@ fn prepare_runtime_owners(
     owners: Option<AsyncDaemonOwners>,
     global_config: &Config,
     watch_enabled: bool,
+    watch_debug: bool,
 ) -> Result<RuntimeOwners> {
     Ok(if let Some(owners) = owners {
         (
@@ -397,10 +399,24 @@ fn prepare_runtime_owners(
             activity,
             events,
             workers,
-            Arc::new(Watchers::with_enabled(watch_enabled)),
+            Arc::new(Watchers::with_diagnostics(watch_enabled, watch_debug)),
             None,
         )
     })
+}
+
+fn validate_runtime_policies(
+    config: &Config,
+    settings: &Resolved<DbSettings>,
+    pool_settings: &Resolved<ReadPoolSettings>,
+    dense_settings: &crate::hybrid::dense_settings::DenseSettings,
+) -> Result<()> {
+    use crate::config::schema::{Capabilities, SettingsSpec};
+    let capabilities = Capabilities::current();
+    config.validate()?;
+    crate::hybrid::dense_settings::DenseSpec::validate(dense_settings, &capabilities)?;
+    crate::store::settings::DbSpec::validate(settings.settings(), &capabilities)?;
+    crate::store::settings::ReadPoolSpec::validate(pool_settings.settings(), &capabilities)
 }
 
 fn prepare_metadata_store(
@@ -573,6 +589,7 @@ impl Shared {
         )
     }
 
+    #[allow(clippy::too_many_lines)] // Ordered startup of native owners and their shared state.
     pub(crate) fn open_with_runtime_owners(
         cache: &Path,
         settings: &Resolved<DbSettings>,
@@ -581,21 +598,16 @@ impl Shared {
         admitted: AdmittedLaunch,
         owners: Option<AsyncDaemonOwners>,
     ) -> Result<Arc<Self>> {
-        use crate::config::schema::{Capabilities, SettingsSpec};
         let AdmittedLaunch {
             launch,
             website,
             catalog_epoch,
         } = admitted;
-        launch.config.settings().validate()?;
-        crate::hybrid::dense_settings::DenseSpec::validate(
+        validate_runtime_policies(
+            launch.config.settings(),
+            settings,
+            pool_settings,
             dense_settings,
-            &Capabilities::current(),
-        )?;
-        crate::store::settings::DbSpec::validate(settings.settings(), &Capabilities::current())?;
-        crate::store::settings::ReadPoolSpec::validate(
-            pool_settings.settings(),
-            &Capabilities::current(),
         )?;
         // Admission has already observed the stopped registry. Its native
         // SQLite reader can leave WAL sidecars, so compare logical registry
@@ -606,8 +618,9 @@ impl Shared {
         } else {
             AnnPolicy::BuildOrLoad
         };
-        let dense =
+        let mut dense =
             DenseCache::for_config(ann_policy, cache, dense_settings, launch.config.settings())?;
+        dense.set_cpu_pool(launch.cpu_pool.clone());
         let (db, readers, catalog_epoch) = prepare_metadata_store(
             cache,
             settings,
@@ -625,8 +638,12 @@ impl Shared {
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
         }
-        let (activity, activity_events, workers, watchers, jobs) =
-            prepare_runtime_owners(owners, &global_config, website.is_none())?;
+        let (activity, activity_events, workers, watchers, jobs) = prepare_runtime_owners(
+            owners,
+            &global_config,
+            website.is_none(),
+            launch.watch_debug,
+        )?;
         #[cfg(feature = "hybrid-remote")]
         let remote = Arc::new(crate::hybrid::remote::RemoteExecution::real_with_owners(
             &global_config.remote,
@@ -669,6 +686,7 @@ impl Shared {
             watchers,
             stopping: AtomicBool::new(false),
             global_config,
+            ipc_debug: launch.ipc_debug,
             website,
             global_config_error: launch.error,
             global_config_stamp: launch.stamp,
@@ -1016,6 +1034,7 @@ impl Shared {
                 event.clone(),
                 policy,
                 pending.as_deref(),
+                shared.watchers.debug(),
                 || shared.open_work_registry(),
             )?;
             #[cfg(test)]
@@ -1449,8 +1468,7 @@ impl Shared {
             return self.schedule_catalog_backfill(project, config, stages, source, &operation);
         }
         let db = self.db();
-        let Some(coverage) =
-            hybrid_jobs::coverage_from(&db, &config.hybrid_cfg, project.id, &source)?
+        let Some(coverage) = hybrid_jobs::configured_coverage(&db, &config, project.id, &source)?
         else {
             return Ok(());
         };
@@ -1713,7 +1731,7 @@ impl Shared {
                 stages.ranking == Ranking::Rrf,
             ),
             _ => (
-                embedding_model_id(config.hybrid_cfg.embedding.as_ref()?),
+                config.embedding_model_key().ok()??,
                 config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf,
             ),
         };
@@ -1850,12 +1868,12 @@ impl Shared {
         let (config, stages) = if let Some(current) = current
             && (current == desired
                 || (shared_catalog
-                    && catalog_requires_index(&current, &desired)
+                    && catalog_requires_index(&current, &desired)?
                     && crate::store::project_index::catalog_needs_index_for(
                         self.readers.try_acquire()?,
                         project,
                         &crate::index::outcome::recipe_id(&desired),
-                        configured_catalog_embedding(&desired),
+                        configured_catalog_embedding(&desired)?,
                     )?)) {
             // Opens retain the active recipe until explicit Index can
             // publish the required pair together with the new settings.
@@ -1872,7 +1890,7 @@ impl Shared {
                 self.readers.try_acquire()?,
                 project,
                 &crate::index::outcome::recipe_id(&config),
-                configured_catalog_embedding(&config),
+                configured_catalog_embedding(&config)?,
             )?
         {
             return Err(Error::Admission {
@@ -2165,8 +2183,8 @@ pub const DRAIN_TIMEOUT: Duration =
     Duration::from_millis(crate::daemon::settings::DaemonSpec::DEFAULTS.reply_drain_ms);
 
 /// Stderr tracing for connection lifecycle (`DOCSBASE_IPC_DEBUG=1`).
-fn ipc_debug(message: &str) {
-    if std::env::var_os("DOCSBASE_IPC_DEBUG").is_some() {
+fn ipc_debug(shared: &Shared, message: std::fmt::Arguments<'_>) {
+    if shared.ipc_debug {
         eprintln!("ipc-debug: {message}");
     }
 }
@@ -2262,19 +2280,22 @@ async fn handle_connection_in(
                 };
                 let line = match next_frame {
                     Ok(Frame::Line(line)) => {
-                        ipc_debug(&format!(
-                            "frame {} bytes on session {:?}",
-                            line.len(),
-                            peer.session_id
-                        ));
+                        ipc_debug(
+                            &shared,
+                            format_args!(
+                                "frame {} bytes on session {:?}",
+                                line.len(),
+                                peer.session_id
+                            ),
+                        );
                         line
                     }
                     Ok(Frame::Eof) => {
-                        ipc_debug("connection EOF");
+                        ipc_debug(&shared, format_args!("connection EOF"));
                         break;
                     }
                     Err(err) => {
-                        ipc_debug(&format!("connection read error: {err}"));
+                        ipc_debug(&shared, format_args!("connection read error: {err}"));
                         break;
                     }
                     Ok(frame @ (Frame::Incomplete | Frame::TooLarge)) => {
@@ -2375,7 +2396,7 @@ async fn handle_connection_in(
     }
 
     if let Some(id) = peer.session_id {
-        ipc_debug(&format!("leaving session {id}"));
+        ipc_debug(&shared, format_args!("leaving session {id}"));
         shared.sessions.leave(id);
     }
     let _ = events.try_send(());
@@ -2823,7 +2844,7 @@ fn finish_registration(
             let (id, cancel) = shared
                 .sessions
                 .join(pid, cwd.to_path_buf(), Some(project.id))?;
-            ipc_debug(&format!("bound session {id} (pid {pid})"));
+            ipc_debug(shared, format_args!("bound session {id} (pid {pid})"));
             Ok((
                 id,
                 json!({
@@ -3628,7 +3649,7 @@ fn prepare_catalog_project_sync(
 
 fn catalog_stage_model<'a>(config: &Config, stages: &'a HybridStages) -> Result<Option<&'a str>> {
     let model = stages.embedder.as_ref().map(|stage| stage.model_id());
-    if model != config.hybrid_cfg.embedding_model_key().as_deref() {
+    if model != config.embedding_model_key()?.as_deref() {
         return Err(Error::internal(
             "constructed embedding stage does not match the resolved catalog settings",
         ));
@@ -3636,12 +3657,13 @@ fn catalog_stage_model<'a>(config: &Config, stages: &'a HybridStages) -> Result<
     Ok(model)
 }
 
-fn configured_catalog_embedding(config: &Config) -> Option<crate::vector_cache::EmbeddingRecipe> {
-    config
-        .hybrid_cfg
-        .embedding_model_key()
+fn configured_catalog_embedding(
+    config: &Config,
+) -> Result<Option<crate::vector_cache::EmbeddingRecipe>> {
+    Ok(config
+        .embedding_model_key()?
         .as_deref()
-        .map(crate::vector_cache::EmbeddingRecipe::for_model)
+        .map(crate::vector_cache::EmbeddingRecipe::for_model))
 }
 
 fn ann_warm_binding(
@@ -3669,9 +3691,11 @@ fn ann_warm_binding(
     })
 }
 
-fn catalog_requires_index(active: &Config, desired: &Config) -> bool {
-    crate::index::outcome::recipe_id(active) != crate::index::outcome::recipe_id(desired)
-        || configured_catalog_embedding(active) != configured_catalog_embedding(desired)
+fn catalog_requires_index(active: &Config, desired: &Config) -> Result<bool> {
+    Ok(
+        crate::index::outcome::recipe_id(active) != crate::index::outcome::recipe_id(desired)
+            || configured_catalog_embedding(active)? != configured_catalog_embedding(desired)?,
+    )
 }
 
 fn catalog_job_project(
@@ -4056,7 +4080,7 @@ fn capture_catalog_model(
     let key_bytes = model.provider.len() + model.model.len() + 64;
     let permit = budget.reserve(3 * key_bytes as u64)?;
     Ok(Some(CatalogModel {
-        key: embedding_model_id(model),
+        key: config.providers.embedding_model_id(model)?,
         ranking: config.hybrid_cfg.ranking,
         permit,
     }))
@@ -4261,9 +4285,9 @@ fn route_index_metadata(
                         None
                     };
                     let coverage = config.as_ref().and_then(|config| {
-                        hybrid_jobs::coverage_from(
+                        hybrid_jobs::configured_coverage(
                             metadata,
-                            &config.hybrid_cfg,
+                            config,
                             p.id,
                             &shared.vector_source_for(p.id, config),
                         )
@@ -4330,9 +4354,9 @@ fn runtime_status(shared: &Shared, registry_db: &Db, metadata: &Db) -> Result<Va
             let Ok(config) = shared.project_config(project) else {
                 return None;
             };
-            hybrid_jobs::coverage_from(
+            hybrid_jobs::configured_coverage(
                 metadata,
-                &config.hybrid_cfg,
+                &config,
                 project.id,
                 &shared.vector_source_for(project.id, &config),
             )

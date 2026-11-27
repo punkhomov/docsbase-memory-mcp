@@ -9,6 +9,8 @@ use std::time::Duration;
 use directories::ProjectDirs;
 use fd_lock::RwLock as FdRwLock;
 
+use super::bootstrap::{BootstrapContext, BootstrapValue};
+use super::schema::SourceId;
 use crate::error::{Error, Result};
 
 const APP: &str = "docsbase-memory-mcp";
@@ -55,6 +57,49 @@ pub fn config_dir() -> Result<PathBuf> {
         return Ok(PathBuf::from(dir));
     }
     project_dirs().map(|dirs| dirs.config_dir().to_path_buf())
+}
+
+fn captured_dir(
+    value: Option<&BootstrapValue<PathBuf>>,
+    select: impl FnOnce(&ProjectDirs) -> &Path,
+) -> Result<BootstrapValue<PathBuf>> {
+    if let Some(value) = value {
+        return Ok(value.clone());
+    }
+    Ok(BootstrapValue {
+        value: select(&project_dirs()?).to_path_buf(),
+        source: SourceId::Os,
+    })
+}
+
+pub(crate) fn cache_dir_from(bootstrap: &BootstrapContext) -> Result<BootstrapValue<PathBuf>> {
+    captured_dir(bootstrap.cache_dir.as_ref(), ProjectDirs::cache_dir)
+}
+
+pub(crate) fn data_dir_from(bootstrap: &BootstrapContext) -> Result<BootstrapValue<PathBuf>> {
+    captured_dir(bootstrap.data_dir.as_ref(), ProjectDirs::data_dir)
+}
+
+pub(crate) fn config_dir_from(bootstrap: &BootstrapContext) -> Result<BootstrapValue<PathBuf>> {
+    captured_dir(bootstrap.config_dir.as_ref(), ProjectDirs::config_dir)
+}
+
+pub(crate) fn daemon_exe_from(
+    override_path: Option<&BootstrapValue<PathBuf>>,
+) -> BootstrapValue<PathBuf> {
+    if let Some(path) = override_path {
+        return path.clone();
+    }
+    match std::env::current_exe() {
+        Ok(value) => BootstrapValue {
+            value,
+            source: SourceId::Os,
+        },
+        Err(_) => BootstrapValue {
+            value: PathBuf::from("docsbase"),
+            source: SourceId::Defaults,
+        },
+    }
 }
 
 /// Number of retries for the cross-process config-write lock (C13).

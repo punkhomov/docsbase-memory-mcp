@@ -21,11 +21,8 @@ use crate::vector_cache::Embedder;
 
 use super::Reranker;
 use super::config::{EmbeddingCfg, ProvidersCfg, RerankerCfg};
-pub use super::local_settings::DEFAULT_BATCH_SIZE;
 use super::local_settings::InferenceSettings;
-
-/// Default embedding max length (NFR-4).
-pub const DEFAULT_MAX_LENGTH: usize = 512;
+pub use super::local_settings::{DEFAULT_BATCH_SIZE, DEFAULT_MAX_LENGTH};
 
 /// Identity of a live native model session (NFR-4/NFR-7).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -60,7 +57,8 @@ pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn 
     }
     // Provisioning (FR-12): runtime first, model second.
     let runtime = super::runtime::resolve(providers)?;
-    if !models::cached(entry)? {
+    let folder = model_folder(providers, entry);
+    if !models::cached_in(entry, &folder)? {
         return Err(Error::Admission {
             message: format!(
                 "fastembed model \"{}\" is not fetched; run `docsbase models fetch fastembed/{}`",
@@ -70,14 +68,15 @@ pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn 
     }
     let inference = providers.fastembed_inference()?;
     let key = embedding_key(cfg, runtime, inference);
-    let instance = get_or_load_by_key(key.clone(), embedder_instances(), || {
-        FastEmbedEmbedder::load(entry, &key).map(Arc::new)
+    let instance = get_or_load_by_key((key.clone(), folder.clone()), embedder_instances(), || {
+        FastEmbedEmbedder::load(entry, &key, &folder).map(Arc::new)
     })?;
     Ok(Arc::new(FastEmbedEmbedder {
         entry,
         model_id: key.model_id,
         instance,
         batch_size: inference.batch_size,
+        cpu_pool: providers.cpu_pool(),
     }))
 }
 
@@ -103,14 +102,24 @@ fn embedding_key(
     runtime: PathBuf,
     inference: InferenceSettings,
 ) -> ModelCacheKey {
-    model_key(super::config::embedding_model_id(cfg), runtime, inference)
+    model_key(
+        super::config::fastembed_embedding_model_id(cfg, inference.embedding_max_length),
+        runtime,
+        inference.embedding_max_length,
+        inference.intra_threads,
+    )
 }
 
-fn model_key(model_id: String, runtime: PathBuf, inference: InferenceSettings) -> ModelCacheKey {
+fn model_key(
+    model_id: String,
+    runtime: PathBuf,
+    max_length: usize,
+    intra_threads: usize,
+) -> ModelCacheKey {
     ModelCacheKey {
         model_id,
-        max_length: DEFAULT_MAX_LENGTH,
-        intra_threads: Some(inference.intra_threads),
+        max_length,
+        intra_threads: Some(intra_threads),
         runtime,
     }
 }
@@ -121,7 +130,9 @@ struct LoadedModel<T> {
     _lease: SharedFileLease,
 }
 
-type ModelInstances<T> = Mutex<HashMap<ModelCacheKey, Weak<T>>>;
+// File leases belong to one folder even when weights and vector recipes
+// are identical across installations.
+type ModelInstances<T> = Mutex<HashMap<(ModelCacheKey, PathBuf), Weak<T>>>;
 
 /// Serializes model construction (cold path only, C11): without it, two
 /// cold same-key callers could both run `load()` (two ORT sessions, two
@@ -134,7 +145,7 @@ static LOAD_LOCK: Mutex<()> = Mutex::new(());
 /// generic implementation behind both model maps. Weak entries let the
 /// last stage release the model session and its file lock.
 fn get_or_load_by_key<T: ?Sized>(
-    key: ModelCacheKey,
+    key: (ModelCacheKey, PathBuf),
     instances: &ModelInstances<T>,
     load: impl FnOnce() -> Result<Arc<T>>,
 ) -> Result<Arc<T>> {
@@ -182,6 +193,7 @@ pub struct FastEmbedEmbedder {
     model_id: String,
     instance: Arc<LoadedModel<fastembed::TextEmbedding>>,
     batch_size: usize,
+    cpu_pool: Option<Arc<super::cpu::CpuPool>>,
 }
 
 impl FastEmbedEmbedder {
@@ -195,13 +207,13 @@ impl FastEmbedEmbedder {
     fn load(
         entry: &'static ModelEntry<'static>,
         key: &ModelCacheKey,
+        cache_dir: &Path,
     ) -> Result<LoadedModel<fastembed::TextEmbedding>> {
         // The runtime must be initialized before any fastembed constructor
         // (FR-11). `init` is idempotent per process.
         super::runtime::init(&key.runtime)?;
 
-        let cache_dir = models::cache_dir(entry.name, entry.revision);
-        let lock_guard = take_shared_lock(&cache_dir)?;
+        let lock_guard = take_shared_lock(cache_dir)?;
 
         let onnx_path = entry
             .files
@@ -211,8 +223,8 @@ impl FastEmbedEmbedder {
             .ok_or_else(|| {
                 Error::internal(format!("registry row {} has no onnx file", entry.name))
             })?;
-        let onnx = read_cache_file(&cache_dir, &onnx_path, entry)?;
-        let tokenizer_files = tokenizer_files(&cache_dir, entry)?;
+        let onnx = read_cache_file(cache_dir, &onnx_path, entry)?;
+        let tokenizer_files = tokenizer_files(cache_dir, entry)?;
 
         let pooling = match entry.pooling {
             Some(Pooling::Cls) => Some(fastembed::Pooling::Cls),
@@ -250,19 +262,22 @@ impl FastEmbedEmbedder {
     }
 
     /// Query embedding with the registry `query_prefix` (FR-10).
-    fn embed_text(&self, text: &str, is_query: bool) -> Result<Vec<f32>> {
-        let prefixed = apply_role_prefix(text, self.entry, is_query);
-        let mut model = self
+    fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+        let prefixed = apply_role_prefix(text, self.entry, true);
+        let mut session = self
             .instance
             .model
             .lock()
             .map_err(|poison| Error::internal(format!("embedder lock poisoned: {poison}")))?;
-        let mut vectors = model
-            .embed([prefixed], Some(self.batch_size))
-            .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))?;
-        vectors
-            .pop()
-            .ok_or_else(|| Error::internal("fastembed returned no vector for one input"))
+        let model = &mut *session;
+        execute_inference(self.cpu_pool.as_deref(), || {
+            let mut vectors = model
+                .embed([prefixed], Some(self.batch_size))
+                .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))?;
+            vectors
+                .pop()
+                .ok_or_else(|| Error::internal("fastembed returned no vector for one input"))
+        })
     }
 }
 
@@ -272,25 +287,49 @@ impl Embedder for FastEmbedEmbedder {
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        // Hold the session once and pass the resolved batch size to inference.
         let prefixed: Vec<String> = texts
             .iter()
             .map(|text| apply_role_prefix(text, self.entry, false))
             .collect();
-        let mut model = self
+        // A Rayon worker must never block on a session whose holder can enter
+        // that same pool to tokenize. Acquire the guard on the caller.
+        let mut session = self
             .instance
             .model
             .lock()
             .map_err(|poison| Error::internal(format!("embedder lock poisoned: {poison}")))?;
-        embed_batches(&prefixed, self.batch_size, |chunk, batch_size| {
-            model
-                .embed(chunk, Some(batch_size))
-                .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))
+        let model = &mut *session;
+        execute_inference(self.cpu_pool.as_deref(), || {
+            embed_batches(&prefixed, self.batch_size, |chunk, batch_size| {
+                model
+                    .embed(chunk, Some(batch_size))
+                    .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))
+            })
         })
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        self.embed_text(text, true)
+        self.embed_text(text)
+    }
+}
+
+fn model_folder(providers: &ProvidersCfg, entry: &ModelEntry<'_>) -> PathBuf {
+    providers
+        .runtime_bootstrap()
+        .and_then(|runtime| runtime.cache_root.as_deref())
+        .map_or_else(
+            || models::cache_dir(entry.name, entry.revision),
+            |root| models::cache_dir_under(root, entry.name, entry.revision),
+        )
+}
+
+fn execute_inference<T: Send>(
+    pool: Option<&super::cpu::CpuPool>,
+    work: impl FnOnce() -> Result<T> + Send,
+) -> Result<T> {
+    match pool {
+        Some(pool) => pool.install(work)?,
+        None => work(),
     }
 }
 
@@ -313,7 +352,8 @@ pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn R
         });
     }
     let runtime = super::runtime::resolve(providers)?;
-    if !models::cached(entry)? {
+    let folder = model_folder(providers, entry);
+    if !models::cached_in(entry, &folder)? {
         return Err(Error::Admission {
             message: format!(
                 "fastembed model \"{}\" is not fetched; run `docsbase models fetch fastembed/{}`",
@@ -326,13 +366,19 @@ pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn R
     // build-static, so `@r<rev8>` adds nothing today). Kept as the canonical
     // `model_id` for the dedup contract (NFR-4).
     let inference = providers.fastembed_inference()?;
-    let key = model_key(format!("fastembed/{}", cfg.model), runtime, inference);
-    let instance = get_or_load_by_key(key.clone(), reranker_instances(), || {
-        FastEmbedReranker::load(entry, &key).map(Arc::new)
+    let key = model_key(
+        format!("fastembed/{}", cfg.model),
+        runtime,
+        DEFAULT_MAX_LENGTH,
+        inference.intra_threads,
+    );
+    let instance = get_or_load_by_key((key.clone(), folder.clone()), reranker_instances(), || {
+        FastEmbedReranker::load(entry, &key, &folder).map(Arc::new)
     })?;
     Ok(Arc::new(FastEmbedReranker {
         instance,
         batch_size: inference.batch_size,
+        cpu_pool: providers.cpu_pool(),
     }))
 }
 
@@ -346,6 +392,7 @@ fn reranker_instances() -> &'static ModelInstances<LoadedModel<fastembed::TextRe
 pub struct FastEmbedReranker {
     instance: Arc<LoadedModel<fastembed::TextRerank>>,
     batch_size: usize,
+    cpu_pool: Option<Arc<super::cpu::CpuPool>>,
 }
 
 impl FastEmbedReranker {
@@ -357,10 +404,10 @@ impl FastEmbedReranker {
     fn load(
         entry: &ModelEntry<'_>,
         key: &ModelCacheKey,
+        cache_dir: &Path,
     ) -> Result<LoadedModel<fastembed::TextRerank>> {
         super::runtime::init(&key.runtime)?;
-        let cache_dir = models::cache_dir(entry.name, entry.revision);
-        let lock_guard = take_shared_lock(&cache_dir)?;
+        let lock_guard = take_shared_lock(cache_dir)?;
 
         let onnx_path = entry
             .files
@@ -374,8 +421,8 @@ impl FastEmbedReranker {
         // source would let fastembed re-open the path unverified. Memory
         // source mirrors the embedder path and costs one extra buffer while
         // the session builds (the buffer drops after construction).
-        let onnx = read_cache_file(&cache_dir, &onnx_path, entry)?;
-        let tokenizer_files = tokenizer_files(&cache_dir, entry)?;
+        let onnx = read_cache_file(cache_dir, &onnx_path, entry)?;
+        let tokenizer_files = tokenizer_files(cache_dir, entry)?;
         let model = fastembed::UserDefinedRerankingModel::new(
             fastembed::OnnxSource::Memory(onnx),
             tokenizer_files,
@@ -393,16 +440,21 @@ impl FastEmbedReranker {
 
 impl Reranker for FastEmbedReranker {
     fn rerank(&self, query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
-        let mut model = self
+        let mut session = self
             .instance
             .model
             .lock()
             .map_err(|poison| Error::internal(format!("reranker lock poisoned: {poison}")))?;
+        let model = &mut *session;
         let docs_ref: Vec<&str> = docs.iter().map(String::as_str).collect();
-        let results = model
-            .rerank(query, &docs_ref, false, Some(self.batch_size))
-            .map_err(|err| Error::internal(format!("fastembed rerank inference failed: {err}")))?;
-        Ok(rerank_scores(&results, top_n))
+        execute_inference(self.cpu_pool.as_deref(), || {
+            let results = model
+                .rerank(query, &docs_ref, false, Some(self.batch_size))
+                .map_err(|err| {
+                    Error::internal(format!("fastembed rerank inference failed: {err}"))
+                })?;
+            Ok(rerank_scores(&results, top_n))
+        })
     }
 }
 
@@ -602,7 +654,11 @@ mod tests {
         load: impl FnOnce() -> Result<Arc<dyn Embedder>>,
     ) -> Result<Arc<dyn Embedder>> {
         static INSTANCES: OnceLock<ModelInstances<dyn Embedder>> = OnceLock::new();
-        get_or_load_by_key(key, INSTANCES.get_or_init(Mutex::default), load)
+        get_or_load_by_key(
+            (key, PathBuf::new()),
+            INSTANCES.get_or_init(Mutex::default),
+            load,
+        )
     }
 
     fn get_or_load_reranker(
@@ -610,7 +666,11 @@ mod tests {
         load: impl FnOnce() -> Result<Arc<dyn Reranker>>,
     ) -> Result<Arc<dyn Reranker>> {
         static INSTANCES: OnceLock<ModelInstances<dyn Reranker>> = OnceLock::new();
-        get_or_load_by_key(key, INSTANCES.get_or_init(Mutex::default), load)
+        get_or_load_by_key(
+            (key, PathBuf::new()),
+            INSTANCES.get_or_init(Mutex::default),
+            load,
+        )
     }
 
     #[test]
@@ -641,6 +701,31 @@ mod tests {
         let err = read_cache_file(&dir, &onnx, &entry).expect_err("tamper");
         assert!(matches!(err, Error::Admission { .. }), "{err:?}");
         assert!(err.to_string().contains("--force"), "{err}");
+    }
+
+    #[test]
+    fn configured_embedding_length_reaches_onnx_options_and_persistent_identity() {
+        let cfg = super::super::config::resolve_embedding(
+            super::super::config::PROVIDER_FASTEMBED,
+            Some("multilingual-e5-small"),
+            None,
+            true,
+        )
+        .unwrap();
+        let default = super::super::config::embedding_model_id(&cfg);
+        let mut providers = ProvidersCfg::default();
+        assert_eq!(providers.embedding_model_id(&cfg).unwrap(), default);
+        let mut record = super::super::config::ProviderRecord::new(true);
+        record
+            .params
+            .insert("embedding_max_length".into(), 128.into());
+        record.params.insert("batch_size".into(), 2.into());
+        providers.insert(super::super::config::PROVIDER_FASTEMBED, record);
+        let inference = providers.fastembed_inference().unwrap();
+        let key = embedding_key(&cfg, PathBuf::from("onnx-runtime"), inference);
+        assert_eq!(embedding_options(&key).max_length, 128);
+        assert_eq!(key.model_id, format!("{default}@t128"));
+        assert_eq!(key.model_id, providers.embedding_model_id(&cfg).unwrap());
     }
 
     #[test]
