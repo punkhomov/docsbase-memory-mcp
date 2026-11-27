@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::bootstrap::{BootstrapContext, BootstrapValue};
-use super::schema::{FieldOrigin, Provenance, Resolved};
+use super::schema::{FieldOrigin, Provenance, Resolved, SourceId};
 use super::{Config, ConfigSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::provider::{self, Provider};
@@ -31,6 +31,15 @@ impl ProviderCapability {
         }
     }
 }
+/// Setting whose resolved value determines another field's effective value.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldDerivation {
+    /// Key of the determining setting.
+    pub key: &'static str,
+    /// Source of that setting's resolved value.
+    pub source: SourceId,
+}
+
 /// One actual resolved value with owner-supplied units and provenance.
 #[derive(Debug, Clone, Serialize)]
 pub struct EffectiveField {
@@ -41,6 +50,9 @@ pub struct EffectiveField {
     /// Original source, scope and unit, never inferred from current files.
     #[serde(flatten)]
     pub origin: FieldOrigin,
+    /// Setting that determines this value when it overrides the field's own source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<FieldDerivation>,
     /// Provider needed by this field's stage, not a provisioning probe.
     pub capability: Option<ProviderCapability>,
 }
@@ -301,9 +313,25 @@ impl<'a> ViewBuilder<'a> {
                 key,
                 value,
                 origin: origin.clone(),
+                derived_from: None,
                 capability,
             },
         );
+        Ok(())
+    }
+    pub(crate) fn set_derived_from(&mut self, key: &str, dependency: &'static str) -> Result<()> {
+        let origin = self
+            .origins
+            .get(dependency)
+            .ok_or_else(|| invalid("effective value depends on an undeclared field"))?;
+        let field = self
+            .fields
+            .get_mut(key)
+            .ok_or_else(|| invalid("cannot attribute an absent effective value"))?;
+        field.derived_from = Some(FieldDerivation {
+            key: dependency,
+            source: origin.source.clone(),
+        });
         Ok(())
     }
     fn finish(self) -> Result<Vec<EffectiveField>> {

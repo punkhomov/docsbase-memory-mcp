@@ -318,17 +318,43 @@ fn indexed_global_website_profile_masks_shared_watcher_setting() {
     client.handshake_registry().unwrap();
     let status = client.call_tool("status", serde_json::json!({})).unwrap();
     assert_eq!(status["watchers"], 0);
-    let effective = docsbase_memory::config::view::load_from(config.path(), None).unwrap();
-    let enabled = effective
-        .fields
-        .iter()
-        .find(|field| field.key == "watch.enabled")
+    let effective = cli(cache.path(), config.path())
+        .current_dir(root.path())
+        .args(["config", "effective"])
+        .output()
         .unwrap();
-    assert_eq!(enabled.value, false);
+    assert!(effective.status.success(), "{effective:?}");
+    let effective: serde_json::Value = serde_json::from_slice(&effective.stdout).unwrap();
+    let enabled = effective["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["key"] == "watch.enabled")
+        .unwrap();
+    assert_eq!(enabled["value"], false);
+    assert_eq!(enabled["source"]["kind"], "global");
+    assert_eq!(
+        enabled["derived_from"],
+        serde_json::json!({
+            "key": "daemon.profile",
+            "source": {"kind": "global", "value": global_file},
+        })
+    );
+
     std::fs::write(&global_file, source(false)).unwrap();
     let status = client.call_tool("status", serde_json::json!({})).unwrap();
     assert_eq!(status["watchers"], 0);
     assert_eq!(status["restart_required"], false);
+    let plan = cli(cache.path(), config.path())
+        .current_dir(root.path())
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{plan:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan["basis"], "live");
+    assert_eq!(plan["restart_required"], false);
+    assert_eq!(plan["actions"], serde_json::json!([]));
     client.call(Request::StopDaemon).unwrap();
     drop(client);
     assert!(daemon.0.wait().unwrap().success());

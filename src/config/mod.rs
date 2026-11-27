@@ -674,6 +674,12 @@ impl ConfigSpec {
             view.push(key, serde_json::json!(value), None)?;
         }
         WatchSpec::view_fields(settings.watch, settings.watchers_enabled(), view)?;
+        if matches!(
+            settings.daemon.profile,
+            crate::daemon::settings::DaemonProfile::Website { .. }
+        ) {
+            view.set_derived_from("watch.enabled", "daemon.profile")?;
+        }
         LexicalSpec::view_fields(settings.lexical, view)?;
         RrfSpec::view_fields(settings.rrf, view)
     }

@@ -138,6 +138,41 @@ fn effective_fastembed_embedding_limit_is_validated_and_global() {
 }
 
 #[test]
+fn watcher_effective_view_attributes_website_override_to_cli_profile() {
+    use docsbase_memory::daemon::launch::LaunchSnapshot;
+    use docsbase_memory::daemon::settings::{DaemonPatch, DaemonProfile};
+
+    let global = tempfile::tempdir().unwrap();
+    let config = global.path().join("config.toml");
+    fs::write(&config, "config_version = 2\n[watch]\nenabled = true\n").unwrap();
+    let snapshot = LaunchSnapshot::capture_from(global.path());
+    let view = |profile| {
+        let resolved = snapshot
+            .resolve(DaemonPatch {
+                profile: Some(profile),
+                ..DaemonPatch::default()
+            })
+            .unwrap();
+        serde_json::to_value(view::from_resolved(&resolved).unwrap()).unwrap()
+    };
+    let website = view(DaemonProfile::Website {
+        project_root: global.path().to_owned(),
+    });
+    let watcher = row(&website, "watch.enabled");
+    assert_eq!(watcher["value"], false);
+    assert_eq!(watcher["source"], json!({"kind":"global","value":config}));
+    assert_eq!(
+        watcher["derived_from"],
+        json!({"key":"daemon.profile","source":{"kind":"cli"}})
+    );
+
+    let shared = view(DaemonProfile::Shared);
+    let watcher = row(&shared, "watch.enabled");
+    assert_eq!(watcher["value"], true);
+    assert!(watcher.get("derived_from").is_none());
+}
+
+#[test]
 fn local_provisioning_policy_reports_global_overrides_and_rejects_project_scope() {
     let root = tempfile::tempdir().unwrap();
     let global = root.path().join("config.toml");
