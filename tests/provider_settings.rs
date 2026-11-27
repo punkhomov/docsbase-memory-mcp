@@ -140,5 +140,9 @@ fn fastembed_policy_view_has_captured_defaults_and_global_override_provenance() 
     );
     let threads = field("providers.fastembed.intra_threads");
     assert_eq!(threads.origin.source, SourceId::Defaults);
+    assert_eq!(
+        serde_json::to_value(threads).unwrap()["formula"],
+        "min(available_parallelism, 4)"
+    );
     assert!((1..=4).contains(&threads.value.as_u64().unwrap()));
 }

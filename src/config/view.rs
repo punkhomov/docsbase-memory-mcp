@@ -54,6 +54,9 @@ pub struct EffectiveField {
     /// Setting that determines this value when it overrides the field's own source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<FieldDerivation>,
+    /// Expression used by the owner for a computed default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<&'static str>,
     /// Provider needed by this field's stage, not a provisioning probe.
     pub capability: Option<ProviderCapability>,
 }
@@ -141,7 +144,7 @@ pub(crate) fn runtime_identity(config: &Config) -> Result<String> {
 }
 
 pub(crate) fn launch_identity(config: &Config) -> Result<String> {
-    settings_identity(config, "daemon-launch-policy-v1", None)
+    settings_identity(config, "daemon-launch-policy-v2", None)
 }
 
 fn settings_identity(
@@ -153,13 +156,11 @@ fn settings_identity(
     let snapshot =
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), config).finish()?;
     let view = from_resolved(&snapshot)?;
-    // Only the blocking IPC timeout participates in live daemon control.
     let fields: Vec<_> = view
         .fields
         .iter()
         .filter(|field| {
-            scope.is_none_or(|scope| field.origin.scope == scope)
-                && !ClientSpec::is_mcp_only_field(field.key)
+            scope.is_none_or(|scope| field.origin.scope == scope) && field.origin.applies_to_daemon
         })
         .map(|field| (field.key, &field.value))
         .collect();
@@ -319,6 +320,7 @@ impl<'a> ViewBuilder<'a> {
                 value,
                 origin: origin.clone(),
                 derived_from: None,
+                formula: None,
                 capability,
             },
         );
@@ -337,6 +339,16 @@ impl<'a> ViewBuilder<'a> {
             key: dependency,
             source: origin.source.clone(),
         });
+        Ok(())
+    }
+    pub(crate) fn set_default_formula(&mut self, key: &str, formula: &'static str) -> Result<()> {
+        let field = self
+            .fields
+            .get_mut(key)
+            .ok_or_else(|| invalid("cannot attribute an absent effective value"))?;
+        if field.origin.source == SourceId::Defaults {
+            field.formula = Some(formula);
+        }
         Ok(())
     }
     fn finish(self) -> Result<Vec<EffectiveField>> {

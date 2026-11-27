@@ -72,7 +72,7 @@ pub(crate) struct ActiveProjectConfig<'a> {
 }
 
 pub(crate) struct LiveProjectChange {
-    pub(crate) active: Arc<Config>,
+    pub(crate) active: Option<Arc<Config>>,
     pub(crate) config: Arc<Config>,
     pub(crate) reviewed: ReviewedReplacement,
 }
@@ -247,13 +247,12 @@ fn project_plan_using(
                                 &mut assessment,
                             )?;
                             if restart_required == Some(false)
-                                && let Some(old) = &active.config
                                 && let Some(selected) = inspection.selected.as_ref()
                                 && selected.seal.is_some()
                                 && !assessment.actions.is_empty()
                             {
                                 live_change = Some(LiveProjectChange {
-                                    active: Arc::clone(old),
+                                    active: active.config.clone(),
                                     config: Arc::new(config),
                                     reviewed: reviewed_replacement(
                                         selected,

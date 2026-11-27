@@ -372,7 +372,7 @@ impl SettingsSpec for DaemonSpec {
         FieldSpec::new("daemon.max_events", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.max_sessions", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.max_sync_jobs", Scope::Daemon, Unit::Count),
-        FieldSpec::new("daemon.log_rotate_bytes", Scope::Daemon, Unit::Bytes),
+        FieldSpec::new("daemon.log_rotate_bytes", Scope::Daemon, Unit::Bytes).outside_daemon(),
         FieldSpec::new("daemon.search_active", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.search_pending", Scope::Daemon, Unit::Count),
         FieldSpec::new("daemon.control_active", Scope::Daemon, Unit::Count),
@@ -387,13 +387,16 @@ impl SettingsSpec for DaemonSpec {
             Scope::Daemon,
             Unit::Milliseconds,
         ),
-        FieldSpec::new("daemon.start_timeout_ms", Scope::Daemon, Unit::Milliseconds),
-        FieldSpec::new("daemon.stop_timeout_ms", Scope::Daemon, Unit::Milliseconds),
+        FieldSpec::new("daemon.start_timeout_ms", Scope::Daemon, Unit::Milliseconds)
+            .outside_daemon(),
+        FieldSpec::new("daemon.stop_timeout_ms", Scope::Daemon, Unit::Milliseconds)
+            .outside_daemon(),
         FieldSpec::new(
             "daemon.no_listener_timeout_ms",
             Scope::Daemon,
             Unit::Milliseconds,
-        ),
+        )
+        .outside_daemon(),
         FieldSpec::new("daemon.poll_interval_ms", Scope::Daemon, Unit::Milliseconds),
         FieldSpec::new(
             "daemon.janitor_interval_ms",
@@ -623,9 +626,9 @@ impl SettingsSpec for DaemonSpec {
     }
 }
 fn validate_retention(settings: &DaemonSettings) -> Result<()> {
-    if settings.max_sync_jobs == 0 || i64::try_from(settings.max_sync_jobs).is_err() {
+    if settings.max_sync_jobs < 2 || i64::try_from(settings.max_sync_jobs).is_err() {
         return Err(invalid(
-            "daemon.max_sync_jobs must be positive and fit SQLite",
+            "daemon.max_sync_jobs must be at least 2 and fit SQLite",
         ));
     }
     if settings.log_rotate_bytes == 0 {

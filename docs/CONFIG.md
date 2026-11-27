@@ -555,10 +555,11 @@ max_sync_jobs = 50
 log_rotate_bytes = 8388608
 ```
 
-Both settings are positive global values. After enqueueing a Sync job, the
-daemon keeps the newest `max_sync_jobs` job receipts per project. An active
-job takes a slot in that count and is always preserved. The policy applies
-after daemon restart and leaves indexed data intact.
+Both settings are global. After enqueueing a Sync job, the daemon keeps the
+newest `max_sync_jobs` receipts per project. An active job takes a slot and
+is always preserved. The minimum is 2 so enqueueing a new job preserves the
+previous receipt. The limit applies after daemon restart and leaves indexed
+data intact. Each newer job can displace a receipt outside the retained count.
 
 The autostart launcher rotates `logs/daemon.log` to `daemon.log.old` before
 spawning a daemon when the file exceeds `log_rotate_bytes`. It keeps one
@@ -992,7 +993,7 @@ startup when no policy flag is passed.
 The global `[daemon]` settings `start_timeout_ms` (10,000) and
 `stop_timeout_ms` (15,000) bound the launcher wait and Stop operation. Unix
 also uses `no_listener_timeout_ms` (2,000) for continuous socket absence during
-Stop. On Windows, Stop checks process exit and `config effective` displays
+Stop. Subsequent launcher and Stop invocations read these settings from the file. On Windows, Stop checks process exit and `config effective` displays
 `null` for the Unix-only value. Stop uses standalone timing if loading the
 configuration fails, so a config error still permits cleanup.
 

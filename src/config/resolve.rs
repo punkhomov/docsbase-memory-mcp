@@ -239,6 +239,12 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
         }
+        self.apply_storage_source(layer)?;
+        self.validate()
+            .map_err(|_| invalid("invalid effective settings in versioned source"))
+    }
+
+    fn apply_storage_source(&mut self, layer: &SourceLayer) -> Result<()> {
         if let Some(patch) = &layer.store {
             DbSpec::overlay(
                 &mut self.settings.store,
@@ -279,8 +285,7 @@ impl Resolution<ConfigSpec> {
             )?;
             WriterSpec::validate(&self.settings.index_writer, &self.capabilities)?;
         }
-        self.validate()
-            .map_err(|_| invalid("invalid effective settings in versioned source"))
+        Ok(())
     }
 
     fn apply_v2_global(&mut self, layer: &SourceLayer) -> Result<()> {

@@ -46,10 +46,15 @@ fn defaults_when_missing() {
     let vector_store = docsbase_memory::vector_cache::settings::standalone()
         .unwrap()
         .into_settings();
+    assert!(
+        config.ann_search.is_some(),
+        "v2 resolves an explicit traversal policy"
+    );
     assert_eq!(
         config,
         Config {
             vector_store: Some(vector_store),
+            ann_search: config.ann_search,
             ..Config::default()
         }
     );

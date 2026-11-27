@@ -725,6 +725,14 @@ fn reused_catalog_reconciles_only_a_committed_sync_receipt() {
             call_tool(&shared, None, "index_project", args.clone())
                 .await
                 .unwrap();
+            // The completed reply can precede retirement of the native owner.
+            // This fixture needs the subsequent Index to reach its commit fault.
+            shared
+                .activity
+                .drain(Duration::from_millis(
+                    shared.daemon_settings().drain_poll_ms,
+                ))
+                .await;
             let project = registry::list_projects(&shared.db()).unwrap().remove(0);
             let slot = shared.project_slot(project.id);
             let previous = shared.project_config(&project).unwrap();
@@ -821,7 +829,7 @@ fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
         {
             // Emulate the in-memory boundary after SQLite committed and its
             // first independent verification failed. The actual seal is intact.
-            let publication = slot.catalog_publication(&committed).unwrap();
+            let publication = slot.catalog_publication(Some(&committed)).unwrap();
             publication.install(previous.clone(), previous_stages.clone());
             let transition = slot.begin_watch_config_transition(committed.clone());
             publication.retain_unverified(

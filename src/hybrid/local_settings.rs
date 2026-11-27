@@ -136,6 +136,7 @@ pub(crate) fn view_fields(providers: &ProvidersCfg, view: &mut ViewBuilder<'_>) 
         inference.intra_threads.into(),
         provider.clone(),
     )?;
+    view.set_default_formula(INFERENCE_FIELDS[1].key, "min(available_parallelism, 4)")?;
     view.push(
         INFERENCE_FIELDS[2].key,
         inference.embedding_max_length.into(),

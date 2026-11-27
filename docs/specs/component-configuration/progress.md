@@ -2460,3 +2460,12 @@ handoff and exhaustion. Canonical alias locking and source rereads remain in
 the publication path.
 Ruling: the bound applies per lock file. Editors can acquire the lock with the
 built-in policy if decoding the policy source fails.
+
+Task CF14-owner-boundary: complete (owner descriptors distinguish settings
+used by the daemon from launcher, provisioning and MCP-only settings. The
+FastEmbed CPU-derived default exposes its expression in the effective view).
+Ruling: runtime still publishes one consistent project snapshot. Changes to
+launcher-only settings update source identity and leave the daemon plan empty.
+minor (deferred): report the ANN read-cap reason separately from resident
+capacity. Sync history retains its bounded recent-receipt contract: a client
+that polls after enough successor jobs may find its receipt evicted.

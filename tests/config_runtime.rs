@@ -1064,9 +1064,10 @@ fn v2_shared_watcher_toggle_takes_effect_on_restart_and_keeps_sync() {
 #[test]
 fn v2_live_plan_uses_effective_global_settings_for_restart() {
     let mut env = Env::new(&[("guide.md", "semanticglobalwidget")]);
+    let global_file = env.global_config();
     let write_global = |grace, note: &str| {
         fs::write(
-            env.global_config(),
+            &global_file,
             format!("config_version = 2\n[daemon]\nidle_grace_ms = {grace}\n{note}\n"),
         )
         .unwrap();
@@ -1088,6 +1089,15 @@ fn v2_live_plan_uses_effective_global_settings_for_restart() {
     let status = |client: &mut Client| {
         client.call_tool("status", serde_json::json!({})).unwrap()["restart_required"].clone()
     };
+    assert_eq!(status(&mut client), false);
+
+    write_global(
+        1800,
+        "start_timeout_ms = 3000\nstop_timeout_ms = 4000\nlog_rotate_bytes = 65536\n[provisioning.models]\nlock_attempts = 2",
+    );
+    let launcher_edit = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(launcher_edit["restart_required"], false, "{launcher_edit}");
+    assert_eq!(launcher_edit["actions"], serde_json::json!([]));
     assert_eq!(status(&mut client), false);
 
     fs::write(
@@ -1389,7 +1399,23 @@ fn live_config_publication_uses_the_daemon_bootstrap_data_directory() {
 
 #[test]
 fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
+    assert_live_index_replacement(true);
+}
+
+#[test]
+fn v2_live_config_apply_replaces_a_cold_project_with_watchers_disabled() {
+    assert_live_index_replacement(false);
+}
+
+fn assert_live_index_replacement(watchers: bool) {
     let mut env = Env::new(&[("guide.md", "reviewedliveindexwidget")]);
+    if !watchers {
+        fs::write(
+            env.global_config(),
+            "config_version = 2\n[watch]\nenabled = false\n",
+        )
+        .unwrap();
+    }
     let initial = env.run_json(&["index"]);
     env.start_daemon();
     let project_id = initial["project_id"].as_i64().unwrap();
@@ -1408,8 +1434,11 @@ fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
             .unwrap()
     };
     let original_generation = selected();
-    let mut client = env.client();
-    client.handshake(env.root()).unwrap();
+    let client = watchers.then(|| {
+        let mut client = env.client();
+        client.handshake(env.root()).unwrap();
+        client
+    });
 
     fs::write(
         env.project_config(),
@@ -1417,7 +1446,17 @@ fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
     )
     .unwrap();
     let reviewed = env.run_json(&["config", "plan", "--live"]);
-    assert_eq!(reviewed["blockers"], serde_json::json!([]));
+    assert_eq!(reviewed["blockers"], serde_json::json!([]), "{reviewed}");
+    if !watchers {
+        assert!(
+            reviewed["expected"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["resource"]["value"] == "project_runtime"
+                    && entry["state"]["kind"] == "missing")
+        );
+    }
     let replacement = reviewed["actions"]
         .as_array()
         .unwrap()
@@ -1457,6 +1496,11 @@ fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
     let installed = env.run_json(&["config", "plan", "--live", "--check"]);
     assert_eq!(installed["actions"], serde_json::json!([]));
     assert_eq!(installed["blockers"], serde_json::json!([]));
+    let mut client = client.unwrap_or_else(|| {
+        let mut client = env.client();
+        client.handshake(env.root()).unwrap();
+        client
+    });
     assert_eq!(
         search(&mut client, "reviewedliveindexwidget"),
         vec!["guide.md"]

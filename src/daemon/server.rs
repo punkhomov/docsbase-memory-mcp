@@ -193,6 +193,13 @@ impl ProjectCell {
         &self,
         expected: &Arc<Config>,
     ) -> Result<RwLockReadGuard<'_, ()>> {
+        self.preparation_lease_for(Some(expected))
+    }
+
+    pub(crate) fn preparation_lease_for(
+        &self,
+        expected: Option<&Arc<Config>>,
+    ) -> Result<RwLockReadGuard<'_, ()>> {
         #[cfg(test)]
         if let Some(observer) = self.preparation_observer.lock().unwrap().as_ref() {
             let _ = observer.send(());
@@ -205,16 +212,17 @@ impl ProjectCell {
         Ok(preparation)
     }
 
-    fn check_config_revision(&self, expected: &Arc<Config>) -> Result<()> {
+    fn check_config_revision(&self, expected: Option<&Arc<Config>>) -> Result<()> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.unverified.is_some() {
             return Err(Shared::catalog_config_busy());
         }
-        if !state
-            .config
-            .as_ref()
-            .is_some_and(|config| Arc::ptr_eq(config, expected))
-        {
+        let matches = match (state.config.as_ref(), expected) {
+            (None, None) => true,
+            (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
+            _ => false,
+        };
+        if !matches {
             return Err(Error::Project {
                 message: "project configuration changed before search preparation".to_owned(),
                 instruction: Some("retry search".to_owned()),
@@ -254,7 +262,7 @@ impl ProjectCell {
 
     pub(crate) fn catalog_publication(
         &self,
-        expected: &Arc<Config>,
+        expected: Option<&Arc<Config>>,
     ) -> Result<CatalogConfigPublication<'_>> {
         let publication = self.try_catalog_publication()?;
         self.check_config_revision(expected)?;
@@ -1362,7 +1370,7 @@ impl Shared {
             self.reconcile_catalog_runtime(project.id, &slot)?;
             let config = {
                 let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-                let config = self.config_in(&mut state, project)?;
+                let config = self.config_in(&slot, &mut state, project)?;
                 let remote = config.hybrid_cfg.embedding.as_ref().is_some_and(|stage| {
                     stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER
                 }) || config.hybrid_cfg.reranker.as_ref().is_some_and(|stage| {
@@ -1650,6 +1658,7 @@ impl Shared {
 
     fn config_in(
         &self,
+        slot: &ProjectCell,
         state: &mut ProjectState,
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
@@ -1660,6 +1669,13 @@ impl Shared {
         if let Some(config) = &state.config {
             return Ok(Arc::clone(config));
         }
+        // The state mutex is already held, so never wait for a publisher
+        // that may need it to install a reviewed config.
+        let _preparation = match slot.preparation.try_read() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Self::catalog_config_busy()),
+        };
         let config = Arc::new(self.config_for_root(&project.canonical_root)?);
         if self.website.is_none() && self.global_config.vector_store.is_none() {
             self.dense
@@ -1679,7 +1695,7 @@ impl Shared {
         let slot = self.project_slot(project.id);
         self.reconcile_catalog_runtime(project.id, &slot)?;
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        self.config_in(&mut state, project)
+        self.config_in(&slot, &mut state, project)
     }
 
     /// Warms the ANN index for `project` after a successful sync/backfill
@@ -1845,7 +1861,7 @@ impl Shared {
     ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
         let slot = self.project_slot(project.id);
         let _reload = slot.try_catalog_reload()?;
-        slot.check_config_revision(active)?;
+        slot.check_config_revision(Some(active))?;
         let config = self.config_for_root(&project.canonical_root)?;
         if config == **active {
             return self.project_runtime_for_search(project);
@@ -3578,18 +3594,18 @@ fn prepare_catalog_project_sync(
     owner: catalog_sync::Owner,
 ) -> Result<catalog_sync::Context> {
     let refresh = !matches!(capture, CatalogSyncConfig::Current);
-    let active = shared.project_config(&project)?;
-    let (config, stages, reviewed) = match capture {
+    let (active, config, stages, reviewed) = match capture {
         CatalogSyncConfig::Current => {
             let (config, stages) = shared.project_runtime_for_search(&project)?;
-            (config, stages, None)
+            (Some(Arc::clone(&config)), config, stages, None)
         }
         CatalogSyncConfig::Reload => {
+            let active = shared.project_config(&project)?;
             let (config, stages) = shared.stage_catalog_config(&project, &active)?;
-            (config, stages, None)
+            (Some(active), config, stages, None)
         }
         CatalogSyncConfig::Reviewed(change) => {
-            revision.check_config_revision(&change.active)?;
+            revision.check_config_revision(change.active.as_ref())?;
             {
                 let reader = shared.readers.try_acquire()?;
                 if !change.reviewed.head.is_selected(reader.connection())? {
@@ -3600,7 +3616,12 @@ fn prepare_catalog_project_sync(
             }
             change.reviewed.verify_sources()?;
             let stages = reviewed_catalog_stages(shared, &revision, &change)?;
-            (change.config, stages, Some(Box::new(change.reviewed)))
+            (
+                change.active,
+                change.config,
+                stages,
+                Some(Box::new(change.reviewed)),
+            )
         }
     };
     let reuse_unchanged = shared.website.is_none() && reviewed.is_none();
@@ -3612,7 +3633,8 @@ fn prepare_catalog_project_sync(
         state
             .config
             .as_ref()
-            .filter(|current| Arc::ptr_eq(current, &active))
+            .zip(active.as_ref())
+            .filter(|(current, active)| Arc::ptr_eq(current, active))
             .and(state.search_stages.as_ref().or(state.stages.as_ref()))
             .and_then(|stages| stages.embedder.as_ref())
             .map(|embedder| embedder.model_id().to_owned())
@@ -3662,8 +3684,9 @@ fn reviewed_catalog_stages(
     revision: &ProjectCell,
     change: &crate::config::observe::LiveProjectChange,
 ) -> Result<Arc<HybridStages>> {
-    let retained = if change.config.hybrid_cfg == change.active.hybrid_cfg
-        && change.config.providers == change.active.providers
+    let retained = if let Some(active) = &change.active
+        && change.config.hybrid_cfg == active.hybrid_cfg
+        && change.config.providers == active.providers
     {
         let state = revision
             .state
@@ -3673,7 +3696,7 @@ fn reviewed_catalog_stages(
             || !state
                 .config
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &change.active))
+                .is_some_and(|current| Arc::ptr_eq(current, active))
         {
             return Err(Shared::catalog_config_busy());
         }

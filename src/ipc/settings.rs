@@ -19,12 +19,14 @@ const MCP_QUICK: FieldSpec = FieldSpec::new(
     "client.mcp_quick_timeout_ms",
     Scope::Machine,
     Unit::Milliseconds,
-);
+)
+.outside_daemon();
 const MCP_LONG: FieldSpec = FieldSpec::new(
     "client.mcp_long_timeout_ms",
     Scope::Machine,
     Unit::Milliseconds,
-);
+)
+.outside_daemon();
 
 // Reserve the Windows NMPWAIT_WAIT_FOREVER sentinel and keep the same source range on every OS.
 const MAX_TIMEOUT: Duration = Duration::from_millis((u32::MAX - 1) as u64);
@@ -106,10 +108,6 @@ impl ClientSpec {
         } else {
             "unix_socket_io"
         }
-    }
-
-    pub(crate) fn is_mcp_only_field(key: &str) -> bool {
-        key == MCP_QUICK.key || key == MCP_LONG.key
     }
 
     pub(crate) fn view_fields(settings: ClientSettings, view: &mut ViewBuilder<'_>) -> Result<()> {

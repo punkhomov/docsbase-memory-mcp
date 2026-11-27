@@ -78,13 +78,26 @@ pub struct FieldSpec {
     pub scope: Scope,
     /// Presentation unit.
     pub unit: Unit,
+    pub(crate) applies_to_daemon: bool,
 }
 
 impl FieldSpec {
     /// Declares one field.
     #[must_use]
     pub const fn new(key: &'static str, scope: Scope, unit: Unit) -> Self {
-        Self { key, scope, unit }
+        Self {
+            key,
+            scope,
+            unit,
+            applies_to_daemon: true,
+        }
+    }
+
+    /// This setting is used by callers outside the running daemon.
+    #[must_use]
+    pub const fn outside_daemon(mut self) -> Self {
+        self.applies_to_daemon = false;
+        self
     }
 }
 
@@ -97,6 +110,8 @@ pub struct FieldOrigin {
     pub scope: Scope,
     /// Presentation unit.
     pub unit: Unit,
+    #[serde(skip)]
+    pub(crate) applies_to_daemon: bool,
 }
 
 /// Per-field provenance, shared by resolution and future effective views.
@@ -117,6 +132,7 @@ impl Provenance {
                             source: source.clone(),
                             scope: field.scope,
                             unit: field.unit,
+                            applies_to_daemon: field.applies_to_daemon,
                         },
                     )
                 })
@@ -176,6 +192,7 @@ impl Provenance {
                 source: source.clone(),
                 scope: field.scope,
                 unit: field.unit,
+                applies_to_daemon: field.applies_to_daemon,
             },
         );
         Ok(())
@@ -191,6 +208,7 @@ impl Provenance {
                 source: source.clone(),
                 scope: field.scope,
                 unit: field.unit,
+                applies_to_daemon: field.applies_to_daemon,
             },
         );
         Ok(())

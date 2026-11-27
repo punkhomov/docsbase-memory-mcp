@@ -78,7 +78,7 @@ pub(crate) struct Context {
 }
 
 pub(crate) struct RuntimeUpdate {
-    pub(crate) active: Arc<Config>,
+    pub(crate) active: Option<Arc<Config>>,
     pub(crate) global_config: Config,
     pub(crate) global_path: Option<PathBuf>,
     pub(crate) config_lock_dir: PathBuf,
@@ -237,10 +237,10 @@ pub(crate) enum ReusedCommitFault {
 }
 
 impl SyncPublication {
-    fn active_config<'a>(&'a self, config: &'a Arc<Config>) -> &'a Arc<Config> {
+    fn active_config<'a>(&'a self, config: &'a Arc<Config>) -> Option<&'a Arc<Config>> {
         self.refresh
             .as_ref()
-            .map_or(config, |update| &update.active)
+            .map_or(Some(config), |update| update.active.as_ref())
     }
 
     fn admit_publication(&self, operation: &SearchOperation, watermark: u64) -> Result<()> {
@@ -261,7 +261,7 @@ impl Publication {
         match self {
             Self::Sync(sync) => sync
                 .revision
-                .preparation_lease(sync.active_config(config))
+                .preparation_lease_for(sync.active_config(config))
                 .map(Some),
             Self::Direct(_) => Ok(None),
         }
@@ -479,12 +479,14 @@ impl CatalogJob {
                                     },
                                 )
                             };
-                        let retired = if let Some(update) = sync
-                            .refresh
-                            .as_ref()
-                            .filter(|update| !Arc::ptr_eq(&update.active, config))
-                        {
-                            let publication = sync.revision.catalog_publication(&update.active)?;
+                        let retired = if let Some(update) = sync.refresh.as_ref().filter(|update| {
+                            update
+                                .active
+                                .as_ref()
+                                .is_none_or(|active| !Arc::ptr_eq(active, config))
+                        }) {
+                            let publication =
+                                sync.revision.catalog_publication(update.active.as_ref())?;
                             record(Some((&publication, update)))?;
                             let retired = publication.install(config.clone(), sync.stages.clone());
                             let _reload = publication.release_preparation();
@@ -829,9 +831,12 @@ impl CatalogJob {
                 let mut retired = None;
                 // The final Markdown survey can race notifications accepted by
                 // either config until the handoff or rollback.
-                let mut watch_transition =
-                    (crate::index::outcome::recipe_id(sync.active_config(&self.context.config))
-                        != crate::index::outcome::recipe_id(&self.context.config))
+                let mut watch_transition = sync
+                    .active_config(&self.context.config)
+                    .is_none_or(|active| {
+                        crate::index::outcome::recipe_id(active)
+                            != crate::index::outcome::recipe_id(&self.context.config)
+                    })
                     .then(|| {
                         sync.revision
                             .begin_watch_config_transition(self.context.config.clone())
@@ -947,7 +952,9 @@ impl CatalogJob {
         let context = &self.context;
         let verification = self.vector_verification(&admit)?;
         let active = sync.active_config(&context.config);
-        let (publication, unchanged) = if Arc::ptr_eq(active, &context.config) {
+        let (publication, unchanged) = if let Some(active) = active
+            && Arc::ptr_eq(active, &context.config)
+        {
             // A first publication must not race a re-open that saw no head.
             let reload = sync.revision.try_catalog_reload()?;
             (

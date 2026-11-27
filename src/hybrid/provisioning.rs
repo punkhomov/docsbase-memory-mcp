@@ -144,6 +144,7 @@ macro_rules! field {
             Scope::Machine,
             Unit::$unit,
         )
+        .outside_daemon()
     };
 }
 

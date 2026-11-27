@@ -288,7 +288,7 @@ fn owner_rejects_actual_consumer_overflow_and_closed_inventory_shortfall() {
             ..DaemonPatch::default()
         },
         DaemonPatch {
-            max_sync_jobs: Some(0),
+            max_sync_jobs: Some(1),
             ..DaemonPatch::default()
         },
         DaemonPatch {

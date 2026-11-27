@@ -2550,14 +2550,18 @@ fn build_in_background(
     cache.enforce_byte_cap(&mut entries, project_id);
     drop(entries);
     if dump_completed {
-        if index.generation_id().is_some()
-            && let Err(err) = cache.cleanup(project_id)
-        {
-            eprintln!("warning: ann generation cleanup after build failed: {err}");
-        }
-        if let Err(err) = cache.cleanup_ann_disk() {
-            eprintln!("warning: ann disk cleanup after build failed: {err}");
-        }
+        cleanup_completed_ann_build(&cache, index);
+    }
+}
+
+fn cleanup_completed_ann_build(cache: &DenseCache, index: ProjectIndex) {
+    if index.generation_id().is_some()
+        && let Err(err) = cache.cleanup(index.project_id())
+    {
+        eprintln!("warning: ann generation cleanup after build failed: {err}");
+    }
+    if let Err(err) = cache.cleanup_ann_disk() {
+        eprintln!("warning: ann disk cleanup after build failed: {err}");
     }
 }
 
