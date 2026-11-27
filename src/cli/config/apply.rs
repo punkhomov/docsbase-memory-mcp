@@ -103,9 +103,13 @@ pub(super) fn execute(
                     admission("plan application requires version 2 configuration")
                 })?;
                 let store = VectorStore::reserve(&cache, policy)?;
-                let mut embedding_config = Config::clone(&project_config);
-                embedding_config.hybrid_cfg.reranker = None;
-                let stages = Arc::new(owner.stages(&embedding_config)?);
+                let embedder = if reviewed.reuse_vectors_only {
+                    None
+                } else {
+                    let mut embedding_config = Config::clone(&project_config);
+                    embedding_config.hybrid_cfg.reranker = None;
+                    owner.stages(&embedding_config)?.embedder
+                };
                 let pin_ttl = project_config.dense.ann_lifetimes.backfill_pin_ttl();
                 Ok((
                     BuildContext {
@@ -114,7 +118,7 @@ pub(super) fn execute(
                         settings,
                         project,
                         config: project_config,
-                        stages,
+                        embedder,
                         active_model: None,
                         source: VectorCacheSource::Owned(store),
                         pin_ttl,

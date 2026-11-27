@@ -3286,12 +3286,12 @@ async fn run_catalog_sync(
 ) -> Result<Value> {
     let project_id = context.build.project.id;
     let warm = (shared.website.is_none()
-        && context.build.stages.ranking == Ranking::Rrf
-        && context.build.stages.embedder.is_some())
+        && context.stages.ranking == Ranking::Rrf
+        && context.stages.embedder.is_some())
     .then(|| CatalogAnnWarm {
         project: context.build.project.clone(),
         config: context.build.config.clone(),
-        stages: context.build.stages.clone(),
+        stages: context.stages.clone(),
     });
     let (owner, acknowledgement) =
         admit_catalog_sync(shared, service, &activity, &operation, context).await?;
@@ -3589,8 +3589,7 @@ fn prepare_catalog_project_sync(
                 }
             }
             change.reviewed.verify_sources()?;
-            let stages = Arc::new(shared.async_stages(&change.config)?);
-            catalog_stage_model(&change.config, &stages)?;
+            let stages = reviewed_catalog_stages(shared, &revision, &change)?;
             (change.config, stages, Some(Box::new(change.reviewed)))
         }
     };
@@ -3634,17 +3633,54 @@ fn prepare_catalog_project_sync(
             settings: shared.db_settings.clone(),
             project,
             config,
-            stages,
+            embedder: stages.embedder.clone(),
             active_model,
             source,
             pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
         },
+        stages,
         revision,
         owner,
         refresh,
         reuse_unchanged,
         first_generation: false,
     })
+}
+
+fn reviewed_catalog_stages(
+    shared: &Shared,
+    revision: &ProjectCell,
+    change: &crate::config::observe::LiveProjectChange,
+) -> Result<Arc<HybridStages>> {
+    let retained = if change.config.hybrid_cfg == change.active.hybrid_cfg
+        && change.config.providers == change.active.providers
+    {
+        let state = revision
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.unverified.is_some()
+            || !state
+                .config
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &change.active))
+        {
+            return Err(Shared::catalog_config_busy());
+        }
+        state
+            .search_stages
+            .as_ref()
+            .or(state.stages.as_ref())
+            .cloned()
+    } else {
+        None
+    };
+    let stages = match retained {
+        Some(stages) => stages,
+        None => Arc::new(shared.async_stages(&change.config)?),
+    };
+    catalog_stage_model(&change.config, &stages)?;
+    Ok(stages)
 }
 
 fn catalog_stage_model<'a>(config: &Config, stages: &'a HybridStages) -> Result<Option<&'a str>> {

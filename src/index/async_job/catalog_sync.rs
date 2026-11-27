@@ -31,11 +31,12 @@ use crate::store::{
     settings::DbSettings,
 };
 use crate::vector_cache::{
-    EmbeddingRecipe, JobPinAuthority, PinVerification, VectorCacheSource, WriteCapacity,
+    Embedder, EmbeddingRecipe, JobPinAuthority, PinVerification, VectorCacheSource, WriteCapacity,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
+    borrow::Cow,
     path::PathBuf,
     sync::{Arc, RwLockReadGuard},
     time::Duration,
@@ -48,7 +49,7 @@ pub(crate) struct BuildContext {
     pub(crate) settings: Resolved<DbSettings>,
     pub(crate) project: Project,
     pub(crate) config: Arc<Config>,
-    pub(crate) stages: Arc<HybridStages>,
+    pub(crate) embedder: Option<Arc<dyn Embedder>>,
     pub(crate) active_model: Option<String>,
     pub(crate) source: VectorCacheSource,
     pub(crate) pin_ttl: Duration,
@@ -68,6 +69,7 @@ impl BuildContext {
 
 pub(crate) struct Context {
     pub(crate) build: BuildContext,
+    pub(crate) stages: Arc<HybridStages>,
     pub(crate) revision: Arc<ProjectCell>,
     pub(crate) owner: Owner,
     pub(crate) refresh: Option<RuntimeUpdate>,
@@ -163,6 +165,7 @@ impl Drop for Owner {
 
 pub(super) struct CatalogJob {
     staged: Option<PreparedLexicalPublication>,
+    model: Option<String>,
     embedding: Option<CatalogEmbeddings>,
     // Release candidate pins first, with the old pair still protected.
     protected_base: Option<JobPinAuthority>,
@@ -191,6 +194,7 @@ pub(crate) struct DirectPublication {
 
 struct SyncPublication {
     id: i64,
+    stages: Arc<HybridStages>,
     revision: Arc<ProjectCell>,
     _owner: Owner,
     refresh: Option<RuntimeUpdate>,
@@ -273,6 +277,7 @@ impl IndexState {
         operation.check()?;
         let Context {
             build,
+            stages,
             revision,
             owner,
             refresh,
@@ -297,6 +302,7 @@ impl IndexState {
         let active_id = owner.active_id.clone();
         let publication = Publication::Sync(SyncPublication {
             id,
+            stages,
             revision,
             _owner: owner,
             refresh,
@@ -406,6 +412,7 @@ impl CatalogJob {
     fn new(context: BuildContext, publication: Publication) -> Self {
         Self {
             staged: None,
+            model: None,
             embedding: None,
             protected_base: None,
             context,
@@ -421,8 +428,7 @@ impl CatalogJob {
             return Ok(None);
         };
         let config = &self.context.config;
-        if sync.first_generation || !sync.reuse_unchanged || self.context.stages.embedder.is_some()
-        {
+        if sync.first_generation || !sync.reuse_unchanged || self.context.embedder.is_some() {
             return Ok(None);
         }
         let watermark = sync.revision.source_watermark();
@@ -469,8 +475,7 @@ impl CatalogJob {
                         {
                             let publication = sync.revision.catalog_publication(&update.active)?;
                             record(Some((&publication, update)))?;
-                            let retired =
-                                publication.install(config.clone(), self.context.stages.clone());
+                            let retired = publication.install(config.clone(), sync.stages.clone());
                             let _reload = publication.release_preparation();
                             update.revise_watcher(&self.context);
                             Some(retired)
@@ -594,8 +599,18 @@ impl CatalogJob {
         if let Some(reviewed) = reviewed {
             reviewed.verify_sources()?;
         }
-        if let Some(embedder) = &self.context.stages.embedder {
-            if embedder.model_id().len() as u64 > EmbeddingRecipe::MAX_MODEL_BYTES {
+        // Cache-only replacements use the reviewed model key even when the
+        // candidate has no chunks and no pin to carry that identity.
+        let model = if reviewed.is_some_and(|reviewed| reviewed.reuse_vectors_only) {
+            config.embedding_model_key()?.map(Cow::Owned)
+        } else {
+            self.context
+                .embedder
+                .as_ref()
+                .map(|embedder| Cow::Borrowed(embedder.model_id()))
+        };
+        if let Some(model) = model.as_deref() {
+            if model.len() as u64 > EmbeddingRecipe::MAX_MODEL_BYTES {
                 return Err(Error::Admission {
                     message: "embedding model key exceeds the catalog identity bound".into(),
                 });
@@ -603,7 +618,7 @@ impl CatalogJob {
             let (count, longest) =
                 prepared.with_metadata(|db| super::embedding_shape(db, project.id))?;
             if count > 0 {
-                let dimension = super::embedding_dimension(config, embedder.as_ref())?;
+                let dimension = super::embedding_dimension_for_model(config, model)?;
                 capture.reserve(super::embedding_workspace(
                     &config.remote,
                     longest,
@@ -618,12 +633,11 @@ impl CatalogJob {
                         .remaining()?
                         .saturating_add(Duration::from_secs(1)),
                 );
-                self.protected_base =
-                    self.protect_base(&prepared, embedder.model_id(), ttl, &mut capture)?;
+                self.protected_base = self.protect_base(&prepared, model, ttl, &mut capture)?;
                 let pin = JobPinAuthority::allocate(
                     cache,
                     self.context.source.clone(),
-                    embedder.model_id().to_owned(),
+                    model.to_owned(),
                     ttl,
                     count,
                 )?
@@ -636,6 +650,7 @@ impl CatalogJob {
                 });
             }
         }
+        self.model = model.map(Cow::into_owned);
         self.staged = Some(prepared);
         Ok(self.embedding.is_some())
     }
@@ -703,11 +718,10 @@ impl CatalogJob {
     ) -> Result<BatchPacket> {
         let context = &self.context;
         let _revision = self.publication.preparation_lease(&context.config)?;
-        let embedder = context
-            .stages
-            .embedder
-            .as_ref()
-            .ok_or_else(|| Error::internal("catalog embedding stage absent"))?;
+        let model = self
+            .model
+            .as_deref()
+            .ok_or_else(|| Error::internal("catalog embedding model absent"))?;
         let embedding = self
             .embedding
             .as_mut()
@@ -739,7 +753,7 @@ impl CatalogJob {
         let batch = async_jobs::missing(
             &context.source,
             &context.cache,
-            embedder.model_id(),
+            model,
             texts,
             Some(embedding.dimension),
         )?;
@@ -754,17 +768,16 @@ impl CatalogJob {
                     .into(),
             });
         }
-        Ok((Some(batch), Some(embedder.clone()), account))
+        Ok((Some(batch), context.embedder.clone(), account))
     }
 
     pub(super) fn store(&self, batch: &EmbeddingBatch, vectors: &[Vec<f32>]) -> Result<()> {
         let context = &self.context;
         let _revision = self.publication.preparation_lease(&context.config)?;
-        let embedder = context
-            .stages
-            .embedder
-            .as_ref()
-            .ok_or_else(|| Error::internal("catalog embedding stage absent"))?;
+        let model = self
+            .model
+            .as_deref()
+            .ok_or_else(|| Error::internal("catalog embedding model absent"))?;
         let embedding = self
             .embedding
             .as_ref()
@@ -773,7 +786,7 @@ impl CatalogJob {
         async_jobs::store(
             &context.source,
             &context.cache,
-            embedder.model_id(),
+            model,
             batch,
             vectors,
             embedding.dimension,
@@ -794,12 +807,7 @@ impl CatalogJob {
             .staged
             .take()
             .ok_or_else(|| Error::internal("catalog stage absent"))?;
-        let recipe = self
-            .context
-            .stages
-            .embedder
-            .as_ref()
-            .map(|embedder| EmbeddingRecipe::for_model(embedder.model_id()));
+        let recipe = self.model.as_deref().map(EmbeddingRecipe::for_model);
         match &self.publication {
             Publication::Direct(direct) => prepared.publish_with_embedding(recipe, |commit| {
                 self.commit_direct(commit, direct, recipe, operation)
@@ -967,7 +975,7 @@ impl CatalogJob {
                     match result {
                         CatalogCommit::Committed => {
                             *retired = Some(
-                                publication.install(context.config.clone(), context.stages.clone()),
+                                publication.install(context.config.clone(), sync.stages.clone()),
                             );
                         }
                         CatalogCommit::Unverified(head) => {

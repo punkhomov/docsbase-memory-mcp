@@ -1790,6 +1790,150 @@ fn v2_config_apply_requires_the_current_plan_and_publishes_its_replacement() {
 
 #[test]
 #[cfg(feature = "hybrid-remote")]
+fn v2_stopped_config_apply_reuses_vectors_without_provider_credentials() {
+    use docsbase_memory::store::DB_FILE;
+
+    const GUIDE: &str = "# Guide\n\nCached vector fixture\n";
+    let env = Env::new(&[("guide.md", GUIDE)]);
+    let project = env.run_json(&["index"])["project_id"].as_i64().unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    )
+    .unwrap();
+    let registry = || rusqlite::Connection::open(env.cache().join(DB_FILE)).unwrap();
+    let head = || {
+        registry()
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id = ?1",
+                [project],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let generation = |id| {
+        env.cache()
+            .join(format!("projects/{project}/generations/{id}"))
+    };
+    seed_openrouter_vectors(&env, &generation(head()));
+    let indexed = env
+        .cmd()
+        .env("OPENROUTER_API_KEY", "cache-fixture-only")
+        .args(["index"])
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let apply = |plan: &Value| {
+        env.cmd()
+            .env_remove("OPENROUTER_API_KEY")
+            .args([
+                "config",
+                "apply",
+                "--plan-id",
+                plan["plan_id"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let guide = env.root().join("guide.md");
+    for retain_guide in [true, false] {
+        let base = head();
+        let embedding = simulate_previous_tokenizer(&registry(), base, &generation(base));
+        let plan = env.run_json(&["config", "plan"]);
+        assert_eq!(plan["actions"].as_array().unwrap().len(), 1, "{plan}");
+        assert_eq!(
+            plan["actions"][0]["resource"]["value"]["component"],
+            "project_index"
+        );
+        assert_eq!(plan["required_grants"], serde_json::json!([]));
+        if retain_guide {
+            fs::write(&guide, "Changed after review with no cached vector").unwrap();
+            let miss = apply(&plan);
+            assert!(!miss.status.success());
+            let error = String::from_utf8_lossy(&miss.stderr);
+            assert!(error.contains("some are missing"), "{error}");
+            assert_eq!(head(), base);
+            fs::write(&guide, GUIDE).unwrap();
+        } else {
+            fs::remove_file(&guide).unwrap();
+        }
+
+        let applied = apply(&plan);
+        assert!(
+            applied.status.success(),
+            "{}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        let selected = head();
+        assert_ne!(selected, base);
+        let published: Value =
+            serde_json::from_slice(&fs::read(generation(selected).join("seal.json")).unwrap())
+                .unwrap();
+        assert_eq!(published["embedding_recipe"], embedding);
+        assert_eq!(
+            env.run_json(&["config", "plan"])["actions"],
+            serde_json::json!([])
+        );
+    }
+}
+
+#[cfg(feature = "hybrid-remote")]
+fn seed_openrouter_vectors(env: &Env, generation: &Path) {
+    use docsbase_memory::vector_cache::{VectorStore, chunk_hash};
+    use docsbase_memory::{config::Config, hybrid::embedding_model_id};
+
+    let config = Config::load_from(&env.cache().join("config"), Some(env.root())).unwrap();
+    let model = embedding_model_id(config.hybrid_cfg.embedding.as_ref().unwrap());
+    let metadata = rusqlite::Connection::open(generation.join("metadata.db")).unwrap();
+    let mut chunks = metadata.prepare("SELECT text FROM chunks").unwrap();
+    let store = VectorStore::acquire(env.cache(), config.vector_store.as_ref().unwrap()).unwrap();
+    let mut cache = store.connect().unwrap();
+    let texts = chunks.query_map([], |row| row.get::<_, String>(0)).unwrap();
+    for text in texts {
+        cache
+            .put(&model, &chunk_hash(&text.unwrap()), &[1.0, 0.0, 0.0])
+            .unwrap();
+    }
+}
+
+#[cfg(feature = "hybrid-remote")]
+fn simulate_previous_tokenizer(
+    registry: &rusqlite::Connection,
+    id: i64,
+    generation: &Path,
+) -> Value {
+    // Change only the tokenizer-dependent identity in the outcome and seal.
+    let seal_path = generation.join("seal.json");
+    let mut seal: Value = serde_json::from_slice(&fs::read(&seal_path).unwrap()).unwrap();
+    let prior_recipe = format!("index-recipe-v1:{}", "f".repeat(64));
+    {
+        let metadata = rusqlite::Connection::open(generation.join("metadata.db")).unwrap();
+        metadata.execute(
+            "UPDATE projects SET index_outcome_json = json_set(index_outcome_json, '$.recipe_id', ?1)",
+            [&prior_recipe],
+        ).unwrap();
+    }
+    seal["index_recipe"] = serde_json::json!(prior_recipe);
+    let encoded = serde_json::to_vec(&seal).unwrap();
+    fs::write(seal_path, &encoded).unwrap();
+    registry
+        .execute(
+            "UPDATE project_generations SET seal_digest = ?1 WHERE id = ?2",
+            rusqlite::params![blake3::hash(&encoded).as_bytes().as_slice(), id],
+        )
+        .unwrap();
+    let embedding = seal["embedding_recipe"].clone();
+    assert!(!embedding.is_null());
+    embedding
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
 fn v2_config_apply_refuses_remote_work_before_vector_or_provider_setup() {
     let env = Env::new(&[("guide.md", "grantconfigwidget")]);
     env.run_json(&["index"]);

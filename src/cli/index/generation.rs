@@ -92,7 +92,7 @@ impl Target {
         if lexical(&self.config) {
             return Ok(super::DirectIndex::Generation(self));
         }
-        let stages = Arc::new(owner.stages(&self.config)?);
+        let embedder = owner.stages(&self.config)?.embedder;
         let pin_ttl = self.config.dense.ann_lifetimes.backfill_pin_ttl();
         let build = BuildContext {
             cache: self.cache,
@@ -100,7 +100,7 @@ impl Target {
             project: self.project,
             config: self.config,
             settings: self.settings,
-            stages,
+            embedder,
             active_model: None,
             source: VectorCacheSource::Owned(store),
             pin_ttl,

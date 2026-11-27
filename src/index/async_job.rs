@@ -629,7 +629,11 @@ fn embedding_dimension(
     config: &Config,
     embedder: &dyn crate::vector_cache::Embedder,
 ) -> Result<usize> {
-    crate::hybrid::dense::model_dim(embedder.model_id())
+    embedding_dimension_for_model(config, embedder.model_id())
+}
+
+fn embedding_dimension_for_model(config: &Config, model: &str) -> Result<usize> {
+    crate::hybrid::dense::model_dim(model)
         .or_else(|| {
             config
                 .hybrid_cfg
