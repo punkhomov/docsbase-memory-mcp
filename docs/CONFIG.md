@@ -927,7 +927,10 @@ docsbase config apply ./project --live --plan-id <id> --allow-remote
 ```
 
 The daemon checks the reviewed sources, active runtime and published index
-revision before applying project settings. Lexical scoring and ANN traversal
+revision before applying project settings. A reviewed index replacement can
+also target a project that has not been opened since the daemon started, for
+example with watchers disabled. A concurrent open that initializes the
+project invalidates that observation and requires reviewing a fresh plan. Lexical scoring and ANN traversal
 changes keep the selected index and compatible graph. Chunking and embedding
 recipe changes use a bounded background Index job. The CLI waits for its
 terminal result. Connected clients can use the selected generation during

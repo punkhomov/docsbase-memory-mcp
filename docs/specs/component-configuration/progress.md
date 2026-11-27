@@ -2469,3 +2469,10 @@ launcher-only settings update source identity and leave the daemon plan empty.
 minor (deferred): report the ANN read-cap reason separately from resident
 capacity. Sync history retains its bounded recent-receipt contract: a client
 that polls after enough successor jobs may find its receipt evicted.
+
+Task CF11-cold-apply: complete (native CLI live plan, acknowledgment and
+generation replacement with watchers disabled and no prior project open).
+Ruling: an absent runtime is a checked revision. Initial runtime installation
+takes the same preparation guard. Selected head, exact sources and runtime
+preconditions still fence publication. Linux PTY acceptance observed both a
+declined startup plan with the original head and approved publication.
