@@ -19,6 +19,7 @@ pub(crate) struct JobPinAuthority {
     ttl: Duration,
     hashes: HashSet<String>,
     max_hashes: usize,
+    evict_on_release: bool,
     retained: Option<std::sync::Arc<crate::search::budget::PayloadPermit>>,
     activity: Option<std::sync::Arc<crate::daemon::request::Activity>>,
 }
@@ -100,9 +101,18 @@ impl JobPinAuthority {
             ttl,
             hashes,
             max_hashes,
+            evict_on_release: true,
             retained: None,
             activity: None,
         })
+    }
+
+    /// A writer that enforces capacity in each write does not need eviction
+    /// during cleanup. In particular, aborting it must not trim older rows
+    /// left above a newly lowered limit.
+    pub(crate) fn without_release_eviction(mut self) -> Self {
+        self.evict_on_release = false;
+        self
     }
     pub(crate) fn retain_account(
         &mut self,
@@ -197,11 +207,11 @@ impl JobPinAuthority {
         // Preserve the public unpin contract: Owned release+eviction commit
         // atomically, Legacy eviction follows the committed release.
         let mut warned = cache.warned_over_budget;
-        if strict {
+        if self.evict_on_release && strict {
             super::evict(&tx, cache.limits, &mut warned)?;
         }
         tx.commit().map_err(db_error)?;
-        if !strict {
+        if self.evict_on_release && !strict {
             super::evict(&cache.conn, cache.limits, &mut warned)?;
         }
         cache.warned_over_budget = warned;

@@ -836,6 +836,234 @@ fn catalog_test_embedder(
     config
 }
 
+#[test]
+#[cfg(unix)]
+fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let doc = root.path().join("watch.md");
+        std::fs::write(&doc, "oldwatchproofwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config_dir.path(), "config_version = 2\n");
+        shared.activate_jobs(service).unwrap();
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let provider = document_gate_for("test/catalog-watch@d3@l2");
+        catalog_test_embedder(&shared, &project, &provider);
+        provider.release.add_permits(1);
+        call_tool(&shared, None, "index_project", json!({"path": root.path()})).await.unwrap();
+        provider.entered.try_acquire().unwrap().forget();
+        let (session, _cancel) = shared.sessions.join(std::process::id(), project.canonical_root.clone(), Some(project.id)).unwrap();
+        let before = catalog_diagnostics(&shared, session).await;
+        let (config, stages) = shared.project_runtime_for_search(&project).unwrap();
+        let source = shared.vector_source_for(project.id, &config);
+        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(config, stages, source));
+        std::fs::write(&doc, "newwatchproofwidget").unwrap();
+        let (_events, mut receiver) = tokio::sync::mpsc::channel(1);
+        let operation = shared.watch_operation().unwrap();
+        let paths = crate::watch::merge_pending(&shared.payload_budget, None, Some(vec![doc]), &mut receiver, &operation, &shared.watchers).unwrap();
+        provider.invalid_on.store(2, Ordering::SeqCst);
+        let watch = || {
+            let shared = shared.clone();
+            let runtime = watch_runtime.clone();
+            let project = project.clone();
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                let operation = shared.watch_operation().unwrap();
+                shared.run_watch_batch(project, runtime, paths, operation, shared.watch_activity()).await
+            })
+        };
+        let mut failed = watch();
+        tokio::select! {
+            entered = tokio::time::timeout(Duration::from_secs(5), provider.entered.acquire()) => entered.unwrap().unwrap().forget(),
+            result = &mut failed => panic!("watcher returned before preparing its vectors: {result:?}"),
+        }
+        assert_eq!(selected_catalog_hits(&shared, &project, "oldwatchproofwidget"), 1);
+        assert_eq!(selected_catalog_hits(&shared, &project, "newwatchproofwidget"), 0);
+        provider.release.add_permits(1);
+        assert!(failed.await.unwrap().unwrap_err().to_string().contains("invalid embedding batch"));
+        let failed = catalog_diagnostics(&shared, session).await;
+        assert_eq!(failed["index_generation"], before["index_generation"]);
+        assert_eq!(selected_catalog_hits(&shared, &project, "oldwatchproofwidget"), 1);
+
+        provider.release.add_permits(1);
+        assert_eq!(watch().await.unwrap().unwrap().docs, 1);
+        let after = catalog_diagnostics(&shared, session).await;
+        assert_eq!(after["index_generation"].as_i64().unwrap(), before["index_generation"].as_i64().unwrap() + 1);
+        assert_eq!(after["embed_coverage"], json!({"total": 1, "cached": 1}));
+        assert_eq!(selected_catalog_hits(&shared, &project, "newwatchproofwidget"), 1);
+        assert_eq!(watch().await.unwrap().unwrap().docs, 0);
+        assert_eq!(catalog_diagnostics(&shared, session).await["index_generation"], after["index_generation"]);
+        let duplicate = root.path().join("duplicate.md");
+        std::fs::write(&duplicate, "newwatchproofwidget").unwrap();
+        let operation = shared.watch_operation().unwrap();
+        let duplicate = catalog_test_watch_paths(&shared, duplicate, &operation);
+        let stats = tokio::time::timeout(Duration::from_secs(5), shared.run_watch_batch(
+            project, watch_runtime.clone(), duplicate, operation, shared.watch_activity(),
+        )).await.unwrap().unwrap();
+        assert_eq!(stats.docs, 1);
+        assert_eq!(provider.batches.lock().unwrap().len(), 3);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let guide = root.path().join("guide.md");
+        let removed = root.path().join("remove.md");
+        std::fs::write(&guide, "oldcapacitywatchwidget").unwrap();
+        std::fs::write(&removed, "retiredcapacitywatchwidget").unwrap();
+        let shared = open_v5_index_shared(
+            cache.path(),
+            config_dir.path(),
+            "config_version = 2\n[vector_cache]\nmax_entries = 2\n",
+        );
+        shared.activate_jobs(service).unwrap();
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let provider = document_gate_for("test/catalog-watch-capacity@d3@l2");
+        catalog_test_embedder(&shared, &project, &provider);
+        provider.release.add_permits(5);
+        call_tool(&shared, None, "index_project", json!({"path": root.path()}))
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        let (config, stages) = shared.project_runtime_for_search(&project).unwrap();
+        let source = shared.vector_source_for(project.id, &config);
+        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(
+            config,
+            stages,
+            source.clone(),
+        ));
+        let watch = |file: PathBuf| {
+            let shared = shared.clone();
+            let project = project.clone();
+            let watch_runtime = watch_runtime.clone();
+            async move {
+                let operation = shared.watch_operation().unwrap();
+                let paths = catalog_test_watch_paths(&shared, file, &operation);
+                shared
+                    .run_watch_batch(
+                        project,
+                        watch_runtime,
+                        paths,
+                        operation,
+                        shared.watch_activity(),
+                    )
+                    .await
+            }
+        };
+        let before = catalog_diagnostics(&shared, session).await;
+        std::fs::write(&guide, "newcapacitywatchwidget").unwrap();
+        assert_failed_watch_keeps_over_budget_cache(cache.path(), &provider, watch(guide.clone()))
+            .await;
+        let error = watch(guide.clone()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("active and prepared vectors"),
+            "{error}"
+        );
+        let refused = catalog_diagnostics(&shared, session).await;
+        assert_eq!(refused["index_generation"], before["index_generation"]);
+        assert_eq!(refused["embed_coverage"], json!({"total": 2, "cached": 2}));
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcapacitywatchwidget"),
+            1
+        );
+        std::fs::remove_file(&removed).unwrap();
+        assert_eq!(watch(removed).await.unwrap().removed, 1);
+        assert_eq!(watch(guide).await.unwrap().docs, 1);
+        let applied = catalog_diagnostics(&shared, session).await;
+        assert_eq!(
+            applied["index_generation"].as_i64().unwrap(),
+            before["index_generation"].as_i64().unwrap() + 2
+        );
+        assert_eq!(applied["embed_coverage"], json!({"total": 1, "cached": 1}));
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcapacitywatchwidget"),
+            1
+        );
+        assert_eq!(provider.batches.lock().unwrap().len(), 5);
+        assert_eq!(source.connect(cache.path()).unwrap().len().unwrap(), 2);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn assert_failed_watch_keeps_over_budget_cache(
+    cache: &Path,
+    provider: &DocumentGate,
+    watch: impl std::future::Future<Output = Result<crate::index::job::JobStats>>,
+) {
+    // A previous, larger limit can leave more rows than the new owner allows.
+    let db = rusqlite::Connection::open(cache.join(crate::vector_cache::VECTOR_DB_FILE)).unwrap();
+    db.execute(
+        "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
+                VALUES ('prior-model', 'unreferenced', 3, zeroblob(12), 1000000)",
+        [],
+    )
+    .unwrap();
+    provider.invalid_on.store(3, Ordering::SeqCst);
+    let failure = watch.await.unwrap_err();
+    assert!(
+        failure.to_string().contains("invalid embedding batch"),
+        "{failure}"
+    );
+    let count = db
+        .query_row("SELECT COUNT(*) FROM vector_cache", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    assert_eq!(count, 3);
+}
+
+#[cfg(unix)]
+fn catalog_test_watch_paths(
+    shared: &Shared,
+    file: PathBuf,
+    operation: &crate::search::operation::SearchOperation,
+) -> Arc<crate::watch::WatchPayload> {
+    let (_sender, mut events) = tokio::sync::mpsc::channel(1);
+    crate::watch::merge_pending(
+        &shared.payload_budget,
+        None,
+        Some(vec![file]),
+        &mut events,
+        operation,
+        &shared.watchers,
+    )
+    .unwrap()
+}
+
 #[cfg(unix)]
 fn catalog_warm_metadata(
     shared: &Arc<Shared>,

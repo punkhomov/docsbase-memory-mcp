@@ -18,7 +18,7 @@ use super::registry_inspect::{
 use super::{Db, migrations, repo};
 
 mod update;
-pub(crate) use update::apply_lexical_batch;
+pub(crate) use update::{PreparedWatch, apply_lexical_batch};
 
 pub(super) const SEALED_LOCAL_SCHEMA_VERSION: u32 = 1;
 pub(super) const LOCAL_SCHEMA_VERSION: u32 = 2;
@@ -254,6 +254,7 @@ pub(crate) fn catalog_project_info<T>(
 enum PairAccess {
     Read(Option<InspectionLimits>),
     Write,
+    PreparedWrite,
 }
 
 fn with_catalog_pair_using<R, T>(
@@ -354,6 +355,7 @@ where
         .map_err(|reason| unavailable("project lease", reason))?;
     match access {
         PairAccess::Read(_) => lifecycle::with_read_lock(file, &writer, work),
+        PairAccess::PreparedWrite => lifecycle::with_writer_lock(file, &writer, work),
         PairAccess::Write => {
             let _preparation = super::generation_build::acquire_preparation_lease(&directory)?;
             lifecycle::with_writer_lock(file, &writer, work)
@@ -445,7 +447,7 @@ fn open_catalog_metadata(registry: &Db, directory: &Path, access: PairAccess) ->
     let settings = registry.settings().settings();
     let (flags, timeout) = match access {
         PairAccess::Read(_) => (OpenFlags::SQLITE_OPEN_READ_ONLY, settings.read_busy_timeout),
-        PairAccess::Write => (
+        PairAccess::Write | PairAccess::PreparedWrite => (
             OpenFlags::SQLITE_OPEN_READ_WRITE,
             settings.write_busy_timeout,
         ),

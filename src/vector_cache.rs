@@ -318,27 +318,9 @@ impl VectorCache {
         vector: &[f32],
         capacity: WriteCapacity,
     ) -> Result<()> {
-        if vector.is_empty() {
-            return Err(Error::internal("refusing to cache an empty vector"));
-        }
-        let mut bytes = Vec::with_capacity(vector.len() * 4);
-        for value in vector {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        let dim = i64::try_from(vector.len())
-            .map_err(|_| Error::internal("vector dim does not fit i64"))?;
         let mut warned = self.warned_over_budget;
         let store = |conn: &Connection, used_at: i64, warned: &mut bool| -> Result<()> {
-            conn.execute(
-                "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(model_id, chunk_hash) DO UPDATE SET
-                     dim = excluded.dim,
-                     vector = excluded.vector,
-                     used_at = excluded.used_at",
-                params![model_id, chunk_hash, dim, bytes, used_at],
-            )
-            .map_err(|err| Error::internal_with_source("store vector", err))?;
+            write_vector(conn, model_id, chunk_hash, vector, used_at)?;
             evict_with_capacity(conn, self.limits, warned, capacity)
         };
         if self.access.is_owned() || capacity == WriteCapacity::RequireFit {
@@ -354,6 +336,33 @@ impl VectorCache {
         }
         self.warned_over_budget = warned;
         Ok(())
+    }
+
+    /// Commit the whole batch only when it needs no eviction. Otherwise the
+    /// transaction rolls back before another connection sees any changes.
+    pub(crate) fn try_store_without_eviction<'a>(
+        &mut self,
+        model: &str,
+        rows: impl Iterator<Item = (&'a str, &'a [f32])>,
+        operation: &crate::search::operation::SearchOperation,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| Error::internal_with_source("begin vector batch write", err))?;
+        for (hash, vector) in rows {
+            operation.check()?;
+            write_vector(&tx, model, hash, vector, self.access.next_use())?;
+        }
+        let (count, bytes) = vector_cache_size(&tx)?;
+        if count > self.limits.max_entries || bytes > self.limits.max_bytes {
+            return Ok(false);
+        }
+        operation.check()?;
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit vector batch write", err))?;
+        self.warned_over_budget = false;
+        Ok(true)
     }
 
     /// Protects `hashes` from LRU eviction until `ttl` expires (backfill
@@ -678,6 +687,47 @@ fn lookup(
     Ok(Some(decode_vector(dim, &bytes)?))
 }
 
+fn write_vector(
+    conn: &Connection,
+    model: &str,
+    hash: &str,
+    vector: &[f32],
+    used_at: i64,
+) -> Result<()> {
+    if vector.is_empty() {
+        return Err(Error::internal("refusing to cache an empty vector"));
+    }
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let dim =
+        i64::try_from(vector.len()).map_err(|_| Error::internal("vector dim does not fit i64"))?;
+    conn.execute(
+        "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(model_id, chunk_hash) DO UPDATE SET
+             dim = excluded.dim, vector = excluded.vector, used_at = excluded.used_at",
+        params![model, hash, dim, bytes, used_at],
+    )
+    .map_err(|err| Error::internal_with_source("store vector", err))?;
+    Ok(())
+}
+
+fn vector_cache_size(conn: &Connection) -> Result<(u64, u64)> {
+    let (count, bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) FROM vector_cache",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|err| Error::internal_with_source("measure vector cache", err))?;
+    Ok((
+        u64::try_from(count).unwrap_or(u64::MAX),
+        u64::try_from(bytes).unwrap_or(u64::MAX),
+    ))
+}
+
 fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) -> Result<()> {
     evict_with_capacity(
         conn,
@@ -694,15 +744,7 @@ fn evict_with_capacity(
     capacity: WriteCapacity,
 ) -> Result<()> {
     loop {
-        let (count, bytes): (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) FROM vector_cache",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|err| Error::internal_with_source("measure vector cache", err))?;
-        let count = u64::try_from(count).unwrap_or(u64::MAX);
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let (count, bytes) = vector_cache_size(conn)?;
         if count <= limits.max_entries && bytes <= limits.max_bytes {
             *warned_over_budget = false;
             return Ok(());

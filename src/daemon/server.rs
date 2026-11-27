@@ -144,7 +144,7 @@ pub(crate) struct ProjectCell {
 }
 
 impl ProjectCell {
-    fn search_preparation_lease<'a>(
+    pub(crate) fn search_preparation_lease<'a>(
         &'a self,
         expected: &Arc<Config>,
         stages: &Arc<HybridStages>,
@@ -705,27 +705,29 @@ impl Shared {
             .jobs
             .get()
             .ok_or_else(|| Error::internal("watcher job owner absent"))?;
+        if runtime.stages.embedder.is_some() || runtime.config.hybrid_cfg.enabled {
+            let result = self
+                .run_catalog_hybrid_watch(
+                    project,
+                    runtime,
+                    paths.clone(),
+                    &operation,
+                    activity,
+                    service,
+                )
+                .await;
+            if result.is_err() {
+                self.settle_watch_account(&paths, &operation).await?;
+            }
+            return result;
+        }
         let owner = self.clone();
         let input = crate::index::job::JobInput::Watch(paths.clone());
         let account = paths.account.clone();
         let call = operation.clone();
         let result = service
             .run_native(&self.workers, activity, &operation, move || {
-                if let Some(error) =
-                    crate::watch::injected_watch_fault(&project.canonical_root, &owner.cache)
-                {
-                    return Err(error);
-                }
-                call.check()?;
-                let slot = owner.project_slot(project.id);
-                owner
-                    .reconcile_catalog_runtime(project.id, &slot)
-                    .map_err(|error| {
-                        Error::internal_with_source(
-                            "retry catalog runtime verification for watcher",
-                            error,
-                        )
-                    })?;
+                let slot = owner.check_catalog_watch(&project, &call)?;
                 let db = owner.open_work_registry()?;
                 let mut capture = crate::index::job::CaptureBudget {
                     account: &account,
@@ -757,6 +759,65 @@ impl Shared {
             self.settle_watch_account(&paths, &operation).await?;
         }
         result
+    }
+
+    async fn run_catalog_hybrid_watch(
+        self: &Arc<Self>,
+        project: Project,
+        runtime: Arc<crate::watch::WatchRuntime>,
+        paths: Arc<crate::watch::WatchPayload>,
+        operation: &crate::search::operation::SearchOperation,
+        activity: Arc<Activity>,
+        service: &super::job_service::JobService,
+    ) -> Result<crate::index::job::JobStats> {
+        let shared = self.clone();
+        let captured_project = project.clone();
+        let call = operation.clone();
+        let revision = service
+            .run_native(&self.workers, activity.clone(), operation, move || {
+                shared.check_catalog_watch(&captured_project, &call)
+            })
+            .await?;
+        let context = crate::index::async_job::catalog_watch::Context {
+            cache: self.cache.clone(),
+            epoch: self
+                .catalog_epoch
+                .ok_or_else(|| Error::internal("catalog watcher has no registry epoch"))?,
+            settings: self.db_settings.clone(),
+            project,
+            revision,
+            runtime,
+            paths,
+            pin_ttl: self.dense.limits().ann_lifetimes.backfill_pin_ttl(),
+        };
+        crate::index::async_job::catalog_watch::run(
+            service,
+            &self.workers,
+            activity,
+            operation,
+            &self.payload_budget,
+            context,
+        )
+        .await
+    }
+
+    fn check_catalog_watch(
+        &self,
+        project: &Project,
+        operation: &crate::search::operation::SearchOperation,
+    ) -> Result<ProjectSlot> {
+        if let Some(error) =
+            crate::watch::injected_watch_fault(&project.canonical_root, &self.cache)
+        {
+            return Err(error);
+        }
+        operation.check()?;
+        let slot = self.project_slot(project.id);
+        self.reconcile_catalog_runtime(project.id, &slot)
+            .map_err(|error| {
+                Error::internal_with_source("retry catalog runtime verification for watcher", error)
+            })?;
+        Ok(slot)
     }
 
     async fn settle_watch_account(

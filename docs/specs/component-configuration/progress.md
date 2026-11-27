@@ -2020,3 +2020,18 @@ retains the literal key for older editors using that spelling. The regression
 contends on both cases before the config exists. Stopped Website rejects hybrid
 before creating a registry row. On Linux, cli-full, all-target Clippy, lean
 offline and formatting passed. Native PR checks follow Shared hybrid integration.
+
+## 2026-11-27 — CF11d, incremental hybrid watcher on v5
+
+Task CF11d hybrid watcher: complete (route regressions, full Linux cli-full,
+all-target Clippy, lean offline, formatting and fresh fix review).
+
+Ruling: candidate vectors are prepared before mutating the selected pair.
+Provider failure retains the old revision and vectors, including when the
+persisted cache already exceeds its configured capacity. The write first
+tries admission without eviction and pins the selected pair before an LRU
+retry. Pin release alone does not trigger eviction. A valid edit advances
+the content revision, a no-op keeps it, and identical text reuses its vector.
+
+minor (deferred): the route fixture resubmits the batch directly. Native
+watcher delivery and coalescing remain part of Shared hybrid acceptance.

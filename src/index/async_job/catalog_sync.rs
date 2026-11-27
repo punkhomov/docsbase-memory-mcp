@@ -387,7 +387,8 @@ impl CatalogJob {
                     embedder.model_id().to_owned(),
                     ttl,
                     count,
-                )?;
+                )?
+                .without_release_eviction();
                 self.embedding = Some(CatalogEmbeddings {
                     cursor: (0, -1),
                     pin,
@@ -438,42 +439,7 @@ impl CatalogJob {
                 let Some(model) = self.base_model(local, model, capture)? else {
                     return Ok(None);
                 };
-                let (count, longest) = super::embedding_shape(db, context.project.id)?;
-                if count == 0 {
-                    return Ok(None);
-                }
-                // Only the hash set and one SQL text row plus its Rust copy
-                // live here. The base never enters the provider pipeline.
-                let bytes = (longest as u64)
-                    .checked_mul(2)
-                    .and_then(|text| super::pin_tracking_bytes(count)?.checked_add(text))
-                    .ok_or_else(|| Error::Admission {
-                        message: "active vector pin workspace overflow".into(),
-                    })?;
-                capture.reserve(bytes)?;
-                let mut pin = JobPinAuthority::allocate(
-                    &context.cache,
-                    context.source.clone(),
-                    model,
-                    ttl,
-                    count,
-                )?;
-                // The pin set is unordered. Projecting text through a sorted
-                // scan would let SQLite retain the whole corpus in a sorter.
-                let mut select = db
-                    .connection()
-                    .prepare(
-                        "SELECT c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
-                     WHERE d.project_id = ?1",
-                    )
-                    .map_err(repo::db_error)?;
-                let mut rows = select.query([context.project.id]).map_err(repo::db_error)?;
-                while let Some(row) = rows.next().map_err(repo::db_error)? {
-                    capture.operation.check()?;
-                    let text: String = row.get(0).map_err(repo::db_error)?;
-                    pin.track(&crate::vector_cache::chunk_hash(&text))?;
-                }
-                Ok(Some(pin))
+                capture_base_pin(db, context.project.id, &context.source, model, ttl, capture)
             })?
             .flatten();
         if let Some(pin) = &pin {
@@ -775,6 +741,36 @@ impl CatalogJob {
         db.close()?;
         Ok(status)
     }
+}
+
+pub(super) fn capture_base_pin(
+    db: &crate::store::Db,
+    project_id: i64,
+    source: &VectorCacheSource,
+    model: String,
+    ttl: Duration,
+    capture: &mut CaptureBudget<'_>,
+) -> Result<Option<JobPinAuthority>> {
+    let (count, longest) = super::embedding_shape(db, project_id)?;
+    if count == 0 {
+        return Ok(None);
+    }
+    // SQLite needs at most one live text row. No text sorter or Rust corpus
+    // copy is needed to populate the unordered hash set.
+    let bytes = (longest as u64)
+        .checked_mul(2)
+        .and_then(|text| super::pin_tracking_bytes(count)?.checked_add(text))
+        .ok_or_else(|| Error::Admission {
+            message: "active vector pin workspace overflow".into(),
+        })?;
+    capture.reserve(bytes)?;
+    let mut pin = JobPinAuthority::allocate(db.cache_root(), source.clone(), model, ttl, count)?
+        .without_release_eviction();
+    repo::visit_chunk_texts(db.connection(), project_id, |text| {
+        capture.operation.check()?;
+        pin.track(&crate::vector_cache::chunk_hash(text))
+    })?;
+    Ok(Some(pin))
 }
 
 fn encoded_record(record: &Value) -> Result<String> {
