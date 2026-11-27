@@ -1093,7 +1093,7 @@ fn v2_live_plan_uses_effective_global_settings_for_restart() {
 
     write_global(
         1800,
-        "start_timeout_ms = 3000\nstop_timeout_ms = 4000\nlog_rotate_bytes = 65536\n[provisioning.models]\nlock_attempts = 2",
+        "start_timeout_ms = 3000\nstop_timeout_ms = 4000\nlog_rotate_bytes = 65536\ninstall_timeout_ms = 1000\ninstall_retry_delay_ms = 25\n[provisioning.models]\nlock_attempts = 2",
     );
     let launcher_edit = env.run_json(&["config", "plan", "--live"]);
     assert_eq!(launcher_edit["restart_required"], false, "{launcher_edit}");

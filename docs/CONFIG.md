@@ -1000,6 +1000,24 @@ Stop. Subsequent launcher and Stop invocations read these settings from the file
 `null` for the Unix-only value. Stop uses standalone timing if loading the
 configuration fails, so a config error still permits cleanup.
 
+### Installer admission
+
+The global daemon settings below apply to Install, Update and confirmed
+Uninstall. They control waiting for the daemon to exit and for its exclusive
+admission lease to become available.
+
+```toml
+[daemon]
+install_timeout_ms = 600000
+install_retry_delay_ms = 100
+```
+
+Both values are positive milliseconds. The installer captures them once.
+The original deadline limits Stop read and write waits and retry sleeps.
+On Unix, a blocking connection attempt can outlast that budget if the listener
+queue is full. If the configuration cannot load, recovery uses the same default
+values. A busy admission lease still prevents installation or removal.
+
 ### Configuration lock retries
 
 Global v2 configuration can set the retry policy for configuration editors
@@ -1061,10 +1079,12 @@ cannot report file identity or link count, the source reports
 `identity_unavailable`. Each condition blocks the complete proposal, as do final
 symlinks and special files. Parent aliases are resolved and checked around reads.
 Official planning limits are 256 projects, 1 MiB path/registry metadata, 16 MiB aggregate source
-bytes and 8 MiB encoded plan/output. Registry SQL uses a 1 MiB value limit and 256 KiB
-soft page-cache target. These bound logical inputs/output, not exact RSS or time.
-The library takes explicit alternate `PlanningLimits`; these are planning policy,
-not runtime/search configuration knobs.
+bytes and 8 MiB encoded plan/output. Registry SQL uses a 1 MiB value limit and
+256 KiB soft page-cache target. Managed v5 Shared startup and autostart require
+a complete registry survey within the project and metadata bounds. Startup
+refuses when it cannot complete that survey. Website observes only its fixed
+project. These limits bound logical inputs and outputs. The library accepts an
+explicit `PlanningLimits` for planning.
 
 Each file is read independently, with conservative metadata race checks. The
 registry is observed again after source reads; a difference blocks proposals.
@@ -1284,6 +1304,8 @@ heap_bytes = 20000000
 worker_threads = 1
 merge_threads = 4
 staging_disk_bytes = 536870912
+remove_attempts = 20
+remove_retry_delay_ms = 100
 ```
 
 The heap is divided evenly among indexing workers. Each worker must receive
@@ -1309,6 +1331,14 @@ release them. A fresh lexical Website deployment can initialize v5 through
 the global profile above on a supported Unix filesystem or on writable
 local NTFS on Windows. A fresh Windows cache outside the user's profile
 and LocalAppData also needs permission to flush its parent directories.
+
+When an in-place Tantivy index needs recovery, `remove_attempts` sets the
+number of removal attempts and `remove_retry_delay_ms` sets the pause between
+failures. Use 1 to 1000 attempts and a nonnegative delay, with at most 10,000
+ms of total retry sleep. This covers transient sharing failures such as a
+Windows reader with files open. Exhausting the budget preserves the healing
+marker for a later recovery attempt. The policy has no effect on v5 retired
+generation cleanup or index and vector recipe identities.
 
 Shared with v2 configuration initializes a fresh v5 catalog at startup or on
 the first stopped Index on supported Unix filesystems and writable local NTFS

@@ -17,6 +17,7 @@ use anyhow::Context;
 use crate::config::capture::{ReadFailure, read_file};
 use crate::config::paths;
 use crate::daemon::admission::Lease;
+use crate::daemon::settings::DaemonSettings;
 use crate::daemon::{lifecycle, registry};
 use crate::error::Error;
 use crate::ipc::protocol::{self, PROTOCOL_VERSION};
@@ -276,13 +277,22 @@ pub(crate) fn uninstall_with_settings(
 /// when the daemon process really exits; retries while a blocking job winds
 /// down (FR-5).
 fn acquire_after_stop(cache: &Path) -> anyhow::Result<Lease> {
-    acquire_after_stop_until(cache, Instant::now() + Duration::from_mins(10))
+    let settings = lifecycle::recovery_settings();
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(settings.install_timeout_ms))
+        .context("installer timeout is outside the Instant range")?;
+    acquire_after_stop_until(cache, deadline, &settings)
 }
 
-fn acquire_after_stop_until(cache: &Path, deadline: Instant) -> anyhow::Result<Lease> {
+fn acquire_after_stop_until(
+    cache: &Path,
+    deadline: Instant,
+    settings: &DaemonSettings,
+) -> anyhow::Result<Lease> {
+    let retry_delay = Duration::from_millis(settings.install_retry_delay_ms);
     let mut cleared_stale = false;
     loop {
-        let _ = lifecycle::stop_daemon_with_limit(cache, Some(deadline));
+        let _ = lifecycle::stop_daemon_with_limit(cache, Some(deadline), Some(settings));
         match Lease::acquire(cache, &protocol::build_id(), SCHEMA_VERSION) {
             Ok(lease) => return Ok(lease),
             Err(err) if crate::daemon::admission::is_lock_busy(&err) => {
@@ -291,7 +301,7 @@ fn acquire_after_stop_until(cache: &Path, deadline: Instant) -> anyhow::Result<L
                     return Err(anyhow::Error::new(err))
                         .context("daemon did not release the admission lease");
                 }
-                std::thread::sleep(Duration::from_millis(100).min(remaining));
+                std::thread::sleep(retry_delay.min(remaining));
             }
             // `Lease::acquire` only reports a build/schema mismatch after it
             // has taken the exclusive lock, so no daemon was serving when it
@@ -587,8 +597,12 @@ mod tests {
         .unwrap();
 
         let started = Instant::now();
-        let error =
-            acquire_after_stop_until(cache, started + Duration::from_millis(500)).unwrap_err();
+        let error = acquire_after_stop_until(
+            cache,
+            started + Duration::from_millis(500),
+            &crate::daemon::settings::DaemonSpec::DEFAULTS,
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
