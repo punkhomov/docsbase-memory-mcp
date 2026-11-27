@@ -25,11 +25,13 @@ use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::index::{LexicalSettings, QueryMode, lexical_settings};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use crate::search::RetrievalSettings;
 use crate::search::budget::PayloadBudget;
 use crate::search::chunk_ref::{self, ChunkBinding};
 use crate::search::metadata::{MetadataSource, ProjectReader};
 use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
+use crate::search::retrieval;
 use crate::search::scope::{DocumentScope, ScopeRequest, has_tags};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
@@ -493,6 +495,7 @@ pub fn search_docs_from<Guard>(
 pub(super) struct SearchRankingSettings<'a> {
     lexical: LexicalSettings,
     rrf: RrfSettings,
+    retrieval: RetrievalSettings,
     config: Option<&'a Config>,
 }
 
@@ -501,6 +504,7 @@ impl SearchRankingSettings<'_> {
         Ok(Self {
             lexical: lexical_settings::standalone()?,
             rrf: crate::hybrid::rrf::settings::standalone()?,
+            retrieval: retrieval::standalone()?,
             config: None,
         })
     }
@@ -511,6 +515,7 @@ impl<'a> From<&'a Config> for SearchRankingSettings<'a> {
         Self {
             lexical: config.lexical,
             rrf: config.rrf,
+            retrieval: config.retrieval,
             config: Some(config),
         }
     }
@@ -542,6 +547,7 @@ pub(super) struct StartedSearch {
     fetch: usize,
     lexical: LexicalSnapshot,
     rrf: RrfSettings,
+    retrieval: RetrievalSettings,
     dense_started: std::time::Instant,
 }
 impl StartedSearch {
@@ -607,7 +613,12 @@ pub(super) fn start_search<Guard>(
         })
         .map(SearchStart::Complete);
     }
-    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
+    let (active, fetch) = search_plan(
+        context.stages,
+        &arguments,
+        context.window,
+        settings.retrieval,
+    )?;
     let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings)?;
     Ok(SearchStart::Prepared(StartedSearch {
         arguments,
@@ -615,6 +626,7 @@ pub(super) fn start_search<Guard>(
         fetch,
         lexical,
         rrf: settings.rrf,
+        retrieval: settings.retrieval,
         dense_started: std::time::Instant::now(),
     }))
 }
@@ -764,6 +776,7 @@ fn search_plan(
     stages: &HybridStages,
     args: &SearchArgs,
     window: u32,
+    retrieval: RetrievalSettings,
 ) -> Result<(ActiveStages, usize)> {
     let rrf_active = stages.ranking == Ranking::Rrf;
     if rrf_active && stages.embedder.is_none() {
@@ -778,15 +791,11 @@ fn search_plan(
                 .to_owned(),
         });
     }
-    let filtering = args.dedupe != Dedupe::None;
     let fetch = if rerank_active || rrf_active {
         // Ordinary base pool; document caps may refill before one rerank.
         args.limit.max(window as usize).min(MAX_HITS)
-    } else if filtering {
-        args.limit
-            .saturating_mul(SEARCH_UX_OVERSCAN)
-            .max(args.limit)
-            .min(MAX_HITS)
+    } else if args.dedupe == Dedupe::Path {
+        retrieval.lexical_cap_window(args.limit)
     } else {
         args.limit
     };
@@ -1042,8 +1051,13 @@ fn prepare_search<Guard>(
     admit: &impl Fn() -> Result<Guard>,
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
-    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
     let settings = SearchRankingSettings::standalone()?;
+    let (active, fetch) = search_plan(
+        context.stages,
+        &arguments,
+        context.window,
+        settings.retrieval,
+    )?;
     let lexical = lexical_snapshot(context, source, admit, &arguments, fetch, settings)?;
     prepare_with_query_vector(
         context,
@@ -1055,6 +1069,7 @@ fn prepare_search<Guard>(
             fetch,
             lexical,
             rrf: settings.rrf,
+            retrieval: settings.retrieval,
             dense_started: std::time::Instant::now(),
         },
         None,
@@ -1074,14 +1089,14 @@ pub(super) fn prepare_with_query_vector<Guard>(
         active,
         mut fetch,
         mut lexical,
-        rrf,
-        dense_started,
+        ..
     } = start;
     let mut refill = Refill::new(
         &arguments,
         fetch,
         context.payload_budget.settings().dedupe_max_candidates,
         active.rrf_active,
+        start.retrieval,
     );
     let mut bm25_ms = lexical.elapsed_ms;
     let mut stage_ms = Vec::with_capacity(4);
@@ -1107,7 +1122,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
             lexical.scope.as_ref(),
             &mut degraded,
         )?;
-        stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
+        stage_ms.push((Stage::Dense, elapsed_ms(start.dense_started)));
         hits
     } else {
         Vec::new()
@@ -1120,7 +1135,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
             let fused = rrf_merge_with_settings(
                 &lexical.hits,
                 &dense_hits[..fetch.min(dense_hits.len())],
-                rrf,
+                start.rrf,
             );
             fusion_ms = fusion_ms.saturating_add(elapsed_ms(started));
             fused
@@ -1382,8 +1397,7 @@ fn filters_of(
     }
 }
 
-/// Post-filter overscan on the lexical path (`search-ux` FR-2).
-pub const SEARCH_UX_OVERSCAN: usize = 4;
+pub use crate::search::retrieval::DEFAULT_POST_FILTER_OVERSCAN as SEARCH_UX_OVERSCAN;
 
 /// Upper bound for `n_per_doc` (`search-ux` FR-2).
 pub const MAX_CHUNKS_PER_DOC: u64 = 10;

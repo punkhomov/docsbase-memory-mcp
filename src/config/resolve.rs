@@ -11,6 +11,7 @@ use crate::hybrid::provisioning::ProvisioningSpec;
 use crate::hybrid::rrf::settings::RrfSpec;
 use crate::index::lexical_settings::LexicalSpec;
 use crate::index::writer_settings::WriterSpec;
+use crate::search::retrieval::RetrievalSpec;
 use crate::store::settings::{DbSpec, ReadPoolSpec};
 use crate::watch::settings::WatchSpec;
 
@@ -187,6 +188,15 @@ impl Resolution<ConfigSpec> {
                 &mut self.settings.rrf,
                 patch,
                 &self.defaults.initial.rrf,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
+        if let Some(patch) = layer.retrieval {
+            RetrievalSpec::overlay(
+                &mut self.settings.retrieval,
+                patch,
+                &self.defaults.initial.retrieval,
                 &layer.source,
                 &mut self.origins,
             )?;

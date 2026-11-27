@@ -640,6 +640,30 @@ and the widening multiplier must be at least 2.
 Reopen the project to apply project settings in a running daemon. These
 settings apply to queries on the existing indexes and vector cache.
 
+### Document-cap retrieval
+
+The v2 global and project configurations accept a positive integer multiplier
+for candidate windows on searches with `dedupe = "path"`.
+
+```toml
+[retrieval]
+post_filter_overscan = 4
+```
+
+The default is `4`. A lexical search with a document cap starts with the
+requested limit times this multiplier, up to 1000 candidates. For RRF and
+reranking, the base window is the larger of the requested limit and the
+configured reranker window, up to 1000. If too few candidates fit under the
+document cap to fill the requested limit, refill grows the window by the
+multiplier up to the effective `search.dedupe_max_candidates` ceiling. A
+multiplier of `1` starts lexical search at the requested limit and refills
+by doubling.
+
+Path-prefix and tag restrictions are applied before retrieval. The lexical
+collector has its own window policy under `[lexical]`. A project override takes
+effect when the project is reopened and uses the existing index and vector
+cache. Restart the daemon to pick up a changed global value.
+
 ### Reciprocal rank fusion
 
 Projects using `ranking = "rrf"` under `[hybrid]` can tune fusion with

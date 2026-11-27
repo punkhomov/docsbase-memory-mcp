@@ -17,6 +17,8 @@ use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::index::writer_settings::{IndexWriterSettings, WriterSpec};
 use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
+use crate::search::RetrievalSettings;
+use crate::search::retrieval::RetrievalSpec;
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
@@ -59,6 +61,8 @@ pub struct Config {
     pub index_writer: IndexWriterSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
+    /// Project candidate window policy for document caps.
+    pub retrieval: RetrievalSettings,
     /// Installation-wide SQLite connection policy.
     pub store: DbSettings,
     /// Global prepared metadata reader capacity.
@@ -285,6 +289,7 @@ impl Config {
             && self.watch == previous.watch
             && self.lexical == previous.lexical
             && self.rrf == previous.rrf
+            && self.retrieval == previous.retrieval
             && self.index_writer == previous.index_writer
         {
             self != previous
@@ -294,6 +299,7 @@ impl Config {
             previous.watch = self.watch;
             previous.lexical = self.lexical;
             previous.rrf = self.rrf;
+            previous.retrieval = self.retrieval;
             previous.index_writer = self.index_writer;
             self != &previous
         }
@@ -331,6 +337,7 @@ impl Config {
         }
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
+        RetrievalSpec::validate(&self.retrieval, &Capabilities::current())?;
         DbSpec::validate(&self.store, &Capabilities::current())?;
         ReadPoolSpec::validate(&self.read_pool, &Capabilities::current())?;
         DenseSpec::validate(&self.dense, &Capabilities::current())?;
@@ -444,6 +451,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(HybridSpec::FIELDS);
         fields.extend_from_slice(local_settings::INFERENCE_FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
+        fields.extend_from_slice(RetrievalSpec::FIELDS);
         fields.extend_from_slice(DbSpec::FIELDS);
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
         fields.extend(DenseSpec::file_fields());
@@ -472,6 +480,7 @@ impl SettingsSpec for ConfigSpec {
             chunk: ChunkSpec::initial(&ChunkSpec::defaults(context)),
             index_writer: WriterSpec::defaults(context),
             search: SearchSpec::initial(&search),
+            retrieval: RetrievalSpec::defaults(context),
             store: DbSpec::defaults(context),
             read_pool: ReadPoolSpec::defaults(context),
             dense: DenseSpec::defaults(context),
@@ -633,6 +642,7 @@ impl ConfigSpec {
             )?;
         }
         SearchSpec::view_fields(&settings.search, view)?;
+        RetrievalSpec::view_fields(settings.retrieval, view)?;
         settings.store.view_fields(view)?;
         view.push(
             "read_pool.max_connections",

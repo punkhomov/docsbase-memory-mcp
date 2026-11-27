@@ -5,5 +5,8 @@ pub(crate) mod chunk_ref;
 pub mod metadata;
 pub mod operation;
 pub mod payload;
+pub(crate) mod retrieval;
 pub(crate) mod scope;
 pub mod settings;
+
+pub use retrieval::RetrievalSettings;

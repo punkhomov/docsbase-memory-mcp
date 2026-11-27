@@ -2716,6 +2716,95 @@ fn v2_lexical_weights_change_real_search_without_reindexing() {
 }
 
 #[test]
+fn v2_retrieval_overscan_reaches_direct_and_daemon_cap_refill() {
+    let dominant = "# Widgets\n\noverscanprobe overscanprobe overscanprobe\n\n".repeat(40);
+    let mut env = Env::new(&[
+        ("dominant.md", &dominant),
+        ("answer.md", "# Answer\n\nSet overscanprobe here.\n"),
+    ]);
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 2);
+    let query = [
+        "search",
+        "overscanprobe",
+        "--explain",
+        "--limit",
+        "2",
+        "--dedupe",
+        "path",
+        "--n-per-doc",
+        "1",
+    ];
+    let default = env.run_json(&query);
+    assert_eq!(default["meta"]["window"], 128);
+    assert_eq!(default["meta"]["refill"]["rounds"], 3);
+    assert_eq!(default["meta"]["refill"]["stop_reason"], "satisfied");
+    assert_eq!(default["hits"][0]["path"], "dominant.md");
+    assert_eq!(default["hits"][1]["path"], "answer.md");
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 3\n",
+    )
+    .unwrap();
+    let inherited = env.run_json(&query);
+    assert_eq!(inherited["meta"]["window"], 54);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 1\n",
+    )
+    .unwrap();
+    let direct = env.run_json(&query);
+    assert_eq!(direct["meta"]["window"], 64);
+    assert_eq!(direct["meta"]["refill"]["rounds"], 6);
+    assert_eq!(direct["meta"]["refill"]["stop_reason"], "satisfied");
+    assert_eq!(direct["hits"], default["hits"]);
+    assert_eq!(
+        direct["meta"]["index_generation"],
+        default["meta"]["index_generation"]
+    );
+
+    env.start_daemon();
+    let daemon = env.run_json(&query);
+    assert_eq!(daemon["hits"], direct["hits"]);
+    assert_eq!(daemon["meta"]["window"], 64);
+    assert_eq!(daemon["meta"]["refill"], direct["meta"]["refill"]);
+
+    let effective = env.run_json(&["config", "effective"]);
+    let field = effective["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "retrieval.post_filter_overscan")
+        .unwrap();
+    assert_eq!(field["value"], 1);
+    assert_eq!(field["source"]["kind"], "project");
+    assert_eq!(field["scope"], "project");
+    assert_eq!(field["unit"], "multiplier");
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 1000\n",
+    )
+    .unwrap();
+    let bounded = env.run_json(&query);
+    assert_eq!(bounded["meta"]["window"], 1000);
+    assert_eq!(bounded["meta"]["refill"]["rounds"], 1);
+    assert_eq!(bounded["hits"], direct["hits"]);
+    let uncapped = env.run_json(&[
+        "search",
+        "overscanprobe",
+        "--explain",
+        "--limit",
+        "2",
+        "--path-prefix",
+        "answer",
+    ]);
+    assert_eq!(uncapped["meta"]["window"], 2);
+    assert_eq!(uncapped["hits"][0]["path"], "answer.md");
+}
+
+#[test]
 fn v2_lexical_collection_applies_a_query_only_penalty() {
     let long = format!(
         "# Example\n\n```text\nlexicalcollectionprobe lexicalcollectionprobe {}\n```\n",

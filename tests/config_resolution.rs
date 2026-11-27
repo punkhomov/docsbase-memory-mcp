@@ -1162,6 +1162,25 @@ fn v2_lexical_collection_rejects_unsafe_score_or_growth() {
 }
 
 #[test]
+fn v2_retrieval_overscan_rejects_a_zero_multiplier() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(&global, "config.toml", "config_version = 2\n");
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 0\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("retrieval.post_filter_overscan must be at least 1"),
+        "{error}"
+    );
+}
+
+#[test]
 fn v2_rrf_inherits_individual_fields_and_refuses_invalid_scoring() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");
