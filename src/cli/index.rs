@@ -262,7 +262,10 @@ pub(super) async fn run_with_operation(
                 &operation,
                 &context.budget,
                 build,
-                config_dir,
+                catalog_sync::DirectPublication {
+                    config_dir,
+                    reviewed: None,
+                },
             )
             .await?;
             return Ok(serde_json::json!({"project_id": id, "stats": stats}));

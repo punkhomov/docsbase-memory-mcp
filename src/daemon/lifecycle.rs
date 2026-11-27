@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
 use crate::daemon::launch::{AdmittedLaunch, LaunchConfig, LaunchSnapshot};
-use crate::daemon::settings::{DaemonPatch, DaemonSpec};
+use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, Request};
 use crate::platform::transport::Listener;
@@ -29,8 +29,8 @@ mod project_read_tests;
 #[path = "janitor_tests.rs"]
 mod janitor_tests;
 
-/// How long [`ensure_daemon`] waits for the socket after spawning a child.
-pub const START_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default socket-readiness budget for [`ensure_daemon`].
+pub const START_TIMEOUT: Duration = Duration::from_millis(DaemonSpec::DEFAULTS.start_timeout_ms);
 
 /// Default grace period before the last session's exit stops the daemon
 /// (OQ-7: 5 s).
@@ -39,17 +39,6 @@ pub const DEFAULT_GRACE_MS: u64 = DaemonSpec::DEFAULTS.idle_grace_ms;
 /// Concurrent connections a daemon accepts (T46); excess clients are shed
 /// immediately so fd/memory stay bounded.
 pub const MAX_CONNECTIONS: usize = DaemonSpec::DEFAULTS.max_connections;
-
-// Standalone start/stop adapters use the owner's default lifecycle poll policy.
-const POLL_INTERVAL: Duration = Duration::from_millis(DaemonSpec::DEFAULTS.poll_interval_ms);
-/// Upper bound for `daemon stop` while the daemon drains and exits; a busy
-/// machine can stretch the 3 s grace window well past 5 s (T32 flake).
-const STOP_TIMEOUT: Duration = Duration::from_secs(15);
-/// When there is no listener at all the stop request cannot be delivered:
-/// wait briefly for a daemon that is already shutting down (it unlinks its
-/// socket first), then report success without touching its state while the
-/// process may still drain its lease.
-const NO_LISTENER_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DaemonState {
@@ -69,7 +58,7 @@ pub(crate) struct DaemonState {
 ///
 /// # Errors
 /// Returns [`Error::Internal`] when the start lock or child process cannot be
-/// used, or the socket does not appear within [`START_TIMEOUT`].
+/// used, or the socket does not appear within the configured start timeout.
 pub fn ensure_daemon(cache: &Path) -> Result<()> {
     ensure_daemon_with(cache, None)
 }
@@ -82,9 +71,19 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    crate::daemon::launch::require_shared_without_daemon(
+    let launch = crate::daemon::launch::require_shared_without_daemon(
         crate::config::resolve::LaunchUse::Runtime,
     )?;
+    let settings = &launch.config.settings().daemon;
+    if let Err(error) = crate::daemon::launch::preflight::autostart(cache, &launch) {
+        if is_running(cache) {
+            return Ok(());
+        }
+        if admission_lock_held(cache) {
+            return wait_for_daemon(cache, settings);
+        }
+        return Err(error);
+    }
     create_state_dir(cache)?;
     let lock_file = open_lock_file(&start_lock_path(cache))?;
     let mut lock = RwLock::new(lock_file);
@@ -97,11 +96,11 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if admission_lock_held(cache) {
         // A daemon is starting (bind/write_state gap) or alive without a
         // responsive socket yet: never unlink its files; just wait (FR-9).
-        return wait_for_daemon(cache, START_TIMEOUT);
+        return wait_for_daemon(cache, settings);
     }
     cleanup_stale(cache)?;
     spawn_detached(cache, exe)?;
-    wait_for_daemon(cache, START_TIMEOUT)
+    wait_for_daemon(cache, settings)
 }
 
 /// True when some process holds `state/admission.lock` (FR-4, FR-9).
@@ -272,21 +271,7 @@ pub fn run_daemon_with_launch_and_bootstrap(
 }
 
 // The existing CLI retains its documented warning/default startup adapter.
-pub(crate) fn run_daemon_from_launch(
-    cache: &Path,
-    snapshot: &LaunchSnapshot,
-    patch: DaemonPatch,
-    detached: bool,
-) -> Result<()> {
-    let launch = snapshot.legacy(patch)?;
-    if detached
-        && matches!(
-            launch.config.settings().daemon.profile,
-            crate::daemon::settings::DaemonProfile::Website { .. }
-        )
-    {
-        return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() });
-    }
+pub(crate) fn run_daemon_from_launch(cache: &Path, launch: LaunchConfig) -> Result<()> {
     let settings = crate::store::settings::db_from_config(&launch.config)?;
     let pool = crate::store::settings::pool_from_config(&launch.config)?;
     let dense = launch.config.settings().dense.clone();
@@ -398,8 +383,12 @@ pub(super) fn run_with_admission<T: Send>(
 ///
 /// # Errors
 /// Returns [`Error::Internal`] when the stop request cannot be delivered or
-/// the daemon does not exit within five seconds.
+/// the daemon does not exit within the configured stop timeout.
 pub fn stop_daemon(cache: &Path) -> Result<()> {
+    stop_daemon_with_limit(cache, None)
+}
+
+pub(crate) fn stop_daemon_with_limit(cache: &Path, limit: Option<Instant>) -> Result<()> {
     let Some(state) = read_state(cache)? else {
         return Ok(());
     };
@@ -407,8 +396,16 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         cleanup_stale(cache)?;
         return Ok(());
     }
-    let defaults = crate::daemon::settings::standalone()?;
-    let native_policy = crate::ipc::transport::policy(1, defaults.settings())?;
+    // Stop must remain available for recovery when configuration cannot load.
+    let settings = match crate::config::Config::global() {
+        Ok(config) => config.daemon,
+        Err(_) => DaemonSpec::DEFAULTS.clone(),
+    };
+    let timeout = Duration::from_millis(settings.stop_timeout_ms);
+    let poll = Duration::from_millis(settings.poll_interval_ms);
+    #[cfg(unix)]
+    let no_listener_timeout = Duration::from_millis(settings.no_listener_timeout_ms);
+    let native_policy = crate::ipc::transport::policy(1, &DaemonSpec::DEFAULTS)?;
     crate::ipc::transport::run(&native_policy, |transport| {
         let endpoint = platform::daemon_endpoint(cache);
         let bytes = protocol::encode(&Request::StopDaemon)?;
@@ -417,8 +414,15 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         // (and its admission lease) is gone (FR-5). A daemon at connection
         // capacity sheds new connections before reading, so a single attempt can
         // be dropped silently — retry until the deadline.
+        #[cfg(unix)]
         let mut no_listener_since: Option<Instant> = None;
-        let deadline = Instant::now() + STOP_TIMEOUT;
+        let started = Instant::now();
+        let timeout = limit.map_or(timeout, |limit| {
+            timeout.min(limit.saturating_duration_since(started))
+        });
+        let deadline = started
+            .checked_add(timeout)
+            .ok_or_else(|| Error::internal("daemon stop timeout is outside the Instant range"))?;
         while Instant::now() < deadline {
             if !pid_alive(state.pid) {
                 cleanup_stale(cache)?;
@@ -426,7 +430,10 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
             }
             match transport.connect_blocking(&endpoint) {
                 Ok(mut stream) => {
-                    no_listener_since = None;
+                    #[cfg(unix)]
+                    {
+                        no_listener_since = None;
+                    }
                     // A write can fail because the peer is already shutting down
                     // and closed the connection; that is a stop under way, not a
                     // client error. Keep polling the process below, which is what
@@ -447,33 +454,41 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
                             // Keep the successful exchange alive while the
                             // server finishes its native drain and exits.
                             while Instant::now() < deadline && pid_alive(state.pid) {
-                                std::thread::sleep(POLL_INTERVAL);
+                                sleep_before(deadline, poll);
                             }
                         }
                     }
                 }
+                #[cfg(unix)]
                 Err(_) if !platform::exists(&endpoint) => {
                     let since = *no_listener_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= NO_LISTENER_TIMEOUT {
-                        // Unix: the socket file is unlinked only once shutdown is
-                        // committed, so the stop is under way even if the process
-                        // needs longer to release the admission lease
-                        // (FR-5/FR-6). Windows pipes have no file to observe, so
-                        // fall through and verify the pid really exits.
-                        #[cfg(unix)]
+                    if since.elapsed() >= no_listener_timeout {
+                        // The socket is unlinked once shutdown is committed,
+                        // before the process releases the admission lease.
                         return Ok(());
                     }
                 }
-                Err(_) => {}
+                Err(_) => {
+                    #[cfg(unix)]
+                    {
+                        no_listener_since = None;
+                    }
+                }
             }
-            std::thread::sleep(POLL_INTERVAL);
+            #[cfg(unix)]
+            let next_check = no_listener_since
+                .and_then(|since| since.checked_add(no_listener_timeout))
+                .map_or(deadline, |absent_until| deadline.min(absent_until));
+            #[cfg(windows)]
+            let next_check = deadline;
+            sleep_before(next_check, poll);
         }
         if !pid_alive(state.pid) {
             cleanup_stale(cache)?;
             return Ok(());
         }
         Err(Error::internal(format!(
-            "daemon (pid {}) did not stop in time",
+            "daemon (pid {}) did not stop within {timeout:?}",
             state.pid
         )))
     })
@@ -908,18 +923,28 @@ fn daemon_exe() -> PathBuf {
     )
 }
 
-fn wait_for_daemon(cache: &Path, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
+fn wait_for_daemon(cache: &Path, settings: &DaemonSettings) -> Result<()> {
+    let timeout = Duration::from_millis(settings.start_timeout_ms);
+    let poll = Duration::from_millis(settings.poll_interval_ms);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| Error::internal("daemon start timeout is outside the Instant range"))?;
     while Instant::now() < deadline {
         if is_running(cache) {
             return Ok(());
         }
-        std::thread::sleep(POLL_INTERVAL);
+        sleep_before(deadline, poll);
     }
     Err(Error::internal(format!(
-        "daemon did not start within {}s",
-        timeout.as_secs()
+        "daemon did not start within {timeout:?}"
     )))
+}
+
+fn sleep_before(deadline: Instant, poll: Duration) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        std::thread::sleep(poll.min(remaining));
+    }
 }
 
 fn write_state(cache: &Path, schema_version: u32) -> Result<()> {

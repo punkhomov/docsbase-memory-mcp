@@ -328,6 +328,67 @@ pub(crate) fn resolve_v2_edit(layer: &SourceLayer, global: Option<&Config>) -> R
     resolution.finish().map(Resolved::into_settings)
 }
 
+pub(super) fn resolve_observed_v2(
+    global: Option<&SourceLayer>,
+    project: Option<&SourceLayer>,
+    profile: Option<&crate::daemon::settings::DaemonProfile>,
+    captured_global: Option<&Config>,
+) -> Result<Option<(Resolved<Config>, Config)>> {
+    let context = DefaultsContext::standalone();
+    let mut resolution = captured_global.map_or_else(
+        || Resolution::<ConfigSpec>::new(&context),
+        |settings| Resolution::<ConfigSpec>::from_provided(&context, settings),
+    );
+    if captured_global.is_some() {
+        if resolution.settings.vector_store.is_none() {
+            return Ok(None);
+        }
+    } else if let Some(layer) = global {
+        if layer.version() != super::source::ConfigVersion::V2 {
+            return Ok(None);
+        }
+        resolution.apply_v2_global(layer)?;
+    } else {
+        resolution.bind_vector_policy(&crate::vector_cache::settings::standalone()?)?;
+    }
+    if let Some(profile) = profile {
+        resolution.apply(
+            &SourceId::Cli,
+            super::GlobalFileConfig {
+                daemon: Some(crate::daemon::settings::DaemonPatch {
+                    profile: Some(profile.clone()),
+                    ..crate::daemon::settings::DaemonPatch::default()
+                }),
+                ..super::GlobalFileConfig::default()
+            },
+        )?;
+    }
+    resolution.validate()?;
+    let website = matches!(
+        resolution.settings.daemon.profile,
+        crate::daemon::settings::DaemonProfile::Website { .. }
+    );
+    if website {
+        crate::daemon::launch::lexical_only(&resolution.settings)?;
+    }
+    let global = Resolved::new(resolution.settings.clone(), resolution.origins.clone());
+    if let Some(layer) = project {
+        let max_bytes = resolution
+            .settings
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| invalid("v2 planning requires the global vector policy"))?
+            .max_bytes;
+        resolution.apply_v2_project(layer, max_bytes)?;
+    }
+    if website {
+        crate::daemon::launch::lexical_only(&resolution.settings)?;
+    }
+    resolution
+        .finish()
+        .map(|value| Some((global, value.into_settings())))
+}
+
 /// Loads versioned files while retaining each source’s provenance.
 ///
 /// # Errors
@@ -543,6 +604,24 @@ pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resol
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), global);
     resolution.apply_project(root)?;
     resolution.finish()
+}
+
+pub(super) fn for_observed_project(
+    global: &Resolved<Config>,
+    project: Option<&SourceLayer>,
+) -> Result<Config> {
+    let mut resolution =
+        Resolution::<ConfigSpec>::from_resolved(&DefaultsContext::standalone(), global);
+    if let Some(layer) = project {
+        let max_bytes = global
+            .settings()
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| invalid("observed project requires global v2 configuration"))?
+            .max_bytes;
+        resolution.apply_v2_project(layer, max_bytes)?;
+    }
+    resolution.finish().map(Resolved::into_settings)
 }
 
 /// Resolves caller-supplied versioned sources for offline review only.

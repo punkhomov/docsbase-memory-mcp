@@ -11,6 +11,9 @@ pub enum Error {
     /// Build/schema/cache-root mismatch; refuse before doing work.
     #[error("admission refused: {message}")]
     Admission { message: String },
+    /// Startup sources or the selected catalog changed after planning.
+    #[error("configuration or registry changed after startup planning; retry")]
+    StartupPlanStale,
     /// IPC protocol violation (version, framing, unknown tool).
     #[error("protocol error: {message}")]
     Protocol { message: String },
@@ -105,6 +108,7 @@ impl Error {
     #[must_use]
     pub fn inner_message(&self) -> String {
         match self {
+            Self::StartupPlanStale => self.to_string(),
             Error::Project { message, .. }
             | Error::Admission { message }
             | Error::Protocol { message }
@@ -141,7 +145,7 @@ impl Error {
     #[must_use]
     pub fn mcp_code(&self) -> i32 {
         match self {
-            Error::Admission { .. } => -32010,
+            Error::Admission { .. } | Error::StartupPlanStale => -32010,
             Error::Protocol { .. } => -32011,
             Error::Project { .. } => -32012,
             Error::Index { .. } => -32013,

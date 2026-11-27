@@ -63,6 +63,7 @@ impl Env {
         command
             .env("DOCSBASE_CACHE_DIR", self.cache())
             .env("DOCSBASE_CONFIG_DIR", self.cache().join("config"))
+            .env("DOCSBASE_DATA_DIR", self.cache().join("data"))
             .current_dir(self.root());
         command
     }
@@ -79,8 +80,11 @@ impl Env {
     }
 
     fn start_daemon(&mut self) {
-        let child = self
-            .cmd()
+        self.start_daemon_with(self.cmd());
+    }
+
+    fn start_daemon_with(&mut self, mut command: Command) {
+        let child = command
             .args(["serve", "--detached", "--grace-ms", "3000"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::inherit())
@@ -828,6 +832,950 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
             .iter()
             .any(|hit| hit["path"] == "new.md")
     );
+}
+
+#[test]
+fn v2_config_plan_compares_sources_with_the_published_generation() {
+    let env = Env::new(&[("guide.md", "indexplanningwidget")]);
+    let empty = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(empty["actions"], serde_json::json!([]));
+    assert!(!env.cache().join("registry.db").exists());
+    env.run_json(&["index"]);
+
+    let original = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(original["actions"], serde_json::json!([]));
+    assert_eq!(original["blockers"], serde_json::json!([]));
+    assert_eq!(original["full_survey"], true);
+    let registry = env.cache().join("registry.db");
+    let encoded = fs::read(&registry).unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty = 0.125\n",
+    )
+    .unwrap();
+    let query_only = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(query_only["actions"], serde_json::json!([]));
+    assert_ne!(query_only["plan_id"], original["plan_id"]);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let mut before = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut before);
+    snapshot_config_plan_files(env.root(), &mut before);
+    let output = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let changed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(changed["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(changed["actions"][0]["effect"], "rebuild");
+    assert_eq!(
+        changed["actions"][0]["resource"]["value"]["component"],
+        "project_index"
+    );
+    assert_eq!(fs::read(&registry).unwrap(), encoded);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!env.cache().join(format!("registry.db{suffix}")).exists());
+    }
+    let mut after = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut after);
+    snapshot_config_plan_files(env.root(), &mut after);
+    assert_eq!(after, before);
+
+    env.run_json(&["index"]);
+    let applied = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(applied["actions"], serde_json::json!([]));
+    assert_ne!(applied["plan_id"], changed["plan_id"]);
+}
+
+#[test]
+fn v2_live_config_plan_observes_current_runtime_without_loading_new_settings() {
+    let mut env = Env::new(&[("guide.md", "liveconfigurationwidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let baseline = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(baseline["basis"], "live");
+    assert_eq!(baseline["actions"], serde_json::json!([]));
+    assert_eq!(baseline["ann"]["state"], "disabled");
+
+    let mut mismatched = env.client();
+    let response = mismatched
+        .call(
+            docsbase_memory::ipc::protocol::Request::InspectProjectConfig {
+                protocol_version: docsbase_memory::ipc::protocol::PROTOCOL_VERSION,
+                build_id: "mismatched-build".into(),
+                path: env.root().to_owned(),
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            response,
+            docsbase_memory::ipc::protocol::Response::Error { .. }
+        ),
+        "{response:?}"
+    );
+    assert!(!env.cache().join("logs/conflicts.ndjson").exists());
+
+    let indexed = fs::read(env.cache().join("registry.db")).unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty = 0.125\n",
+    )
+    .unwrap();
+    let output = env
+        .cmd()
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let changed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(changed["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(changed["actions"][0]["effect"], "reconfigure_runtime");
+    assert_ne!(changed["plan_id"], baseline["plan_id"]);
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), changed);
+    assert_eq!(fs::read(env.cache().join("registry.db")).unwrap(), indexed);
+    assert_eq!(
+        search(&mut client, "liveconfigurationwidget"),
+        vec!["guide.md"]
+    );
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[ann.search]\nef_base = 64\nef_max = 4096\nfetch_multiplier = 4\n",
+    )
+    .unwrap();
+    let explicit = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(explicit["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        explicit["actions"][0]["resource"]["value"],
+        "project_runtime"
+    );
+
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    let restart = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(restart["restart_required"], true);
+    assert_eq!(restart["actions"][0]["resource"]["value"], "daemon_global");
+    assert_restart_follows_replacement(&env);
+}
+
+fn assert_restart_follows_replacement(env: &Env) {
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars = 1200\n",
+    )
+    .unwrap();
+    let replacement = env.run_json(&["config", "plan", "--live"]);
+    let actions = replacement["actions"].as_array().unwrap();
+    let index = &actions[0]["resource"];
+    assert_eq!(index["value"]["component"], "project_index");
+    assert_eq!(actions[1]["resource"]["value"], "daemon_global");
+    assert_eq!(actions[1]["dependencies"], serde_json::json!([index]));
+}
+
+#[test]
+fn v2_live_config_applies_only_the_reviewed_project_runtime() {
+    let fence = format!(
+        "```text\nreviewedliveconfigurationwidget {}\n```\n",
+        "text ".repeat(1_000)
+    );
+    let mut env = Env::new(&[("guide.md", &fence)]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let score = |client: &mut Client| {
+        client
+            .call_tool(
+                "search_docs",
+                serde_json::json!({"query":"reviewedliveconfigurationwidget"}),
+            )
+            .unwrap()[0]["score"]
+            .as_f64()
+            .unwrap()
+    };
+    let initial_score = score(&mut client);
+    let registry = env.cache().join("registry.db");
+    let before = fs::read(&registry).unwrap();
+    let set_penalty = |penalty| {
+        fs::write(
+            env.project_config(),
+            format!("config_version = 2\n[lexical]\nlong_chunk_penalty={penalty}\n"),
+        )
+        .unwrap();
+        env.run_json(&["config", "plan", "--live"])
+    };
+    let stale = set_penalty(0.125);
+    let current = set_penalty(0.25);
+    let refused = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            stale["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        refused.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), current);
+    assert_eq!(current["blockers"], serde_json::json!([]));
+    let accepted = env.run_json(&[
+        "config",
+        "apply",
+        "--live",
+        "--plan-id",
+        current["plan_id"].as_str().unwrap(),
+    ]);
+    assert_eq!(accepted["applied"], true);
+    assert_eq!(accepted["plan_id"], current["plan_id"]);
+    let installed = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(installed["actions"], serde_json::json!([]));
+    let runtime = installed["expected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["resource"]["value"] == "project_runtime")
+        .unwrap();
+    assert_eq!(runtime["state"]["kind"], "known_identity");
+    assert_eq!(
+        runtime["state"]["value"],
+        current["actions"][0]["target"]["value"]
+    );
+    assert_eq!(fs::read(registry).unwrap(), before);
+    assert!(score(&mut client) < initial_score);
+    assert_eq!(
+        search(&mut client, "reviewedliveconfigurationwidget"),
+        vec!["guide.md"]
+    );
+
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    let restart = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(restart["restart_required"], true);
+    let refused = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            restart["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(5));
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), restart);
+}
+
+#[test]
+fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
+    let mut env = Env::new(&[("guide.md", "reviewedliveindexwidget")]);
+    let initial = env.run_json(&["index"]);
+    env.start_daemon();
+    let project_id = initial["project_id"].as_i64().unwrap();
+    let selected = || -> i64 {
+        let registry = rusqlite::Connection::open_with_flags(
+            env.cache().join(docsbase_memory::store::DB_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        registry
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id = ?1",
+                [project_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let original_generation = selected();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let reviewed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(reviewed["blockers"], serde_json::json!([]));
+    let replacement = reviewed["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["resource"]["value"]["component"] == "project_index")
+        .expect("reviewed project index action");
+    assert_eq!(replacement["effect"], "rebuild");
+    let mut old_client = env.client();
+    old_client.handshake_registry().unwrap();
+    let old_request = serde_json::from_value(serde_json::json!({
+        "method": "ApplyProjectConfig", "params": {
+            "path": env.root(), "plan_id": reviewed["plan_id"], "allow_remote": false,
+        }
+    }))
+    .unwrap();
+    let docsbase_memory::ipc::protocol::Response::ToolResult { value: refused } =
+        old_client.call(old_request).unwrap()
+    else {
+        panic!("missing apply status for client without job acknowledgement support");
+    };
+    assert_eq!(refused["apply_status"], 5);
+    assert_eq!(selected(), original_generation);
+
+    let applied = env.run_json(&[
+        "config",
+        "apply",
+        "--live",
+        "--plan-id",
+        reviewed["plan_id"].as_str().unwrap(),
+    ]);
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["plan_id"], reviewed["plan_id"]);
+    assert_eq!(applied["project_id"], project_id);
+    assert_eq!(applied["stats"]["docs"], 1);
+    assert_ne!(selected(), original_generation);
+
+    let installed = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(installed["actions"], serde_json::json!([]));
+    assert_eq!(installed["blockers"], serde_json::json!([]));
+    assert_eq!(
+        search(&mut client, "reviewedliveindexwidget"),
+        vec!["guide.md"]
+    );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_live_config_apply_requires_remote_grant() {
+    let mut env = Env::new(&[("guide.md", "reviewedlivegrantwidget")]);
+    env.run_json(&["index"]);
+    let mut daemon = env.cmd();
+    daemon.env_remove("OPENROUTER_API_KEY");
+    env.start_daemon_with(daemon);
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    )
+    .unwrap();
+    let reviewed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(reviewed["blockers"], serde_json::json!([]));
+    assert_eq!(reviewed["required_grants"], serde_json::json!(["remote"]));
+    let refused = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            reviewed["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(5), "{stderr}");
+    assert!(refused.stdout.is_empty(), "{refused:?}");
+    assert!(!stderr.contains("OPENROUTER_API_KEY"), "{stderr}");
+    assert!(!env.cache().join("vectors.db").exists());
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), reviewed);
+}
+
+#[cfg(not(feature = "hybrid-remote"))]
+#[test]
+fn v2_live_config_plan_blocks_an_uncompiled_reranker() {
+    let mut env = Env::new(&[("guide.md", "lexicalconfigfixture")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='lexical'\n[hybrid.reranker]\nprovider='openrouter'\nmodel='fixture/rerank'\n",
+    ).unwrap();
+    let plan = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(plan["actions"][0]["effect"], "reconfigure_runtime");
+    assert!(
+        plan["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "executor_unavailable")
+    );
+}
+
+#[test]
+fn v2_live_config_plan_leaves_wal_metadata_to_recovery() {
+    let mut env = Env::new(&[("guide.md", "configurationrecoverywidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let metadata = env.cache().join("projects/1/generations/1/metadata.db");
+    let db = rusqlite::Connection::open(&metadata).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.close().unwrap();
+    let before = fs::read(&metadata).unwrap();
+    assert_eq!(&before[18..20], &[2, 2]);
+    let result = env
+        .cmd()
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("RecoveryRequired"));
+    assert_eq!(fs::read(&metadata).unwrap(), before);
+    for suffix in ["metadata.db-wal", "metadata.db-shm", "metadata.db-journal"] {
+        assert!(!metadata.with_file_name(suffix).exists());
+    }
+}
+
+#[test]
+fn v2_live_config_plan_rejects_unreadable_published_tantivy() {
+    let mut env = Env::new(&[("guide.md", "configurationtantivywidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let metadata = env
+        .cache()
+        .join("projects/1/generations/1/tantivy/meta.json");
+    let mut bytes = fs::read(&metadata).unwrap();
+    bytes[0] = b'!';
+    fs::write(&metadata, &bytes).unwrap();
+    let result = env
+        .cmd()
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(&metadata).unwrap(), bytes);
+}
+
+#[test]
+fn v2_live_config_plan_without_daemon_does_not_start_one() {
+    let env = Env::new(&[("guide.md", "noautostartwidget")]);
+    let result = env
+        .cmd()
+        .args(["config", "plan", "--live"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!env.cache().join("registry.db").exists());
+    assert!(!env.cache().join("state").exists());
+}
+
+fn snapshot_config_plan_files(
+    root: &Path,
+    files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+) {
+    for entry in fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            snapshot_config_plan_files(&path, files);
+        } else {
+            let data = fs::read(&path).unwrap();
+            files.insert(path, data);
+        }
+    }
+}
+
+#[test]
+fn v2_config_plan_binds_empty_cache_context_and_reports_invalid_effective_settings() {
+    let env = Env::new(&[("guide.md", "configurationcontextwidget")]);
+    let alternative = tempfile::tempdir().unwrap();
+    let initial = env.run_json(&["config", "plan"]);
+    let different = env
+        .cmd()
+        .env("DOCSBASE_CACHE_DIR", alternative.path())
+        .args(["config", "plan"])
+        .output()
+        .unwrap();
+    assert!(different.status.success());
+    let other: Value = serde_json::from_slice(&different.stdout).unwrap();
+    assert_ne!(initial["plan_id"], other["plan_id"]);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\nmax_file_size = 0\n",
+    )
+    .unwrap();
+    let invalid = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(5));
+    let blocked: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(blocked["actions"], serde_json::json!([]));
+    assert_eq!(blocked["blockers"][0]["code"], "invalid_settings");
+    assert!(!env.cache().join("registry.db").exists());
+    assert!(!alternative.path().join("registry.db").exists());
+}
+
+#[test]
+fn v2_config_plan_reports_vector_changes_without_resolving_provider_credentials() {
+    let env = Env::new(&[("guide.md", "vectorplanningwidget")]);
+    env.run_json(&["index"]);
+    fs::write(env.project_config(),
+        "config_version = 2\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'planning-test-model'\ndimensions = 3\n",
+    ).unwrap();
+    let output = env
+        .cmd()
+        .env_remove("OPENROUTER_API_KEY")
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(if cfg!(feature = "hybrid-remote") {
+            3
+        } else {
+            5
+        }),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["actions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        plan["actions"][0]["resource"]["value"]["component"],
+        "document_vectors"
+    );
+    assert_eq!(
+        plan["actions"][1]["resource"]["value"]["component"],
+        "project_index"
+    );
+    assert_eq!(
+        plan["actions"][1]["dependencies"][0],
+        plan["actions"][0]["resource"]
+    );
+    assert_eq!(plan["required_grants"], serde_json::json!(["remote"]));
+    if cfg!(feature = "hybrid-remote") {
+        assert_eq!(plan["blockers"], serde_json::json!([]));
+    } else {
+        assert_eq!(plan["blockers"][0]["code"], "executor_unavailable");
+    }
+    assert!(!env.cache().join("vectors.db").exists());
+
+    let root = toml::Value::String(env.root().canonicalize().unwrap().to_str().unwrap().into());
+    fs::write(env.global_config(), format!(
+        "config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {root} }}\n"
+    )).unwrap();
+    let blocked = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(blocked.status.code(), Some(5));
+    let report: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(report["actions"], serde_json::json!([]));
+    assert_eq!(report["blockers"][0]["code"], "invalid_settings");
+}
+
+#[test]
+fn v2_config_plan_leaves_registry_recovery_to_the_owner() {
+    let env = Env::new(&[("guide.md", "recoveryplanningwidget")]);
+    env.run_json(&["index"]);
+    let recovery = env.cache().join("registry.db-journal");
+    fs::write(&recovery, b"unsettled fixture").unwrap();
+    let output = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["observation_failure"], "recovery_required");
+    assert_eq!(report["actions"], serde_json::json!([]));
+    assert_eq!(fs::read(recovery).unwrap(), b"unsettled fixture");
+}
+
+#[test]
+fn v2_config_apply_requires_the_current_plan_and_publishes_its_replacement() {
+    let env = Env::new(&[("guide.md", "# Guide\n\nreviewedconfigwidget")]);
+    env.run_json(&["index"]);
+    let before = env.run_json(&["config", "plan"]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let requested = env.run_json(&["config", "plan"]);
+    let apply = |plan: &Value| {
+        env.cmd()
+            .args([
+                "config",
+                "apply",
+                "--plan-id",
+                plan["plan_id"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let stale = apply(&before);
+    assert_eq!(
+        stale.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    assert_eq!(env.run_json(&["config", "plan"]), requested);
+    let maintenance = docsbase_memory::daemon::admission::Lease::acquire(
+        env.cache(),
+        &docsbase_memory::ipc::protocol::build_id(),
+        5,
+    )
+    .unwrap();
+    let busy = apply(&requested);
+    assert_eq!(
+        busy.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&busy.stderr)
+    );
+    drop(maintenance);
+    assert_eq!(env.run_json(&["config", "plan"]), requested);
+    let applied = apply(&requested);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let after = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(after["actions"], serde_json::json!([]));
+    assert_ne!(after["plan_id"], requested["plan_id"]);
+    assert_eq!(apply(&requested).status.code(), Some(4));
+    assert!(
+        apply(&after).status.success(),
+        "a current no-op is accepted"
+    );
+    assert_eq!(env.run_json(&["config", "plan"]), after);
+    // A normal search may start the daemon, so exercise it after the
+    // assertions that require the catalog to be stopped.
+    assert_eq!(
+        env.run_json(&["search", "reviewedconfigwidget"])[0]["path"],
+        "guide.md"
+    );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_config_apply_refuses_remote_work_before_vector_or_provider_setup() {
+    let env = Env::new(&[("guide.md", "grantconfigwidget")]);
+    env.run_json(&["index"]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    )
+    .unwrap();
+    let before = env.run_json(&["config", "plan"]);
+    let mut before_files = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut before_files);
+    let output = env
+        .cmd()
+        .env_remove("OPENROUTER_API_KEY")
+        .args([
+            "config",
+            "apply",
+            "--plan-id",
+            before["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(5), "{stderr}");
+    assert!(stderr.contains("--allow-remote"), "{stderr}");
+    assert!(!env.cache().join("vectors.db").exists());
+    let mut after_files = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut after_files);
+    assert_eq!(after_files, before_files);
+    assert_eq!(env.run_json(&["config", "plan"]), before);
+}
+
+#[test]
+fn v2_startup_policy_refuses_or_applies_a_required_local_replacement() {
+    let mut env = Env::new(&[("guide.md", "startupreplacementwidget")]);
+    env.run_json(&["index"]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let plan = env.run_json(&["config", "plan"]);
+    let serve = |options: &[&str]| {
+        env.cmd()
+            .args(["serve", "--grace-ms", "1"])
+            .args(options)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    for (options, code) in [
+        (&["--on-invalidation", "fail"][..], 3),
+        (&["--detached"][..], 3),
+        (&["--on-invalidation", "prompt"][..], 5),
+    ] {
+        let output = serve(options);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(env.run_json(&["config", "plan"]), plan);
+        assert!(!env.cache().join("state").exists());
+    }
+    env.daemon = Some(
+        env.cmd()
+            .args(["serve", "--on-invalidation", "apply"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_until(Duration::from_secs(10), || platform::exists(
+        &platform::daemon_endpoint(env.cache())
+    )));
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    assert_eq!(
+        search(&mut client, "startupreplacementwidget"),
+        vec!["guide.md"]
+    );
+    stop_daemon(env.cache()).unwrap();
+    assert!(env.daemon.take().unwrap().wait().unwrap().success());
+    assert_eq!(
+        env.run_json(&["config", "plan", "--check"])["actions"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_startup_checks_all_project_grants_before_any_replacement() {
+    let env = Env::new(&[("guide.md", "localstartupwidget")]);
+    env.run_json(&["index"]);
+    let remote = tempfile::tempdir().unwrap();
+    fs::write(remote.path().join("guide.md"), "remotestartupwidget").unwrap();
+    env.run_json(&["index", remote.path().to_str().unwrap()]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    fs::write(
+        remote.path().join(".docsbase.toml"),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    ).unwrap();
+    let before = env.run_json(&["config", "plan"]);
+    let output = env
+        .cmd()
+        .env_remove("OPENROUTER_API_KEY")
+        .args(["serve", "--grace-ms", "1", "--on-invalidation", "apply"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-remote"));
+    assert_eq!(env.run_json(&["config", "plan"]), before);
+    assert!(!env.cache().join("vectors.db").exists());
+    assert!(!env.cache().join("state").exists());
+}
+
+#[test]
+fn v2_startup_uses_the_cli_profile_override_for_planning_and_apply() {
+    let env = Env::new(&[("guide.md", "fixedprofilestartupwidget")]);
+    env.run_json(&["index"]);
+    let second = tempfile::tempdir().unwrap();
+    let other = second.path().join("manuals");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join("guide.md"), "sharedprofilestartupwidget").unwrap();
+    env.run_json(&["index", other.to_str().unwrap()]);
+    let fixed = toml::Value::String(env.root().canonicalize().unwrap().to_str().unwrap().into());
+    fs::write(
+        env.global_config(),
+        format!("config_version=2\n[daemon]\nprofile={{mode='website',project_root={fixed}}}\n"),
+    )
+    .unwrap();
+    fs::write(
+        other.join(".docsbase.toml"),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let detached = env
+        .cmd()
+        .args([
+            "serve",
+            "--detached",
+            "--project",
+            other.to_str().unwrap(),
+            "--on-invalidation",
+            "apply",
+        ])
+        .output()
+        .unwrap();
+    assert!(!detached.status.success());
+    assert!(String::from_utf8_lossy(&detached.stderr).contains("--detached is inapplicable"));
+    let renamed = second.path().join("Manuals");
+    let intermediate = second.path().join("case-change");
+    let selected = if cfg!(any(windows, target_os = "macos")) {
+        fs::rename(&other, &intermediate).unwrap();
+        fs::rename(&intermediate, &renamed).unwrap();
+        if other.is_dir() {
+            &renamed
+        } else {
+            fs::rename(&renamed, &other).unwrap();
+            &other
+        }
+    } else {
+        &other
+    };
+    let mut fixed = env
+        .cmd()
+        .args([
+            "serve",
+            "--project",
+            selected.to_str().unwrap(),
+            "--on-invalidation",
+            "fail",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    if !wait_until(Duration::from_secs(10), || {
+        fixed.try_wait().unwrap().is_some()
+    }) {
+        let _ = fixed.kill();
+    }
+    let fixed_override = fixed.wait_with_output().unwrap();
+    assert_eq!(
+        fixed_override.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&fixed_override.stderr)
+    );
+    if selected == &renamed {
+        fs::rename(&renamed, &intermediate).unwrap();
+        fs::rename(&intermediate, &other).unwrap();
+    }
+    let applied = env
+        .cmd()
+        .args([
+            "serve",
+            "--grace-ms",
+            "1",
+            "--profile",
+            "shared",
+            "--on-invalidation",
+            "apply",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    fs::remove_file(env.global_config()).unwrap();
+    let plan = env.run_json(&["config", "plan", other.to_str().unwrap(), "--check"]);
+    assert_eq!(plan["actions"], serde_json::json!([]));
+}
+
+#[test]
+fn v2_startup_recovers_an_interrupted_registry_before_considering_replacements() {
+    let mut env = Env::new(&[("guide.md", "registryrecoverywidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let job = {
+        let conn = rusqlite::Connection::open(env.cache().join("registry.db")).unwrap();
+        conn.execute(
+            "INSERT INTO sync_jobs (project_id,state,started_at) VALUES (1,'queued',0)",
+            [],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let mut daemon = env.daemon.take().unwrap();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    let main = env.cache().join("registry.db");
+    let wal = env.cache().join("registry.db-wal");
+    let before = (fs::read(&main).unwrap(), fs::read(&wal).unwrap());
+    let edited = env.root().join(".docsbase.toml");
+    fs::write(
+        &edited,
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let explicit = env
+        .cmd()
+        .args(["serve", "--grace-ms", "1", "--on-invalidation", "fail"])
+        .output()
+        .unwrap();
+    assert_eq!(explicit.status.code(), Some(5));
+    assert_eq!((fs::read(&main).unwrap(), fs::read(&wal).unwrap()), before);
+    let automatic = env
+        .cmd()
+        .args(["serve", "--grace-ms", "1"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        automatic.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&automatic.stderr)
+    );
+    assert!(!wal.exists());
+    assert!(!env.cache().join("vectors.db").exists());
+    fs::remove_file(edited).unwrap();
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().unwrap();
+    let status = client
+        .call_tool("sync_status", serde_json::json!({"job_id":job}))
+        .unwrap();
+    assert_eq!(status["state"], "error");
+    assert_eq!(status["stats"]["orphaned"], true);
 }
 
 #[test]

@@ -872,6 +872,106 @@ fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
 
 #[test]
 #[cfg(unix)]
+fn managed_auto_index_only_publishes_the_first_generation() {
+    use crate::config::{
+        bootstrap::EntrypointFacts,
+        policy::{self, PolicyMode},
+    };
+
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let unrelated = tempfile::tempdir().unwrap();
+    let file = root.path().join("guide.md");
+    std::fs::write(&file, "firstautoregisteredguide").unwrap();
+    let mut shared = open_v5_index_shared(
+        cache.path(),
+        config.path(),
+        "config_version = 2\nauto_index = true\n",
+    );
+    Arc::get_mut(&mut shared).unwrap().invalidation =
+        policy::resolve(PolicyMode::Managed, None, EntrypointFacts::standalone());
+
+    run_catalog_daemon(&shared, async {
+        let (session, binding, _cancel) =
+            register_session_in(&shared, std::process::id(), root.path(), false, None)
+                .await
+                .unwrap();
+        assert_eq!(binding["status"], "indexed");
+        assert_eq!(
+            catalog_search_hits(&shared, session, "firstautoregisteredguide").await,
+            1
+        );
+        assert!(
+            !shared
+                .cache
+                .join(crate::vector_cache::VECTOR_DB_FILE)
+                .exists()
+        );
+        shared
+            .activity
+            .drain(Duration::from_millis(
+                shared.daemon_settings().drain_poll_ms,
+            ))
+            .await;
+        let project = registry::resolve_by_cwd(&shared.db(), root.path()).unwrap();
+        let current = || {
+            crate::store::project_index::with_catalog_pair(
+                shared.readers.try_acquire().unwrap(),
+                &project,
+                |_, _, index| Ok(index),
+            )
+            .unwrap()
+        };
+        let first = current();
+        std::fs::write(&file, "changedautoregisteredguide").unwrap();
+
+        // Model a first Index that reached preparation after another owner
+        // published a head for the exact project it originally registered.
+        let context = capture_catalog_first_index(&shared, project.clone()).unwrap();
+        let error = run_catalog_sync(
+            &shared,
+            shared.jobs.get().unwrap(),
+            context,
+            shared.activity.track(),
+            shared.watch_operation().unwrap(),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::Admission { message } if message.contains("generation base head changed")),
+            "{error}"
+        );
+        assert_eq!(current(), first);
+
+        // Fail the registry scan without making the existing project's exact
+        // row or selected generation unreadable.
+        {
+            let mut db = shared.db();
+            let foreign = registry::ensure_project(&mut db, unrelated.path()).unwrap();
+            db.connection()
+                .execute(
+                    "UPDATE projects SET status='invalid' WHERE id=?1",
+                    [foreign.id],
+                )
+                .unwrap();
+        }
+        assert!(
+            register_session_in(&shared, std::process::id(), root.path(), false, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(current(), first);
+        assert_eq!(
+            catalog_search_hits(&shared, session, "firstautoregisteredguide").await,
+            1
+        );
+    });
+}
+
+#[test]
+#[cfg(unix)]
 fn catalog_refresh_rechecks_the_project_source_after_capture() {
     use crate::index::async_job::catalog_sync;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1474,11 +1574,12 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         let config = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("guide.md"), "catalogwarmguide").unwrap();
-        std::fs::write(root.path().join("reference.md"), "catalogwarmreference").unwrap();
+        let fence = format!("```text\n{}\n```\n", "a".repeat(1_100_000));
+        std::fs::write(root.path().join("reference.md"), &fence).unwrap();
         let mut shared = open_v5_index_shared(
             cache.path(),
             config.path(),
-            "config_version = 2\n[dense]\nmin_vectors = 1\n[daemon]\nbackground_active = 1\nbackground_pending = 0\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'test/catalog-warm'\ndimensions = 3\n",
+            "config_version = 2\nmax_file_size = 2000000\n[search]\nmax_request_payload_bytes = 268435456\n[dense]\nmin_vectors = 1\n[daemon]\nbackground_active = 1\nbackground_pending = 0\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'test/catalog-warm'\ndimensions = 3\n",
         );
         let warm_gate = Arc::get_mut(&mut shared).unwrap().dense.pause_job_builds_for_test();
         shared.activate_jobs(service).unwrap();
@@ -1517,10 +1618,19 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         assert_eq!(view["ann"]["vectors"], 2);
         assert_eq!(view["ann"]["state"], "loading");
 
+        std::fs::write(
+            project.canonical_root.join(".docsbase.toml"),
+            "config_version = 2\n[ann.build]\nm = 12\n",
+        ).unwrap();
+        assert_live_ann_config_plan(&shared, &project);
+        assert!(catalog_diagnostics(&shared, session).await["ann"]["vectors"].is_null());
+
         reopen_catalog_with_new_ann_recipe(&shared, &project, &provider);
         let reloaded = catalog_diagnostics(&shared, session).await;
         assert_eq!(reloaded["index_generation"], view["index_generation"]);
         assert!(reloaded["ann"]["vectors"].is_null());
+        assert_eq!(live_ann_plan(&shared, &project)["plan"]["ann"]["state"], "unknown");
+        let reviewed = review_catalog_runtime_update(&shared, &project);
 
         std::fs::write(root.path().join("new.md"), "catalogwarmnew").unwrap();
         let ack = call_tool(
@@ -1544,10 +1654,244 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         assert_eq!(sync["state"], "done");
         let view = catalog_diagnostics(&shared, session).await;
         assert_eq!(view["ann"]["vectors"], 3);
+        assert_stale_runtime_and_reused_fence(&shared, &project, reviewed, &provider, &fence);
+        assert_reranker_change_keeps_resident_ann(&shared, &project, &provider);
+        assert_reviewed_ann_apply(&shared, &project, &provider, wait_for_background()).await;
         assert_eq!(provider.queries.load(Ordering::SeqCst), 0);
         Ok(())
     })
     .unwrap();
+}
+
+#[cfg(unix)]
+async fn assert_reviewed_ann_apply(
+    shared: &Arc<Shared>,
+    project: &Project,
+    provider: &DocumentGate,
+    drained: impl std::future::Future<Output = ()>,
+) {
+    let requests = provider.batches.lock().unwrap().len();
+    let source = project.canonical_root.join(".docsbase.toml");
+    let current = std::fs::read_to_string(&source).unwrap();
+    std::fs::write(&source, current.replace("m = 12", "m = 14")).unwrap();
+    let pending = live_ann_plan(shared, project);
+    let plan = &pending["plan"];
+    assert_eq!(plan["blockers"], json!([]));
+    assert_eq!(plan["required_grants"], json!([]));
+    assert!(
+        plan["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| { action["resource"]["value"]["component"] == "ann_graph" })
+    );
+    let scope = scoped::Scope {
+        activity: shared.activity.track(),
+        operation: None,
+    };
+    let applied = live_config::apply(
+        shared,
+        &scope,
+        project.canonical_root.clone(),
+        plan["plan_id"].as_str().unwrap().to_owned(),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["ann_warm"], "scheduled");
+    drop(scope);
+    drained.await;
+    let current = live_ann_plan(shared, project);
+    assert_eq!(current["plan"]["ann"]["state"], "resident");
+    assert_eq!(provider.batches.lock().unwrap().len(), requests);
+    assert_eq!(current["plan"]["actions"], json!([]));
+    let index = |report: &Value| {
+        report["plan"]["expected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fact| fact["resource"]["value"]["component"] == "project_index")
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(index(&pending), index(&current));
+}
+
+#[cfg(unix)]
+fn assert_stale_runtime_and_reused_fence(
+    shared: &Shared,
+    project: &Project,
+    reviewed: crate::config::observe::LiveProjectChange,
+    provider: &DocumentGate,
+    fence: &str,
+) {
+    let operation = live_config::inspection_operation(shared).unwrap();
+    assert!(
+        live_config::publish_runtime(shared, project, reviewed, &operation, |_| {
+            panic!("a scoring update uses the existing stages")
+        })
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        live_ann_plan(shared, project)["plan"]["actions"][0]["resource"]["value"],
+        "project_runtime"
+    );
+    let batches = provider.batches.lock().unwrap();
+    let long = batches
+        .iter()
+        .flatten()
+        .filter(|text| text.len() > 1_048_576)
+        .collect::<Vec<_>>();
+    assert_eq!(long.len(), 1, "Sync reuses the long chunk's vector");
+    assert!(long[0].contains(fence.trim_end()));
+}
+
+#[cfg(unix)]
+fn assert_reranker_change_keeps_resident_ann(
+    shared: &Shared,
+    project: &Project,
+    provider: &Arc<DocumentGate>,
+) {
+    std::fs::write(
+        project.canonical_root.join(".docsbase.toml"),
+        "config_version = 2\n[ann.build]\nm = 12\n[hybrid.reranker]\nprovider='openrouter'\nmodel='fixture/rerank'\nwindow=12\n",
+    ).unwrap();
+    let operation = live_config::inspection_operation(shared).unwrap();
+    let (_, report) = live_config::snapshot(shared, &project.canonical_root, &operation).unwrap();
+    assert_eq!(report.plan.body.actions.len(), 1);
+    assert_eq!(report.plan.body.blockers, []);
+    let graph = shared.dense.ann_snapshot(project.id).unwrap();
+    assert!(
+        live_config::publish_runtime(
+            shared,
+            project,
+            report.live_change.unwrap(),
+            &operation,
+            |config| {
+                assert_eq!(config.hybrid_cfg.reranker.as_ref().unwrap().window, 12);
+                Ok(HybridStages {
+                    embedder: Some(provider.clone()),
+                    reranker: Some(Arc::new(search_phase_tests::CountingReranker(Arc::new(
+                        AtomicUsize::new(0),
+                    )))),
+                    ranking: Ranking::Rrf,
+                })
+            }
+        )
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(shared.dense.ann_snapshot(project.id), Some(graph));
+}
+
+#[cfg(unix)]
+fn review_catalog_runtime_update(
+    shared: &Shared,
+    project: &Project,
+) -> crate::config::observe::LiveProjectChange {
+    std::fs::write(
+        project.canonical_root.join(".docsbase.toml"),
+        "config_version = 2\n[ann.build]\nm = 12\n[lexical]\nlong_chunk_penalty=0.25\n",
+    )
+    .unwrap();
+    let operation = live_config::inspection_operation(shared).unwrap();
+    let (_, report) = live_config::snapshot(shared, &project.canonical_root, &operation).unwrap();
+    assert_eq!(report.plan.body.actions.len(), 1);
+    assert_eq!(report.plan.body.blockers, []);
+    report.live_change.unwrap()
+}
+
+#[cfg(unix)]
+fn assert_live_ann_config_plan(shared: &Shared, project: &Project) {
+    let report = live_ann_plan(shared, project);
+    let plan = &report["plan"];
+    assert_eq!(plan["ann"]["state"], "resident");
+    assert_eq!(plan["ann"]["vectors"], 2);
+    let actions = plan["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 2);
+    let graph = actions
+        .iter()
+        .find(|action| action["resource"]["value"]["component"] == "ann_graph")
+        .unwrap();
+    assert_eq!(graph["effect"], "rebuild");
+    assert_eq!(graph["dependencies"], json!([]));
+    assert_eq!(plan["required_grants"], json!([]));
+
+    shared.dense.invalidate_memory(project.id);
+    let persisted = live_ann_plan(shared, project);
+    assert_eq!(persisted["plan"]["ann"]["state"], "persisted");
+    assert_eq!(persisted["plan"]["ann"]["vectors"], 2);
+    assert_eq!(persisted["plan"]["plan_id"], plan["plan_id"]);
+    assert_eq!(persisted["plan"]["actions"], plan["actions"]);
+    assert!(shared.dense.ann_snapshot(project.id).is_none());
+    assert_persisted_ann_rejects_wrong_digest(shared, project);
+
+    let project_file = project.canonical_root.join(".docsbase.toml");
+    let construction = std::fs::read_to_string(&project_file).unwrap();
+    let replaced = |max_chars| {
+        std::fs::write(
+            &project_file,
+            format!("{construction}\n[index.chunk]\nmax_chars = {max_chars}\n"),
+        )
+        .unwrap();
+        let report = live_ann_plan(shared, project);
+        let actions = report["plan"]["actions"].as_array().unwrap();
+        let index = actions
+            .iter()
+            .find(|action| action["resource"]["value"]["component"] == "project_index")
+            .unwrap();
+        let graph = actions
+            .iter()
+            .find(|action| action["resource"]["value"]["component"] == "ann_graph")
+            .unwrap();
+        let runtime = actions
+            .iter()
+            .find(|action| action["resource"]["value"] == "project_runtime")
+            .unwrap();
+        assert_eq!(graph["dependencies"], json!([index["resource"]]));
+        assert_eq!(runtime["dependencies"], json!([index["resource"]]));
+        graph["target"].clone()
+    };
+    assert_ne!(replaced(1_200), replaced(1_400));
+    std::fs::write(project_file, construction).unwrap();
+}
+
+#[cfg(unix)]
+fn live_ann_plan(shared: &Shared, project: &Project) -> serde_json::Value {
+    let operation = live_config::inspection_operation(shared).unwrap();
+    live_config::report(shared, &project.canonical_root, &operation).unwrap()
+}
+
+#[cfg(unix)]
+fn assert_persisted_ann_rejects_wrong_digest(shared: &Shared, project: &Project) {
+    let ann = crate::hybrid::ann_store::AnnStore::new(shared.cache.clone());
+    let meta = std::fs::read_dir(ann.project_ann_root(project.id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("meta.json"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let original = std::fs::read(&meta).unwrap();
+    let mut wrong: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    // The path uses only the short prefix. The evidence also checks all digest bytes.
+    let digest = wrong["chunk_set_digest"].as_str().unwrap();
+    let suffix = if digest.ends_with('0') { '1' } else { '0' };
+    wrong["chunk_set_digest"] = json!(format!("{}{suffix}", &digest[..63]));
+    let changed = serde_json::to_vec(&wrong).unwrap();
+    std::fs::write(&meta, &changed).unwrap();
+    let report = live_ann_plan(shared, project);
+    assert_eq!(report["plan"]["ann"]["state"], "unknown");
+    assert!(
+        report["plan"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|action| { action["resource"]["value"]["component"] != "ann_graph" })
+    );
+    assert_eq!(std::fs::read(&meta).unwrap(), changed);
+    std::fs::write(meta, original).unwrap();
 }
 
 #[cfg(unix)]
@@ -1556,11 +1900,6 @@ fn reopen_catalog_with_new_ann_recipe(
     project: &Project,
     provider: &Arc<DocumentGate>,
 ) {
-    std::fs::write(
-        project.canonical_root.join(".docsbase.toml"),
-        "config_version = 2\n[ann.build]\nm = 12\n",
-    )
-    .unwrap();
     let reopened = shared
         .open_project_config_with(project, |_| {
             Ok(HybridStages {
@@ -2825,6 +3164,13 @@ fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
     });
     drop(shared);
 
+    assert_managed_launch_leaves_vector_repair_explicit(
+        cache.path(),
+        config.path(),
+        project.path(),
+        &wire,
+    );
+
     let matching = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
     run_catalog_daemon(&matching, async {
         let project = registry::resolve_by_cwd(&matching.db(), project.path()).unwrap();
@@ -2843,6 +3189,46 @@ fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
     let lexical = open_v2_index_shared(cache.path(), config.path());
     run_catalog_daemon(&lexical, async {
         assert_disabled_catalog_model_requires_a_lexical_pair(&lexical, project.path()).await;
+    });
+}
+
+fn assert_managed_launch_leaves_vector_repair_explicit(
+    cache: &Path,
+    config: &Path,
+    root: &Path,
+    wire: &Arc<FactoryWire>,
+) {
+    use crate::config::{
+        bootstrap::EntrypointFacts,
+        policy::{self, PolicyMode},
+    };
+    let mut shared = open_configured_remote_catalog(cache, config, wire, 3);
+    Arc::get_mut(&mut shared).unwrap().invalidation =
+        policy::resolve(PolicyMode::Managed, None, EntrypointFacts::standalone());
+    let malformed = rusqlite::Connection::open(cache.join(crate::vector_cache::VECTOR_DB_FILE))
+        .unwrap()
+        .execute(
+            "UPDATE vector_cache SET dim=1, vector=x'0000807f' WHERE chunk_hash = ?1",
+            [crate::vector_cache::chunk_hash(
+                "latestsharedhybridrevision",
+            )],
+        )
+        .unwrap();
+    assert_eq!(malformed, 1);
+    let calls = wire.calls.load(Ordering::SeqCst);
+    run_catalog_daemon(&shared, async {
+        let (_, binding, _cancel) =
+            register_session_in(&shared, std::process::id(), root, false, None)
+                .await
+                .unwrap();
+        assert_eq!(binding["status"], "indexed");
+        shared
+            .activity
+            .drain(Duration::from_millis(
+                shared.global_config.daemon.drain_poll_ms,
+            ))
+            .await;
+        assert_eq!(wire.calls.load(Ordering::SeqCst), calls);
     });
 }
 
@@ -3541,4 +3927,188 @@ fn cached_search_without_job_pin_keeps_ann_in_root_drain_through_finish_or_unwin
             "root source drain must remain pending after the real response"
         );
     }
+}
+
+#[test]
+fn reviewed_remote_config_apply_checks_sources_before_publication() {
+    const CHILD: &str = "DOCSBASE_REVIEWED_REMOTE_APPLY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::server::async_index_tests::reviewed_remote_config_apply_checks_sources_before_publication",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("OPENROUTER_API_KEY", "fixture-secret")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join(".docsbase.toml");
+    std::fs::write(root.path().join("guide.md"), "reviewedremotewidget").unwrap();
+    std::fs::write(&source, "config_version = 2\n[hybrid]\nenabled = false\n").unwrap();
+    Db::open_for_index(
+        cache.path(),
+        &crate::store::settings::standalone().unwrap(),
+        true,
+    )
+    .unwrap()
+    .close()
+    .unwrap();
+    let wire = Arc::new(FactoryWire {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(0),
+        calls: AtomicUsize::new(0),
+        invalid_on: AtomicUsize::new(0),
+    });
+    let mut shared = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
+    Arc::get_mut(&mut shared).unwrap().watchers = Arc::new(Watchers::with_enabled(false));
+    run_catalog_daemon(&shared, async {
+        assert_reviewed_remote_catalog_apply(&shared, root.path(), &source, &wire).await;
+    });
+}
+
+async fn assert_reviewed_remote_catalog_apply(
+    shared: &Arc<Shared>,
+    root: &Path,
+    source: &Path,
+    wire: &FactoryWire,
+) {
+    const WATCHDOG: Duration = Duration::from_secs(10);
+    const REQUESTED: &str = "config_version = 2\n[hybrid]\nenabled = true\nranking = 'lexical'\n";
+
+    let indexed = call_tool(shared, None, "index_project", json!({"path": root}))
+        .await
+        .unwrap();
+    let project_id = indexed["project_id"].as_i64().unwrap();
+    let (session, _, _cancel) = register_session_in(shared, std::process::id(), root, false, None)
+        .await
+        .unwrap();
+    let selected = || {
+        shared
+            .db()
+            .connection()
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id=?1",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let original = selected();
+    let plan = || {
+        let operation = live_config::inspection_operation(shared).unwrap();
+        live_config::report(shared, root, &operation).unwrap()
+    };
+    let apply = |plan_id: String, allow_remote| async move {
+        let scope = scoped::Scope {
+            activity: shared.activity.track(),
+            operation: None,
+        };
+        live_config::apply(shared, &scope, root.to_owned(), plan_id, allow_remote, true)
+            .await
+            .unwrap()
+    };
+    let status = |job_id: Value| reviewed_remote_job_status(shared, job_id);
+    let settled = || async {
+        tokio::time::timeout(
+            WATCHDOG,
+            shared.activity.drain(Duration::from_millis(
+                shared.daemon_settings().drain_poll_ms,
+            )),
+        )
+        .await
+        .expect("reviewed remote job retirement");
+    };
+
+    std::fs::write(source, REQUESTED).unwrap();
+    let reviewed = plan();
+    assert_eq!(reviewed["plan"]["blockers"], json!([]));
+    assert_eq!(reviewed["plan"]["required_grants"], json!(["remote"]));
+    let id = reviewed["plan"]["plan_id"].as_str().unwrap();
+    assert_eq!(apply(id.to_owned(), false).await["apply_status"], 5);
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
+
+    let accepted = apply(id.to_owned(), true).await;
+    assert_eq!(accepted["apply_status"], 0);
+    assert_eq!(accepted["applied"], false);
+    let job = accepted["job"]["job_id"].clone();
+    tokio::time::timeout(WATCHDOG, wire.entered.acquire())
+        .await
+        .expect("reviewed remote embedding entered provider")
+        .unwrap()
+        .forget();
+    let while_gated = selected();
+    let hits = search_while_reviewed_remote_job_waits(shared, session, WATCHDOG).await;
+    // This comment leaves the requested model and index recipes unchanged.
+    std::fs::write(source, format!("{REQUESTED}# Edited after review.\n")).unwrap();
+    wire.release.add_permits(1);
+    settled().await;
+
+    assert_eq!(while_gated, original);
+    assert_eq!(hits.unwrap().unwrap()[0]["path"], "guide.md");
+    let stale = status(job).await;
+    assert_eq!(stale["state"], "error", "{stale}");
+    assert!(
+        stale["stats"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("configuration sources changed"),
+        "{stale}"
+    );
+    assert_eq!(selected(), original);
+    assert_eq!(apply(id.to_owned(), true).await["apply_status"], 4);
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+
+    let reviewed_again = plan();
+    let current_id = reviewed_again["plan"]["plan_id"].as_str().unwrap();
+    assert_ne!(current_id, id);
+    wire.release.add_permits(1);
+    let retry = apply(current_id.to_owned(), true).await;
+    assert_eq!(retry["apply_status"], 0);
+    settled().await;
+    let done = status(retry["job"]["job_id"].clone()).await;
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done["stats"]["docs"], 1);
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+    assert_ne!(selected(), original);
+    assert_eq!(plan()["plan"]["actions"], json!([]));
+    assert_eq!(
+        catalog_search_hits(shared, session, "reviewedremotewidget").await,
+        1
+    );
+}
+
+async fn reviewed_remote_job_status(shared: &Arc<Shared>, job_id: Value) -> Value {
+    call_tool(shared, None, "sync_status", json!({"job_id": job_id}))
+        .await
+        .unwrap()
+}
+
+async fn search_while_reviewed_remote_job_waits(
+    shared: &Arc<Shared>,
+    session: u64,
+    timeout: Duration,
+) -> std::result::Result<Result<Value>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(
+        timeout,
+        call_tool(
+            shared,
+            Some(session),
+            "search_docs",
+            json!({"query": "reviewedremotewidget"}),
+        ),
+    )
+    .await
 }

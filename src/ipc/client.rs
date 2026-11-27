@@ -12,7 +12,7 @@ use crate::platform;
 use crate::platform::transport::{BlockingStream, Transport};
 
 /// Timeout for a single request/response exchange.
-const IO_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Connected daemon client.
 pub struct Client {

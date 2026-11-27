@@ -48,6 +48,20 @@ pub(super) fn active_head(connection: &Connection, project_id: i64) -> Result<Op
     Ok(None)
 }
 
+pub(super) fn project_identity(
+    connection: &Connection,
+    project_id: Option<i64>,
+) -> Result<blake3::Hash, Why> {
+    let mut hash = blake3::Hasher::new_derive_key("docsbase.registry.project-generation.v1");
+    hash.update(&read_epoch(connection)?);
+    if let Some(project_id) = project_id
+        && let Some(head) = active_head(connection, project_id)?
+    {
+        hash_head(&mut hash, &head);
+    }
+    Ok(hash.finalize())
+}
+
 /// Observe catalog identity on a leased, bounded registry snapshot. Local
 /// artifact health and the content revision belong to the generation reader.
 pub(super) fn identity(
@@ -75,15 +89,7 @@ pub(super) fn identity(
         {
             return Err(Why::InvalidRegistry);
         }
-        hash.update(&head.project_id.to_le_bytes());
-        hash.update(&head.id.to_le_bytes());
-        match head.layout {
-            Layout::Legacy => hash.update(&[0]),
-            Layout::Local { seal_digest } => {
-                hash.update(&[1]);
-                hash.update(&seal_digest)
-            }
-        };
+        hash_head(&mut hash, &head);
         previous = head.project_id;
         matched += 1;
     }
@@ -98,6 +104,18 @@ pub(super) fn identity(
         return Err(Why::InvalidRegistry);
     }
     Ok(hash.finalize())
+}
+
+fn hash_head(hash: &mut blake3::Hasher, head: &Head) {
+    hash.update(&head.project_id.to_le_bytes());
+    hash.update(&head.id.to_le_bytes());
+    match head.layout {
+        Layout::Legacy => hash.update(&[0]),
+        Layout::Local { seal_digest } => {
+            hash.update(&[1]);
+            hash.update(&seal_digest)
+        }
+    };
 }
 
 fn read_head(row: &Row<'_>) -> Result<Head, Why> {

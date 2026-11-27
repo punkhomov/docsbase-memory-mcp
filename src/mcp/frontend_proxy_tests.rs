@@ -224,7 +224,12 @@ async fn serve(stream: platform::Stream, state: std::sync::Arc<State>) {
                 Request::CallTool { .. } => Response::ToolResult {
                     value: json!({"legacy":true}),
                 },
-                Request::Search { .. } | Request::StopDaemon => panic!("unexpected fake request"),
+                Request::Search { .. }
+                | Request::StopDaemon
+                | Request::InspectProjectConfig { .. }
+                | Request::ApplyProjectConfig { .. } => {
+                    panic!("unexpected fake request")
+                }
             })
         };
         let Some(response) = response else {

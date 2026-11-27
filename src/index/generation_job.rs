@@ -25,15 +25,29 @@ pub(crate) struct GenerationJob<'a> {
     pub(crate) config: &'a Arc<Config>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum GenerationBase {
+    Observe,
+    /// The registering operation expects the project to have no selected head.
+    Missing,
+    Reviewed(ObservedProjectIndex),
+}
+
 impl GenerationJob<'_> {
     pub(crate) fn stage(
         &self,
         capture: &mut CaptureBudget<'_>,
+        expectation: GenerationBase,
     ) -> Result<PreparedLexicalPublication> {
         let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
-        let (base, replacement) =
-            observe_replacement_base(self.cache, project_id, self.epoch, self.settings, limits)?;
+        let (base, replacement) = match expectation {
+            GenerationBase::Observe => {
+                observe_replacement_base(self.cache, project_id, self.epoch, self.settings, limits)?
+            }
+            GenerationBase::Missing => (None, None),
+            GenerationBase::Reviewed(base) => (Some(base), None),
+        };
         prepare_operational_lexical_generation(
             self.cache,
             OperationalBuild {

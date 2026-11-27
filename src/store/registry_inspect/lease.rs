@@ -156,14 +156,18 @@ pub(in crate::store) fn configure_connection(
     value_bytes: i32,
     cache_kib: i32,
 ) -> rusqlite::Result<()> {
-    // SAFETY: the caller's connection is private with no statement in flight.
-    // Both limits are positive and validated before opening the connection.
-    unsafe {
-        ffi::sqlite3_limit(connection.handle(), ffi::SQLITE_LIMIT_LENGTH, value_bytes);
-    }
+    set_value_limit(connection, value_bytes);
     connection.pragma_update(None, "cache_size", -cache_kib)?;
     connection.pragma_update(None, "mmap_size", 0)?;
     Ok(())
+}
+
+pub(super) fn set_value_limit(connection: &Connection, value_bytes: i32) {
+    // SAFETY: callers own this private connection and have finished the
+    // statements from the previous inspection phase.
+    unsafe {
+        ffi::sqlite3_limit(connection.handle(), ffi::SQLITE_LIMIT_LENGTH, value_bytes);
+    }
 }
 
 fn lock_file(connection: &Connection, vfs: NativeVfs) -> Observed<()> {

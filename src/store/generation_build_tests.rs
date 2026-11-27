@@ -553,7 +553,10 @@ impl RevisablePair {
             config: &config,
         };
         rebuild
-            .stage(&mut capture)?
+            .stage(
+                &mut capture,
+                crate::index::generation_job::GenerationBase::Observe,
+            )?
             .publish(|commit| commit.commit(admit))
     }
 }
@@ -572,6 +575,52 @@ fn catalog_watcher_retries_while_full_preparation_owns_the_active_base() {
     drop(preparation);
     assert_eq!(pair.apply().unwrap().docs, 1);
     assert_eq!(pair.search("Cherryupdatedbatch").unwrap().1, 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn project_recipe_observation_accepts_an_original_schema_1_seal() {
+    let pair = RevisablePair::new();
+    pair.use_schema_1();
+    let generation = pair.generation;
+    let index = inspect_revisable_recipe(pair);
+    assert_eq!(index.index.generation_id, Some(generation));
+    assert!(index.recipes.unwrap().full_survey);
+}
+
+#[test]
+#[cfg(unix)]
+fn project_recipe_observation_rejects_subset_evidence_for_an_initial_seal() {
+    let pair = RevisablePair::new();
+    let metadata = Connection::open(pair.dir().join("metadata.db")).unwrap();
+    metadata.execute_batch(
+        "UPDATE projects SET index_outcome_json = json_set(index_outcome_json, '$.scope', 'subset');"
+    ).unwrap();
+    drop(metadata);
+    let generation = pair.generation;
+    let index = inspect_revisable_recipe(pair);
+    assert_eq!(index.index.generation_id, Some(generation));
+    assert!(index.recipes.is_none());
+}
+
+#[cfg(unix)]
+fn inspect_revisable_recipe(
+    pair: RevisablePair,
+) -> crate::store::registry_inspect::SelectedIndexEvidence {
+    let cache = pair.env.cache.path().canonicalize().unwrap();
+    let root = pair.project.canonical_root.clone();
+    let policy = pair.policy.clone();
+    drop(pair.registry);
+    let registry = Connection::open(cache.join(DB_FILE)).unwrap();
+    registry
+        .execute_batch("PRAGMA journal_mode=DELETE;")
+        .unwrap();
+    drop(registry);
+    crate::store::registry_inspect::inspect_project_recipes(&cache, &root, &policy, limits())
+        .unwrap()
+        .unwrap()
+        .selected
+        .unwrap()
 }
 
 #[test]

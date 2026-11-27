@@ -74,6 +74,22 @@ pub struct HybridCfg {
 }
 
 impl HybridCfg {
+    fn stage_providers(&self) -> [Option<&str>; 2] {
+        [
+            self.embedding.as_ref().map(|stage| stage.provider.as_str()),
+            self.reranker.as_ref().map(|stage| stage.provider.as_str()),
+        ]
+    }
+
+    pub(crate) fn providers_compiled(&self) -> bool {
+        !self.enabled
+            || self
+                .stage_providers()
+                .into_iter()
+                .flatten()
+                .all(|name| crate::hybrid::provider::provider(name).is_ok_and(Provider::enabled))
+    }
+
     pub(crate) fn embedding_model_key(&self) -> Option<String> {
         self.embedding
             .as_ref()
@@ -835,11 +851,7 @@ fn from_config_dispatch(
     // Per-provider feature gating: a stage may only demand the feature it
     // needs (FR-3, FR-4, feature matrix rev 0.6).
     let mut needed: Vec<&'static dyn Provider> = Vec::new();
-    let stage_providers = [
-        cfg.embedding.as_ref().map(|stage| stage.provider.as_str()),
-        cfg.reranker.as_ref().map(|stage| stage.provider.as_str()),
-    ];
-    for name in stage_providers.into_iter().flatten() {
+    for name in cfg.stage_providers().into_iter().flatten() {
         // `validate_stage_shapes` already proved the name is registered.
         let provider = crate::hybrid::provider::provider_in(table, name)?;
         if !provider.enabled() {

@@ -11,9 +11,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::capture::read_bounded;
 use crate::error::{Error, Result};
 use crate::hybrid::ann_settings::{AnnBuildSettings, LEGACY_BUILD_RECIPE};
+use crate::platform::fs::{is_regular_nofollow, open_readonly_nofollow};
 use crate::store::project_index::ProjectIndex;
+use crate::store::repo::db_error;
 
 /// First on-disk format version (design §5).
 pub const ANN_FORMAT_VERSION: u32 = 1;
@@ -30,7 +33,7 @@ pub const ANN_DEFAULT_EF_CONSTRUCTION: usize = AnnBuildSettings::owner_defaults(
 
 // Version of the construction recipe in the slot name. The HNSW dump layout
 // and its own on-disk format version are unchanged.
-const ANN_RECIPE_VERSION: u32 = 1;
+pub(crate) const ANN_RECIPE_VERSION: u32 = 1;
 
 /// Provisional per-file size ceiling; a bigger graph/data file is treated as
 /// corrupt and rejected (design §6, NFR-6).
@@ -171,10 +174,63 @@ pub fn chunk_set_digest(chunks: &[(u64, String)]) -> String {
     sorted.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut hasher = blake3::Hasher::new();
     for (id, hash) in sorted {
-        hasher.update(&id.to_le_bytes());
-        hasher.update(hash.as_bytes());
+        hash_chunk_key(&mut hasher, *id, hash.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
+}
+
+fn hash_chunk_key(hasher: &mut blake3::Hasher, id: u64, hash: &[u8]) {
+    hasher.update(&id.to_le_bytes());
+    hasher.update(hash);
+}
+
+/// Hash a leased, single-project catalog pair in composite ID order without
+/// collecting texts or allocating a corpus-wide SQL sort.
+pub(crate) fn catalog_chunk_set(
+    metadata: &rusqlite::Connection,
+    project_id: i64,
+    mut remaining_bytes: u64,
+    check: impl Fn() -> Result<()>,
+) -> Result<(usize, String)> {
+    // The chunks (doc_id, seq) index gives the order. CROSS JOIN keeps it
+    // outermost so SQLite doesn't sort the joined chunk texts.
+    let mut statement = metadata
+        .prepare(
+            "SELECT c.doc_id, c.seq, c.text FROM chunks c CROSS JOIN docs d ON d.id = c.doc_id
+             WHERE d.project_id = ?1 ORDER BY c.doc_id, c.seq",
+        )
+        .map_err(db_error)?;
+    let mut rows = statement.query([project_id]).map_err(db_error)?;
+    let mut count = 0_usize;
+    let mut hash = blake3::Hasher::new();
+    let row_key_bytes = (size_of::<u64>() + 2 * blake3::OUT_LEN) as u64;
+    loop {
+        check()?;
+        let Some(row) = rows.next().map_err(db_error)? else {
+            break;
+        };
+        let doc_id = row.get::<_, u32>(0).map_err(db_error)?;
+        let seq = row.get::<_, u32>(1).map_err(db_error)?;
+        let id = crate::index::tantivy_index::chunk_id(i64::from(doc_id), seq);
+        let text = row
+            .get_ref(2)
+            .map_err(db_error)?
+            .as_str()
+            .map_err(|error| {
+                Error::internal_with_source("read catalog chunk text for ANN observation", error)
+            })?;
+        // Empty texts still consume a row and its composite key and digest.
+        remaining_bytes = remaining_bytes
+            .checked_sub(text.len() as u64)
+            .and_then(|bytes| bytes.checked_sub(row_key_bytes))
+            .ok_or_else(|| Error::internal("ANN observation exceeds its input budget"))?;
+        let digest = crate::vector_cache::chunk_digest(text).to_hex();
+        hash_chunk_key(&mut hash, id, digest.as_bytes());
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| Error::internal("ANN chunk count overflow"))?;
+    }
+    Ok((count, hash.finalize().to_hex().to_string()))
 }
 
 /// On-disk store for ANN indexes, rooted at a cache root (design §4.1).
@@ -345,40 +401,97 @@ impl AnnStore {
         artifact: AnnArtifact<'_>,
         settings: AnnBuildSettings,
     ) -> Option<AnnSlot> {
-        let key = artifact.key;
-        let dir = self.artifact_dir(artifact, settings);
-        if !dir.is_dir() || !dir.join("READY").is_file() {
-            return None;
+        match self.read_artifact(artifact, settings) {
+            Ok(slot) => slot.map(|(slot, _)| slot),
+            Err(reason) => {
+                reject(artifact.key, reason);
+                None
+            }
         }
-        let Some(raw) = fs::read_to_string(dir.join("meta.json")).ok() else {
-            reject(key, "meta.json is unreadable");
-            return None;
+    }
+
+    /// Observe published provenance and lengths under the same slot pin used
+    /// by a loader. The graph and vector data are never opened.
+    pub(crate) fn observe_artifact(
+        &self,
+        artifact: AnnArtifact<'_>,
+        settings: AnnBuildSettings,
+    ) -> Option<(usize, u64)> {
+        let _pin = self.pin_slot(artifact, settings, AnnSlotAccess::Read)?;
+        let (slot, bytes) = self.read_artifact(artifact, settings).ok()??;
+        Some((slot.meta.count, bytes))
+    }
+
+    pub(crate) fn has_observation_candidate(
+        &self,
+        index: ProjectIndex,
+        model_id: &str,
+        dimension: usize,
+        settings: AnnBuildSettings,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<bool> {
+        check()?;
+        let catalog = index
+            .catalog_generation()
+            .map(|(epoch, generation)| AnnCatalogGeneration { epoch, generation });
+        let prefix = slot_prefix(model_id, index.content_revision(), catalog, dimension);
+        let suffix = recipe_suffix(settings);
+        let entries = match fs::read_dir(self.project_ann_root(index.project_id())) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(Error::internal_with_source("read ANN slot names", error)),
         };
-        let Ok(StoredAnnMeta { meta, catalog }) = serde_json::from_str::<StoredAnnMeta>(&raw)
-        else {
-            reject(key, "meta.json is not valid JSON");
-            return None;
-        };
-        if catalog != artifact.catalog || !meta.matches_key(key) {
-            reject(key, "metadata does not match the requested key");
-            return None;
+        for entry in entries {
+            check()?;
+            let entry =
+                entry.map_err(|error| Error::internal_with_source("read ANN slot names", error))?;
+            let name = entry.file_name();
+            if let Some((count, digest)) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|rest| rest.strip_suffix(&suffix))
+                .and_then(|slot| slot.split_once('-'))
+                && count.parse::<usize>().is_ok_and(|count| count > 0)
+                && digest.len() == 8
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && ordinary_size(&entry.path().join("READY")).is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn read_artifact(
+        &self,
+        artifact: AnnArtifact<'_>,
+        settings: AnnBuildSettings,
+    ) -> std::result::Result<Option<(AnnSlot, u64)>, &'static str> {
+        let dir = self.artifact_dir(artifact, settings);
+        if !dir.is_dir() || ordinary_size(&dir.join("READY")).is_none() {
+            return Ok(None);
+        }
+        let file = open_readonly_nofollow(&dir.join("meta.json"))
+            .map_err(|_| "meta.json is unreadable")?;
+        if !file.metadata().is_ok_and(|meta| is_regular_nofollow(&meta)) {
+            return Err("meta.json is not an ordinary file");
+        }
+        let raw = read_bounded(file, crate::limits::MAX_STATE_BYTES)
+            .map_err(|_| "meta.json is unreadable or oversized")?;
+        let StoredAnnMeta { meta, catalog } =
+            serde_json::from_slice(&raw).map_err(|_| "meta.json is not valid JSON")?;
+        if catalog != artifact.catalog || !meta.matches_key(artifact.key) {
+            return Err("metadata does not match the requested key");
         }
         if meta.m != settings.m() || meta.ef_construction != settings.ef_construction() {
-            reject(
-                key,
-                "metadata does not match the graph construction settings",
-            );
-            return None;
+            return Err("metadata does not match the graph construction settings");
         }
         if meta.hnsw_rs_version != HNSW_RS_VERSION {
-            reject(key, "hnsw_rs version mismatch");
-            return None;
+            return Err("hnsw_rs version mismatch");
         }
-        if !dump_sizes_ok(&dir) {
-            reject(key, "dump files missing or oversized");
-            return None;
-        }
-        Some(AnnSlot { dir, meta })
+        let bytes = dump_file_bytes(&dir).ok_or("dump files missing, empty or oversized")?;
+        Ok(Some((AnnSlot { dir, meta }, bytes)))
     }
 
     /// Atomically publishes a dump written by `write` into a fresh temporary
@@ -628,30 +741,45 @@ fn reject(key: &AnnKey, reason: &str) {
 
 /// Default construction uses the original slot name (design §5).
 fn dir_name(artifact: AnnArtifact<'_>, settings: AnnBuildSettings) -> String {
+    let key = artifact.key;
+    let prefix = slot_prefix(&key.model_id, key.generation, artifact.catalog, key.dim);
+    let digest8: String = key.chunk_set_digest.chars().take(8).collect();
+    let suffix = recipe_suffix(settings);
+    format!("{prefix}{}-{digest8}{suffix}", key.chunk_count)
+}
+
+fn slot_prefix(
+    model_id: &str,
+    revision: i64,
+    catalog: Option<AnnCatalogGeneration>,
+    dimension: usize,
+) -> String {
     use std::fmt::Write as _;
 
-    let key = artifact.key;
-    let model_hash: String = blake3::hash(key.model_id.as_bytes())
+    let model_hash: String = blake3::hash(model_id.as_bytes())
         .to_hex()
         .chars()
         .take(16)
         .collect();
-    let digest8: String = key.chunk_set_digest.chars().take(8).collect();
-    let mut name = format!("{model_hash}-g{}", key.generation);
-    if let Some(catalog) = artifact.catalog {
+    let mut name = format!("{model_hash}-g{revision}");
+    if let Some(catalog) = catalog {
         let epoch = u128::from_be_bytes(catalog.epoch);
         let _ = write!(name, "-v5.{epoch:032x}.{}", catalog.generation);
     }
-    let _ = write!(name, "-d{}-c{}-{digest8}", key.dim, key.chunk_count);
-    if settings != LEGACY_BUILD_RECIPE {
-        let _ = write!(
-            name,
+    let _ = write!(name, "-d{dimension}-c");
+    name
+}
+
+fn recipe_suffix(settings: AnnBuildSettings) -> String {
+    if settings == LEGACY_BUILD_RECIPE {
+        String::new()
+    } else {
+        format!(
             "-r{ANN_RECIPE_VERSION}-m{}-ef{}",
             settings.m(),
             settings.ef_construction()
-        );
+        )
     }
-    name
 }
 
 struct SlotRevision {
@@ -686,14 +814,22 @@ fn parse_slot_revision(name: &str) -> Option<(&str, SlotRevision)> {
     Some((model, snapshot))
 }
 
-/// Whether every dump file exists and stays within [`MAX_ANN_FILE_BYTES`].
-fn dump_sizes_ok(dir: &Path) -> bool {
+fn ordinary_size(path: &Path) -> Option<u64> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    is_regular_nofollow(&meta).then_some(meta.len())
+}
+
+/// Combined size of the required ordinary dump files.
+fn dump_file_bytes(dir: &Path) -> Option<u64> {
     [
         format!("{DUMP_BASENAME}.hnsw.graph"),
         format!("{DUMP_BASENAME}.hnsw.data"),
     ]
-    .iter()
-    .all(|name| fs::metadata(dir.join(name)).is_ok_and(|meta| meta.len() <= MAX_ANN_FILE_BYTES))
+    .into_iter()
+    .map(|name| {
+        ordinary_size(&dir.join(name)).filter(|size| (1..=MAX_ANN_FILE_BYTES).contains(size))
+    })
+    .sum()
 }
 
 /// `sync_all` on the dump files before the `READY` marker is written
@@ -762,6 +898,57 @@ mod tests {
             2,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn catalog_digest_charges_all_rows_and_checks_cancellation() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER);
+             CREATE TABLE chunks(doc_id INTEGER, seq INTEGER, text TEXT, UNIQUE(doc_id, seq));
+             INSERT INTO docs VALUES(1, 7), (2, 7), (3, 8);
+             INSERT INTO chunks VALUES(2, 0, 'b'), (1, 0, 'a'), (3, 0, 'other');",
+        )
+        .unwrap();
+        let hashes = crate::store::repo::chunk_hashes(&db, 7).unwrap();
+        assert_eq!(
+            catalog_chunk_set(&db, 7, 146, || Ok(())).unwrap(),
+            (2, chunk_set_digest(&hashes))
+        );
+        assert!(catalog_chunk_set(&db, 7, 145, || Ok(())).is_err());
+        let calls = std::cell::Cell::new(0);
+        let result = catalog_chunk_set(&db, 7, 146, || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err(Error::internal("inspection cancelled"))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result.unwrap_err().inner_message(), "inspection cancelled");
+    }
+
+    #[test]
+    fn persisted_observation_respects_build_pin_and_required_dump_files() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AnnStore::new(root.path().to_path_buf());
+        let graph = graph();
+        let key = graph_key(8);
+        let artifact = catalog_artifact(&key, 7, 4);
+        let settings = graph.build_settings();
+        let slot = graph.dump_artifact(&store, artifact).unwrap();
+        let builder = store
+            .pin_slot(artifact, settings, AnnSlotAccess::Build)
+            .unwrap();
+        assert!(store.observe_artifact(artifact, settings).is_none());
+        drop(builder);
+        let Some((2, 1..)) = store.observe_artifact(artifact, settings) else {
+            panic!("expected both persisted dump files");
+        };
+        let data = slot.dir.join("index.hnsw.data");
+        fs::remove_file(&data).unwrap();
+        assert!(store.observe_artifact(artifact, settings).is_none());
+        assert!(!data.exists());
     }
 
     #[test]

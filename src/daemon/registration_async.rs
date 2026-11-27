@@ -1,14 +1,18 @@
 //! Root-enabled registration: CPU metadata → optional admitted full job → binding.
 use super::{
-    Activity, Arc, Db, Error, Path, Result, Shared, Value, finish_registration,
-    index_async_with_operation, json, oneshot, registry, request,
+    Activity, Arc, Db, Error, Path, Result, Shared, Value, capture_catalog_first_index,
+    finish_registration, index_async_with_operation, json, oneshot, registry, request,
+    run_catalog_sync,
 };
+use crate::config::policy::PolicyContext;
+use crate::index::async_job::catalog_sync;
 use crate::search::operation::SearchOperation;
 use crate::store::models::Project;
 
-struct Plan {
-    project: Project,
-    index: bool,
+enum Plan {
+    Bind(Project),
+    Index(Project),
+    FirstGeneration(Box<catalog_sync::Context>),
 }
 
 pub(super) async fn run(
@@ -46,23 +50,39 @@ async fn prepare_and_index(
         prepare(&owner, &root, &call)
     });
     let plan = request::run(work, Some(operation)).await?;
-    if !plan.index {
-        return Ok(plan.project);
-    }
     let service = shared
         .jobs
         .get()
         .ok_or_else(|| Error::internal("registration job root absent"))?;
-    let indexed = index_async_with_operation(
-        shared,
-        service,
-        None,
-        json!({"path": plan.project.canonical_root}),
-        Some(activity.clone()),
-        false,
-        operation.clone(),
-    )
-    .await;
+    let (project, indexed) = match plan {
+        Plan::Bind(project) => return Ok(project),
+        Plan::Index(project) => {
+            let indexed = index_async_with_operation(
+                shared,
+                service,
+                None,
+                json!({"path": project.canonical_root}),
+                Some(activity.clone()),
+                false,
+                operation.clone(),
+            )
+            .await;
+            (project, indexed)
+        }
+        Plan::FirstGeneration(context) => {
+            let project = context.build.project.clone();
+            let indexed = run_catalog_sync(
+                shared,
+                service,
+                *context,
+                activity.clone(),
+                operation.clone(),
+                false,
+            )
+            .await;
+            (project, indexed)
+        }
+    };
     let permit = crate::hybrid::work::RemoteCall::new(operation.clone())
         .wait(
             &crate::hybrid::work::Cancellation::new(),
@@ -85,7 +105,7 @@ async fn prepare_and_index(
             }
             return Err(error);
         }
-        let project = registry::project_by_id(&db, plan.project.id)?
+        let project = registry::project_by_id(&db, project.id)?
             .ok_or_else(|| Error::internal("project vanished after automatic index"))?;
         let project = registered_view(&db, project);
         owner.open_project_config(&project)?;
@@ -100,15 +120,7 @@ fn prepare(shared: &Arc<Shared>, cwd: &Path, operation: &SearchOperation) -> Res
     operation.check()?;
     let mut db = shared.open_work_registry()?;
     let error = match registry::resolve_by_cwd(&db, cwd) {
-        Ok(project) => {
-            let project = registered_view(&db, project);
-            shared.open_project_config(&project)?;
-            shared.schedule_backfill_in(&project, Some(operation.clone()))?;
-            return Ok(Plan {
-                project,
-                index: false,
-            });
-        }
+        Ok(project) => return prepare_registered(shared, &db, project, operation),
         Err(error) => error,
     };
     let Ok(root) = registry::project_root_for(cwd, &shared.cache) else {
@@ -118,14 +130,35 @@ fn prepare(shared: &Arc<Shared>, cwd: &Path, operation: &SearchOperation) -> Res
         return Err(error);
     }
     operation.check()?;
-    let project = registry::ensure_project(&mut db, &root)?;
+    let (project, inserted) = registry::ensure_project_with_insert(&mut db, &root)?;
+    if shared.catalog_epoch.is_some() && matches!(shared.invalidation, PolicyContext::Managed(_)) {
+        if !inserted {
+            let existing = registry::resolve_by_cwd(&db, cwd)?;
+            return prepare_registered(shared, &db, existing, operation);
+        }
+        drop(db);
+        let context = capture_catalog_first_index(shared, project)?;
+        if !context.build.config.auto_index {
+            return Err(error);
+        }
+        return Ok(Plan::FirstGeneration(Box::new(context)));
+    }
     if !shared.project_runtime_for_search(&project)?.0.auto_index {
         return Err(error);
     }
-    Ok(Plan {
-        project,
-        index: true,
-    })
+    Ok(Plan::Index(project))
+}
+
+fn prepare_registered(
+    shared: &Arc<Shared>,
+    db: &Db,
+    project: Project,
+    operation: &SearchOperation,
+) -> Result<Plan> {
+    let project = registered_view(db, project);
+    shared.open_project_config(&project)?;
+    shared.schedule_backfill_in(&project, Some(operation.clone()))?;
+    Ok(Plan::Bind(project))
 }
 
 fn registered_view(db: &Db, project: Project) -> Project {

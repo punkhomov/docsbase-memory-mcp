@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 mod compile;
 mod path;
 pub use compile::compile;
+pub(crate) use compile::compile_for;
 
 /// Explicit caller-owned limits, checked on raw input and serialized output.
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +141,8 @@ pub struct Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockerCode {
+    /// The observed configuration violates an effective settings constraint.
+    InvalidSettings,
     /// No execution path is provided in this planning slice.
     ExecutorUnavailable,
     /// No trustworthy artifact observation.

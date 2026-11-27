@@ -2125,3 +2125,215 @@ quality gate. Lean offline, all-target Clippy, Windows GNU cross-Clippy, and
 formatting passed locally. On a synthetic 10,000-file Linux corpus, debug Index took
 1.72 s for the first build and 0.28–0.30 s on three unchanged runs, each
 skipping 10,000 files and retaining generation 1.
+
+## 2026-11-27 — CF4, план изменения выбранной пары v5
+
+Task CF4 stopped v5 project plan: complete (local implementation, fresh review
+and fix review). Native PR checks remain pending.
+
+Ruling: `config plan [PATH] [--check]` compares the resolved Markdown and
+embedding recipes with the selected pair in a stopped v5 catalog. Its plan
+identity includes observed sources, project and cache paths, and the catalog
+epoch, head and revision. The report distinguishes a required replacement
+from blocked observation and identifies possible remote work without starting
+a provider. Query-only changes keep the pair. Tests compare project and
+cache files byte for byte and cover valid older lexical seals. Active runtime,
+the standalone ANN graph and plan application remain separate work.
+
+Rust 1.100.0 Linux cli-full passed 1,941 tests. Lean offline, all-target
+Clippy, Windows GNU cross-Clippy and formatting passed locally.
+
+## 2026-11-27 — CF5, применение плана в остановленном каталоге v5
+
+Task CF5 stopped v5 project apply: complete (CLI implementation, fresh review
+and fix review). Native PR checks remain pending.
+
+Ruling: `config apply --plan-id` recompiles the plan, refuses blockers and
+requires an explicit remote grant before opening the writer or constructing
+provider stages. A current empty plan returns without writes. The stopped
+lease excludes daemon startup through native retirement. Staged Index owns
+the reviewed base; publication checks its revision and seal and reads the
+exact config sources under the existing publication locks. A comment edit
+during a hermetic OpenRouter request keeps the selected head, and an updated
+plan can reuse that compatible vector. Tests also exercise real lexical
+search, stale plan IDs, busy admission and lean capability blockers.
+
+Rust 1.100.0 Linux cli-full passed 1,944 tests. Targeted lean CLI tests,
+lean offline, Linux and Windows GNU cross-Clippy, and formatting passed
+locally. Preview and apply will ship in one functional PR. Live runtime and ANN
+observation and startup invalidation policy remain subsequent tasks.
+
+## 2026-11-27 — CF4, план работающего демона и ANN
+
+Task CF4 live project plan: complete (CLI route, warmed ANN acceptance,
+fresh review and fix reviews). Native PR checks remain pending.
+
+Ruling: `config plan --live` sends one versioned diagnostic request with
+no session registration. It reads the active project settings and current
+pair under the existing leases, including the immutable SQLite inspection
+and segment health check. A WAL header with absent sidecars is blocked.
+Query-only overrides, including explicitly enabled default ANN traversal,
+appear as runtime changes. A changed ANN build recipe plans replacement of
+the qualified resident graph with reuse of compatible vectors. If the
+project pair must be replaced, that action precedes dependent runtime,
+restart and graph actions. Graph identities include owner formats and
+upstream recipes. A graph absent from memory has unknown disk provenance.
+
+Rust 1.100.0 Linux cli-full passed 1,948 tests. Lean CLI and offline checks,
+Linux and Windows GNU cross-Clippy, and formatting passed. Startup consent,
+live application and disk-only ANN observation remain subsequent work.
+
+## 2026-11-27 — CF5, политика инвалидации при запуске
+
+Task CF5 startup policy: complete (implementation, local cli-full
+verification and independent review with fix rounds). Native PR checks
+remain pending.
+
+Ruling: the controlling CLI handles fail, prompt and apply before daemon
+startup. It collects consent and grants for all affected projects before
+applying the first reviewed plan. Project plans inherit the selected launch
+profile. The daemon checks the approved source and registry expectations
+before admission and checks them again against its startup writer before
+restoring watchers. A late stale plan exits with code 4.
+
+Ruling: Website limits normal observation to the selected registry row and
+generation. The native comparison preserves existing case-insensitive
+registration behavior. MCP autostart checks for required replacements before
+creating launch files. Managed project opens leave vector repair to Index or
+Sync. Legacy v4 retains its ordinary startup.
+
+Ruling: ordinary interrupted restarts can checkpoint already committed
+registry WAL under daemon admission before deciding whether the config
+requires a replacement. The recovery checks paths and the effective schema.
+It also handles a first commit still in WAL, preserving v4 or v5. Explicit
+policy and dry-run leave interrupted registry files unchanged. Unit tests
+prove that a rejected recovery cannot checkpoint on connection close.
+
+Rust 1.100.0 Linux cli-full passed 1,957 tests and the lean profile passed
+1,616. The search baseline and no-network checks passed. Linux and
+Windows GNU cross-Clippy and formatting passed. Live application, disk-only
+ANN observation and the final component audit remain open.
+
+## 2026-11-27 — CF4/CF8, план для сохранённого ANN
+
+Task CF4 persisted ANN observation: complete (native graph and SQLite
+fixtures, bounded observation and independent review). Native PR checks
+remain pending.
+
+Ruling: qualify a matching slot name before reading chunks. Hash the
+selected local SQLite pair in composite ID order with the request byte
+budget and original control deadline. The live callback can read a
+supported atomic chunk above the ordinary inspector value limit. Disk
+qualification shares the loader's bounded metadata and dump-file checks
+and the store's read pin. An evicted graph keeps the same plan identity
+and actions when the published slot still matches. Inspection stops after
+metadata and file-size validation. Absent or unconfirmed evidence remains
+unknown.
+
+Ruling: a separate end-to-end acceptance case remains open. Shared v5
+`index_project` with a 1,100,000-byte Markdown fence and
+`max_file_size = 2000000` can hit SQLite's value limit before a graph is
+published even after sufficient capture budget is granted. The bounded
+live SQLite test isolates and verifies the observation path independently.
+Carry the indexing case into the remaining settings-consumer acceptance.
+
+Rust 1.100.0 Linux cli-full passed 1,960 tests and lean passed 1,620,
+including the search baseline and offline checks. Linux and Windows GNU
+cross-Clippy and formatting passed.
+
+## 2026-11-27 — CF11/CF14, атомарные чанки в hybrid v5
+
+Task CF11 atomic chunk embedding: complete (real Index, ANN warm and
+detached Sync regression, local verification and independent review).
+Native PR checks remain pending.
+
+Ruling: the expanded Shared fixture reproduced `SQLITE_TOOBIG` during
+embedding shape inspection of an inactive pair, before the provider
+received any text. The prepared metadata reader now verifies the pair
+under inspection limits and then switches to the existing IPC frame
+ceiling for shape and batch reads. It shares the SQLite value-limit
+helper used for the live ANN digest. Workspace admission and each
+provider batch account for the actual chunk size.
+
+Ruling: the 1.1 MB fenced block reaches the test embedder in full.
+ANN warms with two vectors after Index and with three after detached
+Sync adds another document. The provider sees the fenced block once,
+confirming vector reuse. Linux cli-full passed 1,960 tests. Linux and
+Windows GNU cross-Clippy and formatting passed.
+
+Ruling: two legacy ANN warm tests hit their watchdogs in the initial lean
+run with default parallelism. Both passed in isolation with the same
+binary. The complete lean rerun passed 1,620 tests with four harness
+threads, including offline and search baseline checks.
+
+## 2026-11-27 — CF5/CF11, проверенный runtime на живом демоне
+
+Task CF5 live project runtime application: complete (CLI/IPC integration,
+concurrent catalog publication rejection, local verification and fresh
+review with a fix round). Native PR checks remain pending.
+
+Ruling: `config apply --live --plan-id` completes the registry Hello
+exchange and recomputes the plan on the running daemon. With unchanged
+global sources it uses the captured launch configuration as the project
+overlay base. Reconfiguration checks the expected sources, published seal,
+generation and content revision, and captured runtime Arc under the
+source, catalog and project publication leases before installing the
+config/stages pair and handing it to the existing watcher.
+
+Ruling: the existing registered client sees the new lexical score. An
+approved runtime update prepared before a real Sync rejects the superseded
+head. Reranker changes preserve compatible resident ANN. Lean planning
+reports an unavailable executor when the configured stage provider is
+absent from the build. Reviewed index/embedding replacement and ANN
+construction changes remain the next live execution work.
+
+Rust 1.100.0 Linux cli-full passed 1,961 tests and lean passed 1,622.
+Linux and Windows GNU cross-Clippy and formatting passed.
+
+## 2026-11-27 — CF5/CF11, перестройка по проверенному live plan
+
+Task CF5/CF11 reviewed live replacement: complete (CLI and provider-gated
+acceptance, fresh review and fix round). Native PR checks remain pending.
+
+Ruling: the control request grants and admits a detached catalog Index against
+an exact source and head review. The job keeps its native owner and original
+background deadline when the client disconnects. The CLI waits for a terminal
+record. Peers without job acknowledgement support refuse before admission.
+Polling checks immediately and caps subsequent sleep by the time left for a
+reply. Staging and publication recheck source bytes and selected identity.
+The existing CAS publishes the new index, terminal record and live settings.
+
+Ruling: real CLI Index replacement is observable through an existing search
+connection. The hermetic provider gate verifies refusal without a grant,
+old-head search during the request, refusal on a source edit, and compatible
+vector reuse on a reviewed retry. An ANN recipe change retires the memory
+entry and schedules bounded warm without an embedding request or an index
+replacement. Admission is reported separately from graph readiness.
+
+## 2026-11-27 — CF5, граница автоматического первого Index
+
+Task CF5 managed v5 first Index: complete (actual registration, missing-base
+admission and observed-head regressions). Native PR checks remain pending.
+
+Ruling: managed v5 automatic indexing requires the INSERT receipt and an
+absent catalog head. Existing registrations and an independently published
+head cannot fall through to replacement. Explicit Sync/Index remain the
+owners of recovery. Unmanaged compatibility behavior is retained.
+
+## 2026-11-27 — CF12 I45, сроки ожидания launcher
+
+Task CF12 launcher deadlines: complete (resolved daemon policy, real launcher
+and Stop consumer tests). Native PR checks remain pending.
+
+Ruling: Start waits with its captured policy. Stop uses one resolved duration
+for the exchange and process-exit wait. Unreadable configuration still permits
+Stop through standalone policy. Only Unix uses socket absence as evidence;
+Windows verifies process exit and displays null for the Unix-only parameter.
+The settings change no stored recipe. All 32 lifecycle and daemon-settings
+checks passed locally on Linux. Windows GNU focused Clippy passed.
+
+Ruling: install, update and uninstall retain their own overall admission
+budget. The Stop exchange and its process wait are capped by that outer
+deadline. A native unanswered Unix socket reproduced an old 15-second wait
+with a 500 ms caller deadline. The corrected fixture returns in 0.52 s and
+leaves the still-owned daemon state intact.

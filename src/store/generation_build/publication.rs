@@ -119,6 +119,7 @@ pub(crate) struct LexicalCommit<'a> {
     project: &'a Project,
     seal: blake3::Hash,
     current: ObservedProjectIndex,
+    reviewed_head: Option<CatalogHead>,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +131,24 @@ pub(crate) struct CatalogHead {
 }
 
 impl CatalogHead {
+    pub(crate) fn from_observed_seal(
+        index: ObservedProjectIndex,
+        seal: Option<[u8; 32]>,
+    ) -> Result<Self> {
+        let (Some(epoch), Some(generation), Some(seal)) = (index.epoch, index.generation_id, seal)
+        else {
+            return Err(admission(
+                "reviewed catalog generation has no published seal",
+            ));
+        };
+        Ok(Self {
+            epoch,
+            project_id: index.project_id,
+            generation,
+            seal,
+        })
+    }
+
     #[cfg(all(test, unix, feature = "hybrid-remote"))]
     pub(crate) fn from_selected_fixture(conn: &Connection, project_id: i64) -> Result<Self> {
         Self::from_selected(conn, project_id)
@@ -181,6 +200,11 @@ pub(crate) enum CatalogCommit {
 }
 
 impl LexicalCommit<'_> {
+    pub(crate) fn with_reviewed_head(mut self, head: CatalogHead) -> Self {
+        self.reviewed_head = Some(head);
+        self
+    }
+
     pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
         self.commit_with(|| Ok(()), |_, _| Ok(()), admit, |_| {})
     }
@@ -282,6 +306,7 @@ pub(super) fn publish_prepared(
         project: &project,
         seal,
         current,
+        reviewed_head: None,
     })
 }
 
@@ -785,6 +810,13 @@ fn commit_head<Admission>(
     let artifact_guard = hold()?;
     let tx = registry.begin_write()?;
     validate_head_transition(&tx, commit)?;
+    if let Some(head) = commit.reviewed_head
+        && !head.is_selected(&tx)?
+    {
+        return Err(admission(
+            "reviewed catalog head changed before publication",
+        ));
+    }
     if let Some(base) = request.base {
         let generation = base
             .generation_id

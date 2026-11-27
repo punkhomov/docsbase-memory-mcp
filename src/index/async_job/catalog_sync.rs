@@ -4,8 +4,8 @@ use super::{
     Activity, BatchPacket, Config, IndexState, JobOwner, JobService, PayloadPermit, Project,
     SearchOperation, WorkerAdmission,
 };
-use crate::config::paths::with_index_config_write_locks;
 use crate::config::schema::Resolved;
+use crate::config::{observe::ReviewedReplacement, paths::with_index_config_write_locks};
 use crate::daemon::{
     readiness::SyncAttribution,
     server::{CatalogConfigPublication, CatalogRuntimeProof, ProjectCell, ProjectState},
@@ -17,7 +17,7 @@ use crate::hybrid::{
     async_jobs::{self, EmbeddingBatch},
 };
 use crate::index::{
-    generation_job::GenerationJob,
+    generation_job::{GenerationBase, GenerationJob},
     job::{CaptureBudget, JobStats},
 };
 use crate::search::budget::PayloadBudget;
@@ -36,7 +36,7 @@ use crate::vector_cache::{
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, RwLockReadGuard},
     time::Duration,
 };
@@ -72,6 +72,7 @@ pub(crate) struct Context {
     pub(crate) owner: Owner,
     pub(crate) refresh: Option<RuntimeUpdate>,
     pub(crate) reuse_unchanged: bool,
+    pub(crate) first_generation: bool,
 }
 
 pub(crate) struct RuntimeUpdate {
@@ -80,6 +81,7 @@ pub(crate) struct RuntimeUpdate {
     pub(crate) global_path: Option<PathBuf>,
     pub(crate) watchers: Arc<crate::watch::Watchers>,
     pub(crate) watch_runtime: Arc<crate::watch::WatchRuntime>,
+    pub(crate) reviewed: Option<Box<ReviewedReplacement>>,
 }
 
 impl RuntimeUpdate {
@@ -92,7 +94,9 @@ impl RuntimeUpdate {
         let root = &context.project.canonical_root;
         with_index_config_write_locks(self.global_path.as_deref(), root, || {
             operation.check()?;
-            if Config::for_project(&self.global_config, root)? != *context.config {
+            if let Some(reviewed) = &self.reviewed {
+                reviewed.verify_sources()?;
+            } else if Config::for_project(&self.global_config, root)? != *context.config {
                 return Err(Error::Admission {
                     message: "project index configuration changed before publication; retry index"
                         .into(),
@@ -170,7 +174,12 @@ pub(super) struct CatalogJob {
 )]
 enum Publication {
     Sync(SyncPublication),
-    Direct(PathBuf),
+    Direct(DirectPublication),
+}
+
+pub(crate) struct DirectPublication {
+    pub(crate) config_dir: PathBuf,
+    pub(crate) reviewed: Option<ReviewedReplacement>,
 }
 
 struct SyncPublication {
@@ -179,6 +188,7 @@ struct SyncPublication {
     _owner: Owner,
     refresh: Option<RuntimeUpdate>,
     reuse_unchanged: bool,
+    first_generation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -222,6 +232,13 @@ impl SyncPublication {
 }
 
 impl Publication {
+    fn reviewed(&self) -> Option<&ReviewedReplacement> {
+        match self {
+            Self::Sync(sync) => sync.refresh.as_ref()?.reviewed.as_deref(),
+            Self::Direct(direct) => direct.reviewed.as_ref(),
+        }
+    }
+
     fn preparation_lease(&self, config: &Arc<Config>) -> Result<Option<RwLockReadGuard<'_, ()>>> {
         match self {
             Self::Sync(sync) => sync
@@ -253,6 +270,7 @@ impl IndexState {
             owner,
             refresh,
             reuse_unchanged,
+            first_generation,
         } = context;
         let db = open_index_registry(&build.cache, &build.settings, build.epoch)?;
         // Context holds the sole native owner slot through retirement. Any
@@ -276,6 +294,7 @@ impl IndexState {
             _owner: owner,
             refresh,
             reuse_unchanged,
+            first_generation,
         });
         self.catalog_job = Some(CatalogJob::new(build, publication));
         repo::mark_sync_running(db.connection(), id)?;
@@ -303,14 +322,14 @@ pub(crate) async fn index_direct(
     operation: &SearchOperation,
     budget: &PayloadBudget,
     context: BuildContext,
-    config_dir: PathBuf,
+    publication: DirectPublication,
 ) -> Result<JobStats> {
     let owner = service
         .admit_with_account(workers.clone(), activity.clone(), operation, budget, None)
         .await?;
     let (owner, started) = service
         .phase(workers, activity.clone(), operation, owner, move |state| {
-            state.catalog_job = Some(CatalogJob::new(context, Publication::Direct(config_dir)));
+            state.catalog_job = Some(CatalogJob::new(context, Publication::Direct(publication)));
             Ok(())
         })
         .await?;
@@ -395,7 +414,8 @@ impl CatalogJob {
             return Ok(None);
         };
         let config = &self.context.config;
-        if !sync.reuse_unchanged || self.context.stages.embedder.is_some() {
+        if sync.first_generation || !sync.reuse_unchanged || self.context.stages.embedder.is_some()
+        {
             return Ok(None);
         }
         let watermark = sync.revision.source_watermark();
@@ -552,7 +572,21 @@ impl CatalogJob {
             observed: None,
         };
         drop(self.publication.preparation_lease(config)?);
-        let prepared = self.context.generation_job().stage(&mut capture)?;
+        let reviewed = self.publication.reviewed();
+        if let Some(reviewed) = reviewed {
+            reviewed.verify_sources()?;
+        }
+        let base = if let Some(reviewed) = reviewed {
+            GenerationBase::Reviewed(reviewed.base)
+        } else if matches!(&self.publication, Publication::Sync(sync) if sync.first_generation) {
+            GenerationBase::Missing
+        } else {
+            GenerationBase::Observe
+        };
+        let prepared = self.context.generation_job().stage(&mut capture, base)?;
+        if let Some(reviewed) = reviewed {
+            reviewed.verify_sources()?;
+        }
         if let Some(embedder) = &self.context.stages.embedder {
             if embedder.model_id().len() as u64 > EmbeddingRecipe::MAX_MODEL_BYTES {
                 return Err(Error::Admission {
@@ -749,8 +783,8 @@ impl CatalogJob {
             .as_ref()
             .map(|embedder| EmbeddingRecipe::for_model(embedder.model_id()));
         match &self.publication {
-            Publication::Direct(config_dir) => prepared.publish_with_embedding(recipe, |commit| {
-                self.commit_direct(commit, config_dir, recipe, operation)
+            Publication::Direct(direct) => prepared.publish_with_embedding(recipe, |commit| {
+                self.commit_direct(commit, direct, recipe, operation)
             }),
             Publication::Sync(sync) => {
                 let outcome = prepared.outcome().clone();
@@ -804,26 +838,37 @@ impl CatalogJob {
     fn commit_direct(
         &self,
         commit: LexicalCommit<'_>,
-        config_dir: &Path,
+        direct: &DirectPublication,
         recipe: Option<EmbeddingRecipe>,
         operation: &SearchOperation,
     ) -> Result<ObservedProjectIndex> {
         let root = &self.context.project.canonical_root;
+        let config_dir = &direct.config_dir;
         with_index_config_write_locks(Some(&config_dir.join("config.toml")), root, || {
             operation.check()?;
-            let current = Config::load_from(config_dir, Some(root))?;
+            let current = if direct.reviewed.is_some() {
+                self.context.config.clone()
+            } else {
+                Arc::new(Config::load_from(config_dir, Some(root))?)
+            };
             let current_recipe = current
                 .hybrid_cfg
                 .embedding_model_key()
                 .as_deref()
                 .map(EmbeddingRecipe::for_model);
-            if current != *self.context.config || current_recipe != recipe {
+            if current != self.context.config || current_recipe != recipe {
                 return Err(Error::Admission {
                     message: "project index configuration changed before publication; retry index"
                         .into(),
                 });
             }
             let verification = self.vector_verification(|| operation.check())?;
+            let commit = if let Some(reviewed) = &direct.reviewed {
+                reviewed.verify_sources()?;
+                commit.with_reviewed_head(reviewed.head)
+            } else {
+                commit
+            };
             commit.commit_with(
                 || {
                     operation.check()?;
@@ -832,7 +877,13 @@ impl CatalogJob {
                         .transpose()
                 },
                 |_, _| Ok(()),
-                || operation.check(),
+                || {
+                    operation.check()?;
+                    if let Some(reviewed) = &direct.reviewed {
+                        reviewed.verify_sources()?;
+                    }
+                    Ok(())
+                },
                 |_| {},
             )
         })
@@ -861,6 +912,12 @@ impl CatalogJob {
         } else {
             (Some(sync.revision.catalog_publication(active)?), None)
         };
+        let reviewed = self.publication.reviewed();
+        let commit = if let Some(reviewed) = reviewed {
+            commit.with_reviewed_head(reviewed.head)
+        } else {
+            commit
+        };
         let result = commit.commit_with(
             || {
                 admit()?;
@@ -879,7 +936,13 @@ impl CatalogJob {
                 )?;
                 repo::finish_sync_job(conn, sync.id, SyncState::Done, Some(&record))
             },
-            &admit,
+            || {
+                admit()?;
+                if let Some(reviewed) = reviewed {
+                    reviewed.verify_sources()?;
+                }
+                Ok(())
+            },
             |result| {
                 if let Some(publication) = &publication {
                     match result {

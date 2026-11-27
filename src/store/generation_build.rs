@@ -213,7 +213,7 @@ impl PreparedLexicalPublication {
         Ok(Some(result))
     }
 
-    /// Read inactive metadata without lending a connection to the caller.
+    /// Read the inactive pair's metadata for embedding shape and input batches.
     pub(crate) fn with_metadata<T>(&self, read: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
         let staged = self.pair.staged;
         let dir = self
@@ -237,6 +237,11 @@ impl PreparedLexicalPublication {
                 "prepared chunk metadata changed before embedding",
             ));
         }
+        registry_inspect::allow_chunk_values(metadata.connection()).map_err(|reason| {
+            admission(format!(
+                "prepared chunk values are unavailable ({reason:?})"
+            ))
+        })?;
         read(&metadata)
     }
 

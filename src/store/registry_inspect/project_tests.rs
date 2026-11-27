@@ -13,6 +13,28 @@ fn limits() -> InspectionLimits {
     }
 }
 
+#[test]
+fn live_ann_chunk_read_has_room_for_a_large_atomic_chunk() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER);
+             CREATE TABLE chunks(doc_id INTEGER, seq INTEGER, text TEXT, UNIQUE(doc_id, seq));
+             INSERT INTO docs VALUES(1, 7);",
+        )
+        .unwrap();
+    let text = "a".repeat(1_100_000);
+    connection
+        .execute("INSERT INTO chunks VALUES(1, 0, ?1)", [&text])
+        .unwrap();
+    super::configure_connection(&connection, limits()).unwrap();
+    let observe =
+        || crate::hybrid::ann_store::catalog_chunk_set(&connection, 7, 2_000_000, || Ok(()));
+    assert!(observe().is_err());
+    super::allow_chunk_values(&connection).unwrap();
+    assert_eq!(observe().unwrap().0, 1);
+}
+
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut entries = BTreeMap::new();
     for entry in fs::read_dir(root).unwrap() {
@@ -133,6 +155,11 @@ impl Pairs {
         .unwrap();
         fs::copy(other.path().join(DB_FILE), local.join("metadata.db")).unwrap();
         let mut metadata = Connection::open(local.join("metadata.db")).unwrap();
+        // The fixture starts from a legacy WAL registry. Local generations
+        // are published in rollback format.
+        metadata
+            .pragma_update(None, "journal_mode", "DELETE")
+            .unwrap();
         let tx = metadata.transaction().unwrap();
         tx.execute_batch(crate::store::project_index::LOCAL_SCHEMA_SQL)
             .unwrap();

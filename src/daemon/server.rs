@@ -81,12 +81,14 @@ mod ask;
 #[path = "search_async.rs"]
 pub(crate) mod search_async;
 
+#[path = "live_config.rs"]
+mod live_config;
+
 /// Daemon state shared by all connections.
 pub struct Shared {
     catalog_epoch: Option<[u8; 16]>,
     /// Cache root being served.
     pub cache: PathBuf,
-    db: Mutex<Db>,
     // Independent of the DB mutex: child construction never waits for a query
     // just to obtain its startup policy.
     db_settings: Resolved<DbSettings>,
@@ -116,10 +118,14 @@ pub struct Shared {
     /// Fingerprint of the global config file at daemon start (OQ-6).
     global_config_stamp: ConfigStamp,
     global_config_path: Option<PathBuf>,
+    invalidation: crate::config::policy::PolicyContext,
     /// Per-project config/stage slots; the map lock only protects lookup.
     project_states: Mutex<HashMap<i64, ProjectSlot>>,
     /// Dense candidate cache keyed by project and index generation (FR-16).
     pub dense: DenseCache,
+    // Close after the prepared readers so SQLite's last handle can clean up
+    // WAL sidecars. A final read-only connection cannot perform that cleanup.
+    db: Mutex<Db>,
 }
 
 type ProjectSlot = Arc<ProjectCell>;
@@ -401,6 +407,7 @@ fn prepare_metadata_store(
     pool_settings: &Resolved<ReadPoolSettings>,
     observed_epoch: Option<[u8; 16]>,
     initialize_catalog: bool,
+    launch: &LaunchConfig,
 ) -> Result<(Db, ReadPool, Option<[u8; 16]>)> {
     let db = if let Some(epoch) = observed_epoch {
         crate::store::generation_build::open_index_registry(cache, settings, epoch)?
@@ -409,6 +416,7 @@ fn prepare_metadata_store(
     } else {
         Db::open_with_settings(cache, settings)?
     };
+    launch.recheck_startup(Some(&db))?;
     // The writer chooses the schema under SQLite admission. A direct Index
     // may have initialized the cache after the launch observation.
     let catalog_epoch = db
@@ -587,13 +595,17 @@ impl Shared {
             pool_settings.settings(),
             &Capabilities::current(),
         )?;
-        let global_config = launch.config.into_settings();
+        // Admission has already observed the stopped registry. Its native
+        // SQLite reader can leave WAL sidecars, so compare logical registry
+        // identity on the startup writer after opening it.
+        launch.verify_startup_sources()?;
         let ann_policy = if website.is_some() {
             AnnPolicy::Disabled
         } else {
             AnnPolicy::BuildOrLoad
         };
-        let dense = DenseCache::for_config(ann_policy, cache, dense_settings, &global_config)?;
+        let dense =
+            DenseCache::for_config(ann_policy, cache, dense_settings, launch.config.settings())?;
         let (db, readers, catalog_epoch) = prepare_metadata_store(
             cache,
             settings,
@@ -601,8 +613,12 @@ impl Shared {
             catalog_epoch,
             // Library compatibility constructors can serve without a JobRoot.
             // Their in-place Index writer still requires a legacy registry.
-            owners.is_some() && website.is_none() && global_config.vector_store.is_some(),
+            owners.is_some()
+                && website.is_none()
+                && launch.config.settings().vector_store.is_some(),
+            &launch,
         )?;
+        let global_config = launch.config.into_settings();
         let readers = Arc::new(readers);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
@@ -656,6 +672,7 @@ impl Shared {
             global_config_error: launch.error,
             global_config_stamp: launch.stamp,
             global_config_path: launch.path,
+            invalidation: launch.invalidation,
             project_states: Mutex::new(project_states),
             dense,
         });
@@ -868,7 +885,14 @@ impl Shared {
                     message: "another writer holds the project sync slot".into(),
                     instruction: Some("wait for the running index to finish".into()),
                 })?;
-            prepare_catalog_project_sync(&shared, project, epoch, false, revision, owner)
+            prepare_catalog_project_sync(
+                &shared,
+                project,
+                epoch,
+                CatalogSyncConfig::Current,
+                revision,
+                owner,
+            )
         });
         let context = request::run(capture, Some(operation)).await?;
         let revision = context.revision.clone();
@@ -1395,6 +1419,14 @@ impl Shared {
         project: &crate::store::models::Project,
         operation: Option<crate::search::operation::SearchOperation>,
     ) -> Result<()> {
+        if matches!(
+            self.invalidation,
+            crate::config::policy::PolicyContext::Managed(_)
+        ) {
+            // The startup receipt permits only its reviewed work. Opening a
+            // project does not authorize a new embedding job for its vectors.
+            return Ok(());
+        }
         let operation = match operation {
             Some(operation) => operation,
             None => self.watch_operation()?,
@@ -1812,7 +1844,7 @@ impl Shared {
                     .cloned(),
             )
         };
-        if let Some(current) = current
+        let (config, stages) = if let Some(current) = current
             && (current == desired
                 || (shared_catalog
                     && catalog_requires_index(&current, &desired)
@@ -1821,13 +1853,31 @@ impl Shared {
                         project,
                         &crate::index::outcome::recipe_id(&desired),
                         configured_catalog_embedding(&desired),
-                    )?))
-        {
+                    )?)) {
             // Opens retain the active recipe until explicit Index can
             // publish the required pair together with the new settings.
-            return Ok((current, stages));
+            (current, stages)
+        } else {
+            (desired, None)
+        };
+        if shared_catalog
+            && matches!(
+                self.invalidation,
+                crate::config::policy::PolicyContext::Managed(_)
+            )
+            && crate::store::project_index::catalog_needs_index_for(
+                self.readers.try_acquire()?,
+                project,
+                &crate::index::outcome::recipe_id(&config),
+                configured_catalog_embedding(&config),
+            )?
+        {
+            return Err(Error::Admission {
+                message: "published index does not match the project settings; run docsbase index"
+                    .into(),
+            });
         }
-        Ok((desired, None))
+        Ok((config, stages))
     }
 
     fn publish_project_config<F, O>(
@@ -2448,6 +2498,40 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 return (hello_required(), true);
             }
             scoped::call(shared, peer, args, scope, reader).await
+        }
+        Request::InspectProjectConfig {
+            protocol_version,
+            build_id,
+            path,
+        } => {
+            let result =
+                live_config::inspect(shared, scope, protocol_version, &build_id, path).await;
+            (
+                result.map_or_else(
+                    |error| error_response(&error),
+                    |value| Response::ToolResult { value },
+                ),
+                true,
+            )
+        }
+        Request::ApplyProjectConfig {
+            path,
+            plan_id,
+            allow_remote,
+            follow_job,
+        } => {
+            if !peer.hello_done {
+                return (hello_required(), true);
+            }
+            let result =
+                live_config::apply(shared, scope, path, plan_id, allow_remote, follow_job).await;
+            (
+                result.map_or_else(
+                    |error| error_response(&error),
+                    |value| Response::ToolResult { value },
+                ),
+                false,
+            )
         }
         Request::BindReadOnly { pid, project_id } => {
             if !peer.hello_done {
@@ -3157,6 +3241,17 @@ async fn start_catalog_sync(
         Err(existing) => return Ok(existing),
     };
 
+    run_catalog_sync(shared, service, context, activity, operation, detached).await
+}
+
+async fn run_catalog_sync(
+    shared: &Arc<Shared>,
+    service: &super::job_service::JobService,
+    context: catalog_sync::Context,
+    activity: Arc<Activity>,
+    operation: crate::search::operation::SearchOperation,
+    detached: bool,
+) -> Result<Value> {
     let project_id = context.build.project.id;
     let warm = (shared.website.is_none()
         && context.build.stages.ranking == Ranking::Rrf
@@ -3246,13 +3341,13 @@ impl CatalogAnnWarm {
         service: &super::job_service::JobService,
         operation: &crate::search::operation::SearchOperation,
         published: ObservedProjectIndex,
-    ) {
+    ) -> bool {
         let shutdown = service.shutdown_token();
         if shared.stopping.load(Ordering::SeqCst) || shutdown.is_cancelled() {
-            return;
+            return false;
         }
         let Ok(reservation) = shared.workers.reserve_background(operation) else {
-            return;
+            return false;
         };
         let owner = shared.clone();
         let activity = shared.activity.track();
@@ -3283,6 +3378,7 @@ impl CatalogAnnWarm {
                 eprintln!("warning: catalog ANN warm for project {project_id}: {error}");
             }
         }));
+        true
     }
 
     fn run(
@@ -3370,23 +3466,103 @@ fn capture_catalog_sync(
             message: "project sync is starting or retiring; retry sync".into(),
         });
     };
-    prepare_catalog_project_sync(shared, project, epoch, refresh, revision, owner).map(Ok)
+    let config = if refresh {
+        CatalogSyncConfig::Reload
+    } else {
+        CatalogSyncConfig::Current
+    };
+    prepare_catalog_project_sync(shared, project, epoch, config, revision, owner).map(Ok)
+}
+
+fn capture_catalog_first_index(shared: &Shared, project: Project) -> Result<catalog_sync::Context> {
+    let epoch = shared
+        .catalog_epoch
+        .ok_or_else(|| Error::internal("first index has no registry epoch"))?;
+    registry::ensure_root_present(&project)?;
+    let revision = shared.project_slot(project.id);
+    let owner = revision
+        .catalog_sync
+        .try_own()
+        .ok_or_else(crate::index::async_job::active_sync_conflict)?;
+    let mut context = prepare_catalog_project_sync(
+        shared,
+        project,
+        epoch,
+        CatalogSyncConfig::Current,
+        revision,
+        owner,
+    )?;
+    context.first_generation = true;
+    Ok(context)
+}
+
+// Captured plans retain reviewed source identity through provider work.
+enum CatalogSyncConfig {
+    Current,
+    Reload,
+    Reviewed(Box<crate::config::observe::LiveProjectChange>),
+}
+
+fn capture_reviewed_catalog_sync(
+    shared: &Shared,
+    project: Project,
+    change: crate::config::observe::LiveProjectChange,
+) -> Result<catalog_sync::Context> {
+    let epoch = shared
+        .catalog_epoch
+        .ok_or_else(|| Error::internal("catalog epoch absent"))?;
+    registry::ensure_root_present(&project)?;
+    let revision = shared.project_slot(project.id);
+    let owner = revision
+        .catalog_sync
+        .try_own()
+        .ok_or_else(crate::index::async_job::active_sync_conflict)?;
+    prepare_catalog_project_sync(
+        shared,
+        project,
+        epoch,
+        CatalogSyncConfig::Reviewed(Box::new(change)),
+        revision,
+        owner,
+    )
 }
 
 fn prepare_catalog_project_sync(
     shared: &Shared,
     project: Project,
     epoch: [u8; 16],
-    refresh: bool,
+    capture: CatalogSyncConfig,
     revision: ProjectSlot,
     owner: catalog_sync::Owner,
 ) -> Result<catalog_sync::Context> {
+    let refresh = !matches!(capture, CatalogSyncConfig::Current);
     let active = shared.project_config(&project)?;
-    let (config, stages) = if refresh {
-        shared.stage_catalog_config(&project, &active)?
-    } else {
-        shared.project_runtime_for_search(&project)?
+    let (config, stages, reviewed) = match capture {
+        CatalogSyncConfig::Current => {
+            let (config, stages) = shared.project_runtime_for_search(&project)?;
+            (config, stages, None)
+        }
+        CatalogSyncConfig::Reload => {
+            let (config, stages) = shared.stage_catalog_config(&project, &active)?;
+            (config, stages, None)
+        }
+        CatalogSyncConfig::Reviewed(change) => {
+            revision.check_config_revision(&change.active)?;
+            {
+                let reader = shared.readers.try_acquire()?;
+                if !change.reviewed.head.is_selected(reader.connection())? {
+                    return Err(Error::Admission {
+                        message: "reviewed catalog head changed before preparation; run config plan again".into(),
+                    });
+                }
+            }
+            change.reviewed.verify_sources()?;
+            let stages = Arc::new(shared.async_stages(&change.config)?);
+            catalog_stage_model(&change.config, &stages)?;
+            (change.config, stages, Some(Box::new(change.reviewed)))
+        }
     };
+    let reuse_unchanged = shared.website.is_none() && reviewed.is_none();
     let active_model = {
         let state = revision
             .state
@@ -3413,6 +3589,7 @@ fn prepare_catalog_project_sync(
                 Arc::clone(&stages),
                 source.clone(),
             )),
+            reviewed,
         })
     } else {
         None
@@ -3432,7 +3609,8 @@ fn prepare_catalog_project_sync(
         revision,
         owner,
         refresh,
-        reuse_unchanged: shared.website.is_none(),
+        reuse_unchanged,
+        first_generation: false,
     })
 }
 

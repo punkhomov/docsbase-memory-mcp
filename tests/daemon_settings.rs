@@ -289,6 +289,18 @@ fn owner_rejects_actual_consumer_overflow_and_closed_inventory_shortfall() {
             ..DaemonPatch::default()
         },
         DaemonPatch {
+            start_timeout_ms: Some(0),
+            ..DaemonPatch::default()
+        },
+        DaemonPatch {
+            stop_timeout_ms: Some(0),
+            ..DaemonPatch::default()
+        },
+        DaemonPatch {
+            no_listener_timeout_ms: Some(0),
+            ..DaemonPatch::default()
+        },
+        DaemonPatch {
             max_blocking_threads: Some(0),
             ..DaemonPatch::default()
         },

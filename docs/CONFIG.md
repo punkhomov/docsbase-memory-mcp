@@ -715,6 +715,167 @@ The library can also render an explicitly supplied CF3 preview with its v2
 budget key and scope.
 
 
+## Project configuration plan
+
+```sh
+docsbase config plan
+docsbase config plan ./project --check
+```
+
+The command compares the current v2 sources with the lexical and embedding
+recipes of the selected project generation in a stopped v5 catalog. Changing
+chunk size or the embedding model can require replacing the generation.
+Query-only settings such as `lexical.long_chunk_penalty` leave the recipe intact.
+The preview covers lexical and embedding artifacts. It reports the latest
+recorded coverage through `full_survey`. Markdown freshness, vector cache
+coverage, active daemon settings, and ANN graph settings require separate
+observations.
+
+The JSON report includes the bounded action graph and a `plan_id` bound to
+the observed sources, installation and generation. A document-vector action
+prepares any missing entries using the new recipe. Existing entries with
+compatible keys remain reusable. The `remote` grant marks possible provider
+usage at application time. The preview reads existing files without starting
+the daemon, loading models, or contacting providers. For an unavailable registry
+it reports `observation_failure`, and an existing legacy pair without recipe
+evidence produces an `unsupported_identity` blocker. Invalid effective settings,
+including hybrid stages in a Website project, produce `invalid_settings`.
+An embedding action whose provider is absent from the build produces an
+`executor_unavailable` blocker.
+Source and catalog observations capture their identities at the time of each read.
+
+By default a completed report exits with code 0. With `--check`, exit code 3
+means that the configuration requires replacing the selected generation,
+5 means the check could not establish the relevant facts, and 0 means the
+observed state requires no replacement. A missing index is a first build.
+Use the explicit `index` command to publish a generation from current settings.
+
+### Apply a reviewed plan
+
+```sh
+docsbase config apply ./project --plan-id '<plan_id>'
+docsbase config apply ./project --plan-id '<plan_id>' --allow-remote
+```
+
+Stop the daemon and pass the ID from a fresh `config plan` report. The command
+rechecks the sources and the selected v5 generation, then uses staged indexing
+to prepare and publish a replacement. A current plan with no actions returns
+`"applied": false`. A completed replacement returns `"applied": true` with
+its project ID and indexing statistics.
+
+Exit code 4 means the ID differed at preflight. Exit code 5 means execution
+was blocked by the plan, the daemon had admission, or the plan required
+permission for possible OpenRouter embedding requests.
+`--allow-remote` grants that permission for this invocation. FastEmbed uses
+explicitly provisioned models. If configuration, indexed inputs, or the
+selected generation changes during preparation, the replacement can fail with
+an execution error. The selected generation remains usable on a failed
+preparation. Compatible vectors already fetched during an authorized attempt
+can be reused on retry.
+
+### Inspect the running daemon
+
+```sh
+docsbase config plan ./project --live --check
+```
+
+This mode reads a registered v5 project's active settings and selected
+generation through the running daemon. It leaves project registration and
+runtime unchanged. `restart_required` compares the current global file with
+the daemon's startup source. A query-only policy edit can change
+`project_runtime` without replacing the index. A changed construction recipe
+can require replacing a confirmed ANN graph while reusing vectors.
+If a source edit also requires a new index, the plan orders its replacement
+before reconfiguring the project or restarting the daemon.
+When the active graph is cold, the planner can report `ann.state = "persisted"`
+and the size of its dump files. It looks for a slot with the active index and
+recipe before hashing chunks from the leased SQLite generation. The digest
+scan uses `search.max_request_payload_bytes` and the live request deadline.
+The request uses `daemon.control_timeout_ms`, capped at the IPC exchange
+timeout. The SQLite read allows a full supported chunk.
+Eviction leaves the plan identity unchanged when the slot still qualifies. The
+inspection checks file presence, lengths and provenance without loading HNSW.
+Unconfirmed slots and absent runtime provenance report `unknown`.
+
+In live mode `--check` returns 3 for a reported change or restart and 5 when
+observation is blocked. Apply a live project plan by its exact ID.
+
+```sh
+docsbase config apply ./project --live --plan-id <id>
+docsbase config apply ./project --live --plan-id <id> --allow-remote
+```
+
+The daemon checks the reviewed sources, active runtime and published index
+revision before applying project settings. Lexical scoring and ANN traversal
+changes keep the selected index and compatible graph. Chunking and embedding
+recipe changes use a bounded background Index job. The CLI waits for its
+terminal result. Connected clients can use the selected generation during
+preparation. A failed preparation leaves the previous generation selected.
+The new index and its runtime become visible together after publication.
+`--allow-remote` is required when preparation may request remote embeddings.
+An accepted task can finish after its CLI connection closes. Its ID is shown
+in diagnostics if the CLI times out while waiting.
+
+ANN construction policy changes keep the index and compatible embeddings.
+For a confirmed graph, apply retires the old resident entry and attempts a
+background warm. An ANN-only reply reports `ann_warm` as `scheduled` or
+`deferred`. Cold search can build the new recipe when vectors and capacity
+permit. Search can use exact matching before the replacement graph is ready.
+The warm reuses cached vectors and makes no embedding requests.
+
+Stale reviews at preflight exit with code 4. Plans requiring a daemon restart,
+a missing grant or an unavailable executor exit with code 5. A job that fails
+before publishing returns its terminal error. Use a stopped plan with
+`config apply` for offline replacement.
+
+### Start after configuration changes
+
+```sh
+docsbase serve --on-invalidation fail
+docsbase serve --on-invalidation prompt
+docsbase serve --on-invalidation apply --allow-remote
+```
+
+Before startup, v5 Shared checks the registered projects. Website checks its
+fixed project. First startup and a restart with compatible recipes need no
+approval. A foreground terminal defaults to `prompt`. A noninteractive
+launch, including MCP autostart, defaults to `fail`.
+
+`fail` exits with code 3 when a replacement is required. `prompt` displays the
+plans and asks for consent before starting the service. A required prompt
+without a terminal exits with code 5. `apply` accepts reviewed local replacements.
+Remote embedding requires `--allow-remote` or separate interactive consent.
+All approvals are collected before the first replacement. Each project is
+published independently, so a later execution failure can leave earlier
+approved replacements complete. Rerun the preview to review the remaining work.
+A stale plan exits with code 4 and an unavailable plan or missing consent uses
+code 5.
+
+On an ordinary restart after interruption, the startup command can
+checkpoint already committed SQLite transactions under stopped-daemon
+admission before it checks the configuration. This can change the registry
+file and remove its recovery sidecars even when the configuration then
+requires a replacement and startup refuses. Recovery preserves published
+generations and does not build indexes, open vector storage or call providers.
+Explicit policies and dry-run planning report unsettled state without
+changing SQLite.
+
+The remote grant covers the reviewed startup work. Opening an indexed project
+on a managed daemon leaves vector repair to an explicit Index or Sync. Setting
+`auto_index = true` opts a newly registered project into its first Index with
+its configured embedding policy. An existing v5 head or a concurrent first
+publication requires an explicit Index or Sync to replace it. Startup compares
+selected index recipes. An ANN-only edit is picked up by a subsequent RRF query
+from compatible cached vectors. Older catalog formats retain their ordinary
+startup when no policy flag is passed.
+
+The global `[daemon]` settings `start_timeout_ms` (10,000) and
+`stop_timeout_ms` (15,000) bound the launcher wait and Stop operation. Unix
+also uses `no_listener_timeout_ms` (2,000) for continuous socket absence during
+Stop. On Windows, Stop checks process exit and `config effective` displays
+`null` for the Unix-only value. Stop uses standalone timing if loading the
+configuration fails, so a config error still permits cleanup.
+
 ## Observed migration plan (CF4c2)
 
 ```sh
@@ -1022,8 +1183,8 @@ partial until a complete survey succeeds. A watcher retry can rebuild a
 generation left pending by a failed commit. With embeddings enabled, the watcher
 prepares vectors before applying edits. After enabling or disabling
 embeddings or changing the embedding recipe, run `docsbase index` to
-publish a matching generation. Opening an indexed project can refill
-missing vectors without rewriting the index. The coverage counter reports
+publish a matching generation. In a managed daemon, explicit Sync repairs
+missing vectors without requiring a configuration migration. The coverage counter reports
 persisted cache keys. Search and refill also validate the vector payload.
 Stopped `docsbase status` and `docsbase list` report the selected generation's
 metadata.

@@ -114,6 +114,86 @@ fn http_fixture_with(
 }
 
 #[test]
+fn reviewed_catalog_apply_detects_config_changes_during_remote_preparation() {
+    use crate::config::{observe, paths};
+
+    if child(
+        "reviewed_catalog_apply_detects_config_changes_during_remote_preparation",
+        "rrf",
+    )
+    .is_some()
+    {
+        return;
+    }
+    let cache = paths::cache_dir().unwrap();
+    let config = paths::config_dir().unwrap();
+    let settings = crate::store::settings::standalone().unwrap();
+    let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let project_file = root.join(".docsbase.toml");
+    let hybrid = format!(
+        "config_version=2\n{}",
+        std::fs::read_to_string(&project_file).unwrap()
+    );
+    std::fs::remove_file(&project_file).unwrap();
+    super::index::run_with_settings(Some(&root), &settings).unwrap();
+
+    let plan = || {
+        observe::project_plan(
+            &config,
+            &cache,
+            &root,
+            &settings,
+            observe::PlanningLimits::standard(),
+        )
+        .unwrap()
+    };
+    let original = plan();
+    let head = |plan: &crate::config::change::ChangePlan| {
+        plan.body
+            .expected
+            .iter()
+            .find_map(|fact| {
+                if let crate::config::change::ResourceId::Artifact(artifact) = &fact.resource
+                    && artifact.component == "project_index"
+                {
+                    return Some(fact.state.clone());
+                }
+                None
+            })
+            .unwrap()
+    };
+    std::fs::write(&project_file, &hybrid).unwrap();
+    let requested = plan();
+    let apply = |plan_id| {
+        super::config::run(
+            &super::config::ConfigCommand::Apply {
+                path: Some(root.clone()),
+                plan_id,
+                allow_remote: true,
+                live: false,
+            },
+            &settings,
+        )
+    };
+
+    let (_, redirect, server) = http_fixture_with(1, move |_, socket| {
+        // Same effective settings and recipe, different observed source.
+        std::fs::write(&project_file, format!("{hybrid}\n# newer edit\n")).unwrap();
+        response(socket);
+    });
+    let error = apply(requested.plan.plan_id).unwrap_err();
+    assert!(error.to_string().contains("sources changed"), "{error:#}");
+    assert_eq!(server.join().unwrap().len(), 1);
+    let retry = plan();
+    assert_eq!(head(&retry.plan), head(&original.plan));
+    apply(retry.plan.plan_id).unwrap();
+    let applied = plan();
+    assert_ne!(head(&applied.plan), head(&original.plan));
+    assert_eq!(applied.plan.body.actions, []);
+    drop(redirect);
+}
+
+#[test]
 #[cfg(unix)]
 fn configured_direct_catalog_index_preserves_the_head_on_failure() {
     use crate::store::registry_inspect::{ProjectIndexObservation, inspect_project_index};

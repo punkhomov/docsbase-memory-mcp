@@ -19,10 +19,14 @@ use crate::store::repo::db_error;
 /// Returns [`Error::Project`] when the path is missing, not a directory, or
 /// resolves to `/`, `$HOME` or the cache root (I7).
 pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
+    ensure_project_with_insert(db, path).map(|(project, _)| project)
+}
+
+pub(super) fn ensure_project_with_insert(db: &mut Db, path: &Path) -> Result<(Project, bool)> {
     let home = crate::platform::paths::home_dir();
     let canonical_root = normalize_root(path, home.as_deref(), db.cache_root())?;
     if let Some(project) = find_by_root(db.connection(), &canonical_root)? {
-        return Ok(project);
+        return Ok((project, false));
     }
 
     let name = canonical_root.file_name().map_or_else(
@@ -30,19 +34,20 @@ pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
         |name| name.to_string_lossy().into_owned(),
     );
     let tx = db.begin_write()?;
-    tx.execute(
-        "INSERT INTO projects (canonical_root, name, status, schema_version, created_at)
+    let inserted = tx
+        .execute(
+            "INSERT INTO projects (canonical_root, name, status, schema_version, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(canonical_root) DO NOTHING",
-        params![
-            canonical_root.to_string_lossy(),
-            name,
-            ProjectStatus::NotIndexed.as_str(),
-            migrations::PROJECT_SCHEMA_VERSION,
-            unix_now()
-        ],
-    )
-    .map_err(db_error)?;
+            params![
+                canonical_root.to_string_lossy(),
+                name,
+                ProjectStatus::NotIndexed.as_str(),
+                migrations::PROJECT_SCHEMA_VERSION,
+                unix_now()
+            ],
+        )
+        .map_err(db_error)?;
     let project = find_by_root(&tx, &canonical_root)?.ok_or_else(|| {
         Error::internal(format!(
             "project row missing after insert: {}",
@@ -51,7 +56,7 @@ pub fn ensure_project(db: &mut Db, path: &Path) -> Result<Project> {
     })?;
     tx.commit()
         .map_err(|err| Error::internal_with_source(format!("commit sqlite: {err}"), err))?;
-    Ok(project)
+    Ok((project, inserted == 1))
 }
 
 /// Every registered project, ordered by name.

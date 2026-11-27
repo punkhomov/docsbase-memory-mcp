@@ -178,6 +178,21 @@ pub enum Request {
     },
     /// Nonmutating session binding for registered projects or registry keepalive.
     BindReadOnly { pid: u32, project_id: Option<i64> },
+    /// One read-only configuration plan without session registration.
+    InspectProjectConfig {
+        protocol_version: u32,
+        build_id: String,
+        path: PathBuf,
+    },
+    /// Apply the supplied live plan for a registered project.
+    ApplyProjectConfig {
+        path: PathBuf,
+        plan_id: String,
+        allow_remote: bool,
+        /// The caller will follow a nonterminal indexed-job acknowledgement.
+        #[serde(default)]
+        follow_job: bool,
+    },
     /// Graceful daemon shutdown request.
     StopDaemon,
 }

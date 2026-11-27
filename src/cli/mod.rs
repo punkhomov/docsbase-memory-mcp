@@ -146,6 +146,8 @@ pub enum Command {
         /// Grace period before the last session's exit stops the daemon.
         #[arg(long, hide = true)]
         grace_ms: Option<u64>,
+        #[command(flatten)]
+        startup: config::StartupOptions,
     },
     /// Run the stdio MCP server for one agent.
     Mcp,
@@ -269,7 +271,8 @@ pub fn run() -> anyhow::Result<()> {
             grace_ms,
             profile,
             project,
-        } => serve(detached, grace_ms, profile, project),
+            startup,
+        } => serve(detached, grace_ms, profile, project, startup),
         Command::Mcp => crate::mcp::frontend::run_blocking(),
         Command::Daemon { command } => match command {
             DaemonCommand::Stop => daemon_stop(),
@@ -318,11 +321,24 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
+/// Process status for a CLI error. A completed configuration check can return
+/// a distinct status after writing its machine-readable report to stdout.
+#[must_use]
+pub fn error_exit_code(error: &anyhow::Error) -> u8 {
+    if matches!(error.downcast_ref::<Error>(), Some(Error::StartupPlanStale)) {
+        return config::CheckStatus::Stale.exit_code();
+    }
+    error
+        .downcast_ref::<config::CheckStatus>()
+        .map_or(1, config::CheckStatus::exit_code)
+}
+
 fn serve(
     detached: bool,
     grace_ms: Option<u64>,
     profile: Option<ServeProfile>,
     project: Option<PathBuf>,
+    startup: config::StartupOptions,
 ) -> anyhow::Result<()> {
     let selected_profile = match (profile, project) {
         (None, None) => None,
@@ -331,16 +347,23 @@ fn serve(
         _ => return Err(Error::Admission { message: "serve --profile website requires its own --project ABS; --profile shared cannot have --project".to_owned() }.into()),
     };
     let cache = paths::cache_dir()?;
-    crate::daemon::lifecycle::run_daemon_from_launch(
-        &cache,
-        &crate::daemon::launch::LaunchSnapshot::capture(),
+    let mut launch = crate::daemon::launch::LaunchSnapshot::capture().legacy(
         crate::daemon::settings::DaemonPatch {
             profile: selected_profile,
             idle_grace_ms: grace_ms,
             ..crate::daemon::settings::DaemonPatch::default()
         },
-        detached,
     )?;
+    if detached
+        && matches!(
+            launch.config.settings().daemon.profile,
+            crate::daemon::settings::DaemonProfile::Website { .. }
+        )
+    {
+        return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() }.into());
+    }
+    config::startup::prepare(&cache, &mut launch, detached, startup)?;
+    crate::daemon::lifecycle::run_daemon_from_launch(&cache, launch)?;
     Ok(())
 }
 

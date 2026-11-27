@@ -93,6 +93,20 @@ pub fn from_resolved(snapshot: &Resolved<Config>) -> Result<EffectiveView> {
     })
 }
 
+pub(crate) fn runtime_identity(config: &Config) -> Result<String> {
+    use super::{bootstrap::DefaultsContext, resolve::Resolution};
+    let snapshot =
+        Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), config).finish()?;
+    let view = from_resolved(&snapshot)?;
+    let fields: Vec<_> = view
+        .fields
+        .iter()
+        .filter(|field| field.origin.scope == super::schema::Scope::Project)
+        .map(|field| (field.key, &field.value))
+        .collect();
+    super::change::policy_identity("project-runtime-v1", &(config.ann_search.is_some(), fields))
+}
+
 /// Resolves the same versioned sources as the runtime loader and displays their origins.
 /// Does not create directories, open databases or construct/probe providers.
 /// Errors deliberately omit source text and the legacy parser's error chain.

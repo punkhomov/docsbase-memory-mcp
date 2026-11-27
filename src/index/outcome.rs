@@ -91,10 +91,16 @@ pub fn recipe_id(config: &Config) -> String {
 /// # Errors
 /// Returns database access errors; never opens, migrates or recovers a database.
 pub fn read(db: &Db, project_id: i64) -> Result<Option<IndexOutcome>> {
+    read_in(db.connection(), project_id)
+}
+
+pub(crate) fn read_in(
+    connection: &rusqlite::Connection,
+    project_id: i64,
+) -> Result<Option<IndexOutcome>> {
     let byte_bound = i64::try_from(MAX_OUTCOME_BYTES)
         .map_err(|_| Error::internal("outcome byte bound exceeds SQLite integer range"))?;
-    let raw = db
-        .connection()
+    let raw = connection
         .query_row(
             "SELECT index_attempt, index_generation, schema_version,
                 CASE WHEN typeof(canonical_root) = 'text'
