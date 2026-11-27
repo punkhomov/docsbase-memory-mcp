@@ -15,8 +15,8 @@ mod project;
 mod source;
 mod view;
 pub(crate) use project::{
-    ActiveProjectConfig, AnnObservation, ReviewedReplacement, live_project_plan, project_plan,
-    project_plan_for_profile,
+    ActiveProjectConfig, AnnObservation, LiveProjectChange, ProjectConfigPlan, ReviewedReplacement,
+    live_project_plan, project_plan, project_plan_for_profile,
 };
 use source::{Captured, SourceState};
 pub use view::MigrationPlan;

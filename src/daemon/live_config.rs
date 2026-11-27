@@ -4,12 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::config::observe::{self, ActiveProjectConfig, AnnObservation, PlanningLimits};
+use crate::config::observe::{
+    self, ActiveProjectConfig, AnnObservation, LiveProjectChange, PlanningLimits, ProjectConfigPlan,
+};
+use crate::config::policy::{
+    self, ConsentDecision, ConsentReview, GrantSet, InvalidationPolicy, PolicyContext, PolicyMode,
+};
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
 use crate::ipc::protocol;
 use crate::search::operation::SearchOperation;
-use crate::store::project_index::ProjectIndex;
+use crate::store::models::Project;
+use crate::store::project_index::{self, ProjectIndex};
 use crate::store::registry_inspect::{ProjectRecipeInspection, inspect_live_project_recipes};
 use crate::vector_cache::EmbeddingRecipe;
 
@@ -28,6 +34,30 @@ pub(super) async fn inspect(
             message: "restart the daemon with the same docsbase build before planning".into(),
         });
     }
+    control(shared, scope, move |shared, operation| {
+        report(shared, &path, operation)
+    })
+    .await
+}
+
+pub(super) async fn apply(
+    shared: &Arc<Shared>,
+    scope: &scoped::Scope,
+    path: PathBuf,
+    plan_id: String,
+    allow_remote: bool,
+) -> Result<serde_json::Value> {
+    control(shared, scope, move |shared, operation| {
+        apply_runtime(shared, &path, &plan_id, allow_remote, operation)
+    })
+    .await
+}
+
+async fn control(
+    shared: &Arc<Shared>,
+    scope: &scoped::Scope,
+    execute: impl FnOnce(&Shared, &SearchOperation) -> Result<serde_json::Value> + Send + 'static,
+) -> Result<serde_json::Value> {
     let operation = inspection_operation(shared)?;
     let permit = tokio::time::timeout_at(
         tokio::time::Instant::from_std(operation.deadline()),
@@ -38,7 +68,7 @@ pub(super) async fn inspect(
     let shared = Arc::clone(shared);
     let work = operation.clone();
     let worker = request::spawn(Some(permit), Some(Arc::clone(&scope.activity)), move || {
-        report(&shared, &path, &work)
+        execute(&shared, &work)
     });
     request::run(worker, Some(&operation)).await
 }
@@ -54,6 +84,16 @@ pub(super) fn report(
     path: &Path,
     operation: &SearchOperation,
 ) -> Result<serde_json::Value> {
+    let (_, plan) = snapshot(shared, path, operation)?;
+    let check = plan.live_check_code();
+    Ok(serde_json::json!({"plan": plan, "check_status": check}))
+}
+
+pub(super) fn snapshot(
+    shared: &Shared,
+    path: &Path,
+    operation: &SearchOperation,
+) -> Result<(Project, ProjectConfigPlan)> {
     operation.check()?;
     let epoch = shared
         .catalog_epoch
@@ -65,7 +105,7 @@ pub(super) fn report(
         .ok_or_else(|| unavailable("daemon configuration source is unavailable"))?;
     let root = registry::project_root_for(path, &shared.cache)?;
     let limits = PlanningLimits::standard();
-    let (inspection, config, ann) = {
+    let (project, inspection, config, ann) = {
         let reader = shared.readers.try_acquire()?;
         let project = registry::find_by_root(reader.connection(), &root)?
             .ok_or_else(|| unavailable("project is not registered with the daemon"))?;
@@ -116,7 +156,7 @@ pub(super) fn report(
             project_id: Some(project.id),
             selected,
         };
-        (inspection, config, ann)
+        (project, inspection, config, ann)
     };
     operation.check()?;
     let plan = observe::live_project_plan(
@@ -128,11 +168,161 @@ pub(super) fn report(
         ActiveProjectConfig {
             config,
             global: shared.global_config_stamp.clone(),
+            daemon: &shared.global_config,
             ann,
         },
     )?;
-    let check = plan.live_check_code();
-    Ok(serde_json::json!({"plan": plan, "check_status": check}))
+    Ok((project, plan))
+}
+
+fn apply_runtime(
+    shared: &Shared,
+    path: &Path,
+    plan_id: &str,
+    allow_remote: bool,
+    operation: &SearchOperation,
+) -> Result<serde_json::Value> {
+    use crate::config::bootstrap::{Entrypoint, EntrypointFacts};
+
+    let (project, report) = snapshot(shared, path, operation)?;
+    let reply = |status, applied| serde_json::json!({"apply_status": status, "applied": applied, "plan_id": plan_id});
+    if report.plan.plan_id != plan_id {
+        return Ok(reply(4, false));
+    }
+    if !report.plan.body.blockers.is_empty() {
+        return Ok(reply(5, false));
+    }
+    if report.plan.body.actions.is_empty() {
+        return Ok(reply(0, false));
+    }
+    let PolicyContext::Managed(policy) = policy::resolve(
+        PolicyMode::Managed,
+        Some(InvalidationPolicy::Apply),
+        EntrypointFacts {
+            mode: Entrypoint::Cli,
+            is_tty: false,
+        },
+    ) else {
+        return Err(unavailable(
+            "live configuration requires an explicit apply policy",
+        ));
+    };
+    let review = ConsentReview::from_compiled(report.plan);
+    if !matches!(
+        review.evaluate(policy, GrantSet::new(allow_remote, false, false)),
+        ConsentDecision::ConsentSatisfied(_)
+    ) {
+        return Ok(reply(5, false));
+    }
+    let change = report
+        .live_change
+        .ok_or_else(|| unavailable("live project change is unavailable"))?;
+    if publish_runtime(shared, &project, change, operation, |config| {
+        shared.async_stages(config)
+    })? {
+        Ok(reply(0, true))
+    } else {
+        Ok(reply(4, false))
+    }
+}
+
+pub(super) fn publish_runtime(
+    shared: &Shared,
+    project: &Project,
+    change: LiveProjectChange,
+    operation: &SearchOperation,
+    build_stages: impl FnOnce(&crate::config::Config) -> Result<crate::hybrid::HybridStages>,
+) -> Result<bool> {
+    let Some(slot) = existing_slot(shared, project.id) else {
+        return Ok(false);
+    };
+    let config = change.config;
+    operation.check()?;
+    let stages = if config.hybrid_cfg == change.active.hybrid_cfg
+        && config.providers == change.active.providers
+    {
+        let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state
+            .config
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &change.active))
+        {
+            return Ok(false);
+        }
+        state
+            .search_stages
+            .as_ref()
+            .or(state.stages.as_ref())
+            .cloned()
+    } else {
+        None
+    };
+    let stages = match stages {
+        Some(stages) => stages,
+        None => Arc::new(build_stages(&config)?),
+    };
+    let model = super::catalog_stage_model(&config, &stages)?;
+    let recipe = model.map(EmbeddingRecipe::for_model);
+    let watch_runtime = if shared.website.is_none() {
+        let source = shared.vector_source_for(project.id, &config);
+        source.validate_root(&shared.cache)?;
+        Some(Arc::new(crate::watch::WatchRuntime::new(
+            config.clone(),
+            stages.clone(),
+            source,
+        )))
+    } else {
+        None
+    };
+    let base = change.reviewed.base;
+    crate::config::paths::with_index_config_write_locks(
+        shared.global_config_path.as_deref(),
+        &project.canonical_root,
+        || {
+            operation.check()?;
+            let reader = shared.readers.try_acquire()?;
+            if !change.reviewed.head.is_selected(reader.connection())? {
+                return Ok(false);
+            }
+            let installed =
+                project_index::with_catalog_pair(reader, project, |registry, local, index| {
+                    if index.catalog_generation() != base.epoch.zip(base.generation_id)
+                        || index.content_revision() != base.content_revision
+                        || !change.reviewed.head.is_selected(registry.connection())?
+                    {
+                        return Ok(None);
+                    }
+                    project_index::require_catalog_recipe(local.as_ref(), recipe)?;
+                    let publication = slot.try_catalog_publication()?;
+                    if !runtime_config(Some(&slot))?
+                        .is_some_and(|active| Arc::ptr_eq(&active, &change.active))
+                    {
+                        return Ok(None);
+                    }
+                    if change.reviewed.verify_sources().is_err() {
+                        return Ok(None);
+                    }
+                    operation.check()?;
+                    let old = publication.install(Arc::clone(&config), Arc::clone(&stages));
+                    Ok(Some((publication.release_preparation(), old)))
+                })?;
+            let Some((_reload, _old)) = installed else {
+                return Ok(false);
+            };
+            if let Some(runtime) = watch_runtime
+                && let Err(error) =
+                    shared
+                        .watchers
+                        .revise_with_runtime(&shared.cache, project.id, runtime)
+            {
+                eprintln!(
+                    "warning: cannot revise watcher for project {}: {error}",
+                    project.id
+                );
+            }
+            Ok(true)
+        },
+    )
 }
 
 fn existing_slot(shared: &Shared, project_id: i64) -> Option<Arc<ProjectCell>> {

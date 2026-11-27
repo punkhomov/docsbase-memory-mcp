@@ -89,7 +89,9 @@ impl Peer {
                     Request::RegisterSession { .. }
                     | Request::RegisterUnbound { .. }
                     | Request::BindReadOnly { .. } => Response::ToolResult { value: Value::Null },
-                    Request::StopDaemon | Request::InspectProjectConfig { .. } => {
+                    Request::StopDaemon
+                    | Request::InspectProjectConfig { .. }
+                    | Request::ApplyProjectConfig { .. } => {
                         panic!("unexpected control request")
                     }
                 };

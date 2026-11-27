@@ -37,6 +37,8 @@ pub(crate) struct ProjectConfigPlan {
     ann: Option<AnnObservation>,
     #[serde(skip)]
     pub(crate) replacement: Option<ProjectReplacement>,
+    #[serde(skip)]
+    pub(crate) live_change: Option<LiveProjectChange>,
 }
 
 impl ProjectConfigPlan {
@@ -57,10 +59,26 @@ impl ProjectConfigPlan {
     }
 }
 
-pub(crate) struct ActiveProjectConfig {
+pub(crate) struct ActiveProjectConfig<'a> {
     pub(crate) config: Option<Arc<Config>>,
     pub(crate) global: crate::daemon::launch::ConfigStamp,
+    pub(crate) daemon: &'a Config,
     pub(crate) ann: AnnObservation,
+}
+
+pub(crate) struct LiveProjectChange {
+    pub(crate) active: Arc<Config>,
+    pub(crate) config: Arc<Config>,
+    pub(crate) reviewed: ReviewedReplacement,
+}
+
+impl LiveProjectChange {
+    fn supports(&self, action: &Action) -> bool {
+        self.active.ann_build == self.config.ann_build
+            && self.config.hybrid_cfg.providers_compiled()
+            && action.effect == Effect::ReconfigureRuntime
+            && matches!(&action.resource, ResourceId::Runtime(resource) if resource == "project_runtime")
+    }
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -161,7 +179,7 @@ pub(crate) fn live_project_plan(
     root: &Path,
     limits: PlanningLimits,
     observed: registry_inspect::ProjectRecipeInspection,
-    active: ActiveProjectConfig,
+    active: ActiveProjectConfig<'_>,
 ) -> Result<ProjectConfigPlan> {
     project_plan_using(config_dir, cache, root, limits, Some(active), None, || {
         Ok(Ok(observed))
@@ -178,32 +196,15 @@ fn project_plan_using(
     cache: &Path,
     root: &Path,
     limits: PlanningLimits,
-    active: Option<ActiveProjectConfig>,
+    active: Option<ActiveProjectConfig<'_>>,
     profile: Option<&DaemonProfile>,
     inspect: impl FnOnce() -> Result<Inspected>,
 ) -> Result<ProjectConfigPlan> {
-    let mut bytes_left = limits.max_source_bytes;
-    let global = source::capture(
-        SourceId::Global(config_dir.join("config.toml")),
-        &mut bytes_left,
-    );
-    let project = source::capture(
-        SourceId::Project(root.join(".docsbase.toml")),
-        &mut bytes_left,
-    );
-    let mut assessment = Assessment::default();
-    assessment.expected.push(Observation {
-        resource: artifact("project_plan_context", None),
-        state: ExpectedState::KnownIdentity(change::policy_identity(
-            "project-plan-context-v1",
-            &(cache, root, profile),
-        )?),
-    });
-    for captured in [&global, &project] {
-        assess_source(&captured.observation, &mut assessment);
-    }
+    let (global, project, mut assessment) =
+        capture_plan_sources(config_dir, cache, root, limits, profile)?;
 
     let mut replacement = None;
+    let mut live_change = None;
     let restart_required = active
         .as_ref()
         .map(|active| global_changed(&active.global, &global.observation.state));
@@ -212,6 +213,10 @@ fn project_plan_using(
             global.layer.as_ref(),
             project.layer.as_ref(),
             profile,
+            active
+                .as_ref()
+                .filter(|_| restart_required == Some(false))
+                .map(|active| active.daemon),
         ) {
             Ok(Some((global_config, config))) if permits_project(&config, root) => {
                 match inspect()? {
@@ -225,6 +230,21 @@ fn project_plan_using(
                                 &inspection,
                                 &mut assessment,
                             )?;
+                            if restart_required == Some(false)
+                                && let Some(old) = &active.config
+                                && let Some(selected) = inspection.selected.as_ref()
+                                && selected.seal.is_some()
+                                && !assessment.actions.is_empty()
+                            {
+                                live_change = Some(LiveProjectChange {
+                                    active: Arc::clone(old),
+                                    config: Arc::new(config),
+                                    reviewed: reviewed_replacement(
+                                        selected,
+                                        [global.observation, project.observation],
+                                    )?,
+                                });
+                            }
                         } else if !assessment.actions.is_empty()
                             && let Some(selected) = inspection.selected.as_ref()
                         {
@@ -262,7 +282,12 @@ fn project_plan_using(
     } else {
         (None, None)
     };
-    let plan = compile_project_plan(assessment, limits, replacement.as_ref())?;
+    let plan = compile_project_plan(
+        assessment,
+        limits,
+        replacement.as_ref(),
+        live_change.as_ref(),
+    )?;
     Ok(ProjectConfigPlan {
         plan,
         full_survey,
@@ -271,13 +296,45 @@ fn project_plan_using(
         restart_required,
         ann: active.map(|active| active.ann),
         replacement,
+        live_change,
     })
+}
+
+fn capture_plan_sources(
+    config_dir: &Path,
+    cache: &Path,
+    root: &Path,
+    limits: PlanningLimits,
+    profile: Option<&DaemonProfile>,
+) -> Result<(source::Captured, source::Captured, Assessment)> {
+    let mut bytes_left = limits.max_source_bytes;
+    let global = source::capture(
+        SourceId::Global(config_dir.join("config.toml")),
+        &mut bytes_left,
+    );
+    let project = source::capture(
+        SourceId::Project(root.join(".docsbase.toml")),
+        &mut bytes_left,
+    );
+    let mut assessment = Assessment::default();
+    assessment.expected.push(Observation {
+        resource: artifact("project_plan_context", None),
+        state: ExpectedState::KnownIdentity(change::policy_identity(
+            "project-plan-context-v1",
+            &(cache, root, profile),
+        )?),
+    });
+    for captured in [&global, &project] {
+        assess_source(&captured.observation, &mut assessment);
+    }
+    Ok((global, project, assessment))
 }
 
 fn compile_project_plan(
     assessment: Assessment,
     limits: PlanningLimits,
     replacement: Option<&ProjectReplacement>,
+    live_change: Option<&LiveProjectChange>,
 ) -> Result<ChangePlan> {
     change::compile_for(
         &[assessment],
@@ -286,7 +343,10 @@ fn compile_project_plan(
             max_dependencies: 5,
             max_metadata_bytes: limits.max_output_bytes,
         },
-        |action| replacement.is_some_and(|replacement| replacement.supports(action)),
+        |action| {
+            replacement.is_some_and(|replacement| replacement.supports(action))
+                || live_change.is_some_and(|change| change.supports(action))
+        },
     )
 }
 
@@ -299,11 +359,18 @@ fn replacement_for(
     Ok(ProjectReplacement {
         global,
         config,
-        reviewed: ReviewedReplacement {
-            base: selected.index,
-            head: CatalogHead::from_observed_seal(selected.index, selected.seal)?,
-            sources,
-        },
+        reviewed: reviewed_replacement(selected, sources)?,
+    })
+}
+
+fn reviewed_replacement(
+    selected: &registry_inspect::SelectedIndexEvidence,
+    sources: [source::SourceObservation; 2],
+) -> Result<ReviewedReplacement> {
+    Ok(ReviewedReplacement {
+        base: selected.index,
+        head: CatalogHead::from_observed_seal(selected.index, selected.seal)?,
+        sources,
     })
 }
 

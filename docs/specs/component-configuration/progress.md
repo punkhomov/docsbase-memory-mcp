@@ -2265,3 +2265,27 @@ Ruling: two legacy ANN warm tests hit their watchdogs in the initial lean
 run with default parallelism. Both passed in isolation with the same
 binary. The complete lean rerun passed 1,620 tests with four harness
 threads, including offline and search baseline checks.
+
+## 2026-11-27 — CF5/CF11, проверенный runtime на живом демоне
+
+Task CF5 live project runtime application: complete (CLI/IPC integration,
+concurrent catalog publication rejection, local verification and fresh
+review with a fix round). Native PR checks remain pending.
+
+Ruling: `config apply --live --plan-id` completes the registry Hello
+exchange and recomputes the plan on the running daemon. With unchanged
+global sources it uses the captured launch configuration as the project
+overlay base. Reconfiguration checks the expected sources, published seal,
+generation and content revision, and captured runtime Arc under the
+source, catalog and project publication leases before installing the
+config/stages pair and handing it to the existing watcher.
+
+Ruling: the existing registered client sees the new lexical score. An
+approved runtime update prepared before a real Sync rejects the superseded
+head. Reranker changes preserve compatible resident ANN. Lean planning
+reports an unavailable executor when the configured stage provider is
+absent from the build. Reviewed index/embedding replacement and ANN
+construction changes remain the next live execution work.
+
+Rust 1.100.0 Linux cli-full passed 1,961 tests and lean passed 1,622.
+Linux and Windows GNU cross-Clippy and formatting passed.

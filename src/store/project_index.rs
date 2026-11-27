@@ -149,7 +149,7 @@ pub(crate) fn require_catalog_embedding(
     )
 }
 
-fn require_catalog_recipe(
+pub(crate) fn require_catalog_recipe(
     local: Option<&LocalMetadata>,
     recipe: Option<crate::vector_cache::EmbeddingRecipe>,
 ) -> Result<()> {

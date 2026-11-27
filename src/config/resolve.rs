@@ -332,9 +332,18 @@ pub(super) fn resolve_observed_v2(
     global: Option<&SourceLayer>,
     project: Option<&SourceLayer>,
     profile: Option<&crate::daemon::settings::DaemonProfile>,
+    captured_global: Option<&Config>,
 ) -> Result<Option<(Resolved<Config>, Config)>> {
-    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
-    if let Some(layer) = global {
+    let context = DefaultsContext::standalone();
+    let mut resolution = captured_global.map_or_else(
+        || Resolution::<ConfigSpec>::new(&context),
+        |settings| Resolution::<ConfigSpec>::from_provided(&context, settings),
+    );
+    if captured_global.is_some() {
+        if resolution.settings.vector_store.is_none() {
+            return Ok(None);
+        }
+    } else if let Some(layer) = global {
         if layer.version() != super::source::ConfigVersion::V2 {
             return Ok(None);
         }

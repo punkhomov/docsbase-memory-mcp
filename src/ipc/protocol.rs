@@ -184,6 +184,12 @@ pub enum Request {
         build_id: String,
         path: PathBuf,
     },
+    /// Apply the supplied live plan for a registered project.
+    ApplyProjectConfig {
+        path: PathBuf,
+        plan_id: String,
+        allow_remote: bool,
+    },
     /// Graceful daemon shutdown request.
     StopDaemon,
 }

@@ -798,8 +798,18 @@ inspection checks file presence, lengths and provenance without loading HNSW.
 Unconfirmed slots and absent runtime provenance report `unknown`.
 
 In live mode `--check` returns 3 for a reported change or restart and 5 when
-observation is blocked. Live plans describe proposed effects. Stop the daemon
-and generate a fresh stopped plan for `config apply`.
+observation is blocked. Apply a live project runtime plan by its exact ID.
+
+```sh
+docsbase config apply ./project --live --plan-id <id>
+```
+
+The daemon checks the reviewed sources, active runtime and published index
+revision before changing project settings. You can apply changes such as
+lexical scoring and ANN traversal while retaining the same indexed data.
+Stale reviews exit with code 4. Plans requiring a daemon restart or an
+unavailable executor exit with code 5. Use a stopped plan with `config apply`
+for an offline replacement.
 
 ### Start after configuration changes
 

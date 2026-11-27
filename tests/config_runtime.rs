@@ -988,6 +988,127 @@ fn assert_restart_follows_replacement(env: &Env) {
 }
 
 #[test]
+fn v2_live_config_applies_only_the_reviewed_project_runtime() {
+    let fence = format!(
+        "```text\nreviewedliveconfigurationwidget {}\n```\n",
+        "text ".repeat(1_000)
+    );
+    let mut env = Env::new(&[("guide.md", &fence)]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let score = |client: &mut Client| {
+        client
+            .call_tool(
+                "search_docs",
+                serde_json::json!({"query":"reviewedliveconfigurationwidget"}),
+            )
+            .unwrap()[0]["score"]
+            .as_f64()
+            .unwrap()
+    };
+    let initial_score = score(&mut client);
+    let registry = env.cache().join("registry.db");
+    let before = fs::read(&registry).unwrap();
+    let set_penalty = |penalty| {
+        fs::write(
+            env.project_config(),
+            format!("config_version = 2\n[lexical]\nlong_chunk_penalty={penalty}\n"),
+        )
+        .unwrap();
+        env.run_json(&["config", "plan", "--live"])
+    };
+    let stale = set_penalty(0.125);
+    let current = set_penalty(0.25);
+    let refused = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            stale["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        refused.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), current);
+    assert_eq!(current["blockers"], serde_json::json!([]));
+    let accepted = env.run_json(&[
+        "config",
+        "apply",
+        "--live",
+        "--plan-id",
+        current["plan_id"].as_str().unwrap(),
+    ]);
+    assert_eq!(accepted["applied"], true);
+    assert_eq!(accepted["plan_id"], current["plan_id"]);
+    let installed = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(installed["actions"], serde_json::json!([]));
+    let runtime = installed["expected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fact| fact["resource"]["value"] == "project_runtime")
+        .unwrap();
+    assert_eq!(runtime["state"]["kind"], "known_identity");
+    assert_eq!(
+        runtime["state"]["value"],
+        current["actions"][0]["target"]["value"]
+    );
+    assert_eq!(fs::read(registry).unwrap(), before);
+    assert!(score(&mut client) < initial_score);
+    assert_eq!(
+        search(&mut client, "reviewedliveconfigurationwidget"),
+        vec!["guide.md"]
+    );
+
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    let restart = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(restart["restart_required"], true);
+    let refused = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            restart["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(5));
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), restart);
+}
+
+#[cfg(not(feature = "hybrid-remote"))]
+#[test]
+fn v2_live_config_plan_blocks_an_uncompiled_reranker() {
+    let mut env = Env::new(&[("guide.md", "lexicalconfigfixture")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='lexical'\n[hybrid.reranker]\nprovider='openrouter'\nmodel='fixture/rerank'\n",
+    ).unwrap();
+    let plan = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(plan["actions"][0]["effect"], "reconfigure_runtime");
+    assert!(
+        plan["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "executor_unavailable")
+    );
+}
+
+#[test]
 fn v2_live_config_plan_leaves_wal_metadata_to_recovery() {
     let mut env = Env::new(&[("guide.md", "configurationrecoverywidget")]);
     env.run_json(&["index"]);

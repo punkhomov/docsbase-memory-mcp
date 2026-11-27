@@ -170,6 +170,7 @@ fn reviewed_catalog_apply_detects_config_changes_during_remote_preparation() {
                 path: Some(root.clone()),
                 plan_id,
                 allow_remote: true,
+                live: false,
             },
             &settings,
         )

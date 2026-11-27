@@ -1530,6 +1530,7 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         assert_eq!(reloaded["index_generation"], view["index_generation"]);
         assert!(reloaded["ann"]["vectors"].is_null());
         assert_eq!(live_ann_plan(&shared, &project)["plan"]["ann"]["state"], "unknown");
+        let reviewed = review_catalog_runtime_update(&shared, &project);
 
         std::fs::write(root.path().join("new.md"), "catalogwarmnew").unwrap();
         let ack = call_tool(
@@ -1553,14 +1554,95 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         assert_eq!(sync["state"], "done");
         let view = catalog_diagnostics(&shared, session).await;
         assert_eq!(view["ann"]["vectors"], 3);
-        let batches = provider.batches.lock().unwrap();
-        let long = batches.iter().flatten().filter(|text| text.len() > 1_048_576).collect::<Vec<_>>();
-        assert_eq!(long.len(), 1, "Sync reuses the long chunk's vector");
-        assert!(long[0].contains(fence.trim_end()));
+        assert_stale_runtime_and_reused_fence(&shared, &project, reviewed, &provider, &fence);
+        assert_reranker_change_keeps_resident_ann(&shared, &project, &provider);
         assert_eq!(provider.queries.load(Ordering::SeqCst), 0);
         Ok(())
     })
     .unwrap();
+}
+
+#[cfg(unix)]
+fn assert_stale_runtime_and_reused_fence(
+    shared: &Shared,
+    project: &Project,
+    reviewed: crate::config::observe::LiveProjectChange,
+    provider: &DocumentGate,
+    fence: &str,
+) {
+    let operation = live_config::inspection_operation(shared).unwrap();
+    assert!(
+        !live_config::publish_runtime(shared, project, reviewed, &operation, |_| {
+            panic!("a scoring update uses the existing stages")
+        })
+        .unwrap()
+    );
+    assert_eq!(
+        live_ann_plan(shared, project)["plan"]["actions"][0]["resource"]["value"],
+        "project_runtime"
+    );
+    let batches = provider.batches.lock().unwrap();
+    let long = batches
+        .iter()
+        .flatten()
+        .filter(|text| text.len() > 1_048_576)
+        .collect::<Vec<_>>();
+    assert_eq!(long.len(), 1, "Sync reuses the long chunk's vector");
+    assert!(long[0].contains(fence.trim_end()));
+}
+
+#[cfg(unix)]
+fn assert_reranker_change_keeps_resident_ann(
+    shared: &Shared,
+    project: &Project,
+    provider: &Arc<DocumentGate>,
+) {
+    std::fs::write(
+        project.canonical_root.join(".docsbase.toml"),
+        "config_version = 2\n[ann.build]\nm = 12\n[hybrid.reranker]\nprovider='openrouter'\nmodel='fixture/rerank'\nwindow=12\n",
+    ).unwrap();
+    let operation = live_config::inspection_operation(shared).unwrap();
+    let (_, report) = live_config::snapshot(shared, &project.canonical_root, &operation).unwrap();
+    assert_eq!(report.plan.body.actions.len(), 1);
+    assert_eq!(report.plan.body.blockers, []);
+    let graph = shared.dense.ann_snapshot(project.id).unwrap();
+    assert!(
+        live_config::publish_runtime(
+            shared,
+            project,
+            report.live_change.unwrap(),
+            &operation,
+            |config| {
+                assert_eq!(config.hybrid_cfg.reranker.as_ref().unwrap().window, 12);
+                Ok(HybridStages {
+                    embedder: Some(provider.clone()),
+                    reranker: Some(Arc::new(search_phase_tests::CountingReranker(Arc::new(
+                        AtomicUsize::new(0),
+                    )))),
+                    ranking: Ranking::Rrf,
+                })
+            }
+        )
+        .unwrap()
+    );
+    assert_eq!(shared.dense.ann_snapshot(project.id), Some(graph));
+}
+
+#[cfg(unix)]
+fn review_catalog_runtime_update(
+    shared: &Shared,
+    project: &Project,
+) -> crate::config::observe::LiveProjectChange {
+    std::fs::write(
+        project.canonical_root.join(".docsbase.toml"),
+        "config_version = 2\n[ann.build]\nm = 12\n[lexical]\nlong_chunk_penalty=0.25\n",
+    )
+    .unwrap();
+    let operation = live_config::inspection_operation(shared).unwrap();
+    let (_, report) = live_config::snapshot(shared, &project.canonical_root, &operation).unwrap();
+    assert_eq!(report.plan.body.actions.len(), 1);
+    assert_eq!(report.plan.body.blockers, []);
+    report.live_change.unwrap()
 }
 
 #[cfg(unix)]

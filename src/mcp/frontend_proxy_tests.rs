@@ -226,7 +226,8 @@ async fn serve(stream: platform::Stream, state: std::sync::Arc<State>) {
                 },
                 Request::Search { .. }
                 | Request::StopDaemon
-                | Request::InspectProjectConfig { .. } => {
+                | Request::InspectProjectConfig { .. }
+                | Request::ApplyProjectConfig { .. } => {
                     panic!("unexpected fake request")
                 }
             })

@@ -29,7 +29,7 @@ pub enum ConfigCommand {
         #[arg(long, value_enum, default_value = "json")]
         format: ViewFormat,
     },
-    /// Apply a reviewed configuration plan to an existing stopped v5 project.
+    /// Apply a reviewed configuration plan to an existing v5 project.
     Apply {
         /// Project directory. Defaults to the current directory.
         path: Option<PathBuf>,
@@ -39,6 +39,9 @@ pub enum ConfigCommand {
         /// Permit remote embedding requests that may incur costs.
         #[arg(long)]
         allow_remote: bool,
+        /// Apply a plan generated from the running daemon.
+        #[arg(long)]
+        live: bool,
     },
     /// Preview migration from actual registered sources; never writes or applies.
     Migrate {
@@ -134,12 +137,15 @@ pub(super) fn run(
             path,
             plan_id,
             allow_remote,
-        } => apply::run(
-            ProjectPaths::resolve(path.as_deref())?,
-            plan_id,
-            *allow_remote,
-            db,
-        ),
+            live,
+        } => {
+            let paths = ProjectPaths::resolve(path.as_deref())?;
+            if *live {
+                live_apply(paths.cache, paths.root, plan_id, *allow_remote)
+            } else {
+                apply::run(paths, plan_id, *allow_remote, db)
+            }
+        }
         ConfigCommand::Migrate {
             to: _,
             format: ViewFormat::Json,
@@ -185,52 +191,91 @@ pub(super) fn run(
 }
 
 fn live_plan(cache: PathBuf, root: PathBuf, check: bool) -> anyhow::Result<()> {
-    use crate::ipc::{
-        client::Client,
-        protocol::{self, Request, Response},
+    use crate::ipc::protocol::{self, Request};
+    let result = live_request(
+        cache,
+        Request::InspectProjectConfig {
+            protocol_version: protocol::PROTOCOL_VERSION,
+            build_id: protocol::build_id(),
+            path: root,
+        },
+        false,
+    )?;
+    let plan = result
+        .get("plan")
+        .filter(|value| value["basis"] == "live")
+        .ok_or_else(|| anyhow::anyhow!("missing live config plan"))?;
+    let status = match result["check_status"].as_u64() {
+        Some(0) => Ok(()),
+        Some(3) => Err(CheckStatus::Required),
+        Some(5) => Err(CheckStatus::Unavailable),
+        _ => anyhow::bail!("invalid live config plan status"),
     };
+    println!("{}", serde_json::to_string(plan)?);
+    if check {
+        status?;
+    }
+    Ok(())
+}
+
+fn live_apply(
+    cache: PathBuf,
+    root: PathBuf,
+    plan_id: &str,
+    allow_remote: bool,
+) -> anyhow::Result<()> {
+    let result = live_request(
+        cache,
+        crate::ipc::protocol::Request::ApplyProjectConfig {
+            path: root,
+            plan_id: plan_id.to_owned(),
+            allow_remote,
+        },
+        true,
+    )?;
+    match result["apply_status"].as_u64() {
+        Some(0) => {
+            println!("{}", serde_json::to_string(&result)?);
+            Ok(())
+        }
+        Some(4) => Err(CheckStatus::Stale.into()),
+        Some(5) => Err(CheckStatus::Unavailable.into()),
+        _ => anyhow::bail!("invalid live config apply status"),
+    }
+}
+
+fn live_request(
+    cache: PathBuf,
+    request: crate::ipc::protocol::Request,
+    handshake: bool,
+) -> anyhow::Result<serde_json::Value> {
+    use crate::ipc::{client::Client, protocol::Response};
     super::with_transport(move |transport| {
         let mut client = Client::try_connect(&transport, &cache)
             .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?
             .ok_or(CheckStatus::DaemonUnavailable)?;
+        if handshake {
+            client
+                .handshake_registry()
+                .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?;
+        }
         let response = client
-            .call(Request::InspectProjectConfig {
-                protocol_version: protocol::PROTOCOL_VERSION,
-                build_id: protocol::build_id(),
-                path: root,
-            })
+            .call(request)
             .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?;
-        let result = match response {
-            Response::ToolResult { value } => value,
+        match response {
+            Response::ToolResult { value } => Ok(value),
             Response::Error {
                 code,
                 message,
                 instruction,
-            } => {
-                return Err(anyhow::Error::from(crate::error::Error::from_mcp_code(
-                    code,
-                    message,
-                    instruction,
-                ))
-                .context(CheckStatus::Unavailable));
-            }
-            Response::Hello { .. } => anyhow::bail!("unexpected live config plan reply"),
-        };
-        let plan = result
-            .get("plan")
-            .filter(|value| value["basis"] == "live")
-            .ok_or_else(|| anyhow::anyhow!("missing live config plan"))?;
-        let status = match result["check_status"].as_u64() {
-            Some(0) => Ok(()),
-            Some(3) => Err(CheckStatus::Required),
-            Some(5) => Err(CheckStatus::Unavailable),
-            _ => anyhow::bail!("invalid live config plan status"),
-        };
-        println!("{}", serde_json::to_string(plan)?);
-        if check {
-            status?;
+            } => Err(anyhow::Error::from(crate::error::Error::from_mcp_code(
+                code,
+                message,
+                instruction,
+            ))
+            .context(CheckStatus::Unavailable)),
+            Response::Hello { .. } => anyhow::bail!("unexpected live configuration reply"),
         }
-        Ok(())
     })
 }
 

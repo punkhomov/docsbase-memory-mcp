@@ -105,7 +105,9 @@ async fn serve(
                 }
                 answer.clone()
             }
-            Request::StopDaemon | Request::InspectProjectConfig { .. } => {
+            Request::StopDaemon
+            | Request::InspectProjectConfig { .. }
+            | Request::ApplyProjectConfig { .. } => {
                 panic!("unexpected control request")
             }
         };

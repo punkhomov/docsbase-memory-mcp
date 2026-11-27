@@ -1239,3 +1239,15 @@ resident/backfill and strict-store ownership retains CF6/CF7 dependencies.
 - В реальном Index → ANN warm → Sync проверить Markdown-блок больше 1 МиБ
   при разрешённом размере файла и достаточном бюджете захвата. Проверить
   полный текст на границе embedding и переиспользование его вектора при Sync.
+
+## Delta 2026-11-27 — CF5/CF11, применение проверенного runtime-плана
+
+- Провести `config apply --live --plan-id` через текущий daemon и Hello.
+  Пересчитать план, проверить ID, blockers и consent до подготовки.
+- При неизменном глобальном источнике разрешать проект поверх сохранённого
+  daemon config. Перед публикацией сверить файлы, runtime Arc, seal,
+  физическое поколение и content revision. Опубликовать config/stages и
+  обновить watcher под существующими leases.
+- Принять runtime-only изменение с кодом 0 и stale review с кодом 4.
+  Сохранить blockers для действий, у которых ещё нет live-исполнителя.
+  Проверить реальный CLI и отказ в публикации после конкурирующего Sync.

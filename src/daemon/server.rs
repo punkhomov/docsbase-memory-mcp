@@ -2507,6 +2507,23 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 true,
             )
         }
+        Request::ApplyProjectConfig {
+            path,
+            plan_id,
+            allow_remote,
+        } => {
+            if !peer.hello_done {
+                return (hello_required(), true);
+            }
+            let result = live_config::apply(shared, scope, path, plan_id, allow_remote).await;
+            (
+                result.map_or_else(
+                    |error| error_response(&error),
+                    |value| Response::ToolResult { value },
+                ),
+                true,
+            )
+        }
         Request::BindReadOnly { pid, project_id } => {
             if !peer.hello_done {
                 return (hello_required(), true);
