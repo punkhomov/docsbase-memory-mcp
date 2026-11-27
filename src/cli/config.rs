@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::config::resolve::diagnostic_client_settings;
 use crate::ipc::{
     async_client::{AsyncClient, within_operation},
     client::Client,
@@ -201,7 +202,8 @@ pub(super) fn run(
 }
 
 fn live_plan(cache: PathBuf, root: PathBuf, check: bool) -> anyhow::Result<()> {
-    let result = super::with_transport(move |transport, settings| {
+    let settings = diagnostic_client_settings().context(CheckStatus::Unavailable)?;
+    let result = super::with_transport(move |transport| {
         let mut client = Client::try_connect_with_settings(&transport, &cache, settings)
             .context(CheckStatus::Unavailable)?
             .ok_or(CheckStatus::DaemonUnavailable)?;
@@ -238,7 +240,8 @@ fn live_apply(
     allow_remote: bool,
     started: Instant,
 ) -> anyhow::Result<()> {
-    let result = super::with_transport(move |transport, settings| {
+    let settings = diagnostic_client_settings().context(CheckStatus::Unavailable)?;
+    let result = super::with_transport(move |transport| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

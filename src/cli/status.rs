@@ -1,7 +1,7 @@
 //! `docsbase list` / `docsbase status` — read-only registry snapshots
 //! (FR-25, FR-26, FR-30).
 
-use crate::config::paths;
+use crate::config::{paths, resolve::diagnostic_client_settings};
 use crate::daemon::registry;
 use crate::error::{Error, Result};
 use crate::ipc::settings::ClientSettings;
@@ -42,7 +42,8 @@ pub fn status() -> anyhow::Result<()> {
 pub(crate) fn status_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    super::with_transport(|transport, client| status_with_settings_in(&transport, client, settings))
+    let client = diagnostic_client_settings()?;
+    super::with_transport(|transport| status_with_settings_in(&transport, client, settings))
 }
 
 pub(crate) fn status_with_settings_in(
@@ -102,7 +103,8 @@ pub(crate) fn project_status_with_settings(
     root: &std::path::Path,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    super::with_transport(|transport, client| {
+    let client = diagnostic_client_settings()?;
+    super::with_transport(|transport| {
         project_status_with_settings_in(&transport, root, client, settings)
     })
 }
@@ -167,7 +169,8 @@ pub fn list() -> anyhow::Result<()> {
 pub(crate) fn list_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    super::with_transport(|transport, client| list_with_settings_in(&transport, client, settings))
+    let client = diagnostic_client_settings()?;
+    super::with_transport(|transport| list_with_settings_in(&transport, client, settings))
 }
 
 pub(crate) fn list_with_settings_in(

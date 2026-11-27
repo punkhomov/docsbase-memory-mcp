@@ -56,6 +56,14 @@ impl ClientSettings {
         self.mcp_long
     }
 
+    pub(crate) const fn with_mcp_timeouts_from(self, source: Self) -> Self {
+        Self {
+            mcp_quick: source.mcp_quick,
+            mcp_long: source.mcp_long,
+            ..self
+        }
+    }
+
     fn values(self) -> [(FieldSpec, Duration); 3] {
         [
             (IPC_IO, self.ipc_io),
@@ -85,6 +93,12 @@ impl ClientSpec {
         mcp_quick: Duration::from_secs(30),
         mcp_long: Duration::from_mins(10),
     };
+
+    pub(crate) fn decode_patch(value: toml::Value) -> Result<ClientPatch> {
+        value.try_into().map_err(|_| Error::Admission {
+            message: "invalid global [client] timeout fields".to_owned(),
+        })
+    }
 
     pub(crate) const fn blocking_ipc_timeout_capability() -> &'static str {
         if cfg!(windows) {

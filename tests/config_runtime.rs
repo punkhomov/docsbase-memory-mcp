@@ -2608,6 +2608,79 @@ fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
 }
 
 #[test]
+fn invalid_legacy_client_policy_fails_before_creating_daemon_state() {
+    for (source, error) in [
+        (
+            "[client]\nipc_io_timeout_ms=0\n",
+            "client.ipc_io_timeout_ms",
+        ),
+        ("client = false\n", "invalid global [client] timeout fields"),
+    ] {
+        let env = Env::new(&[]);
+        write_file(env.cache(), "config/config.toml", source.as_bytes());
+        let output = env
+            .cmd()
+            .args(["serve", "--detached", "--grace-ms", "1"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        assert!(!env.cache().join("state").exists());
+        assert!(!env.cache().join(docsbase_memory::store::DB_FILE).exists());
+    }
+}
+
+#[test]
+fn live_config_client_policy_returns_unavailable_with_the_field_error() {
+    let env = Env::new(&[]);
+    write_file(
+        env.cache(),
+        "config/config.toml",
+        b"[client]\nipc_io_timeout_ms=0\n",
+    );
+    for arguments in [
+        &["config", "plan", "--live", "--check"][..],
+        &["config", "apply", "--live", "--plan-id", "fixture"][..],
+    ] {
+        let output = env.cmd().args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(5), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("client.ipc_io_timeout_ms"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn legacy_daemon_restart_notice_observes_the_scope_of_client_policy_changes() {
+    let mut env = Env::new(&[]);
+    let original = "[client]\nmcp_quick_timeout_ms=3000\n";
+    fs::write(env.global_config(), original).unwrap();
+    env.start_daemon();
+
+    let mut registry = env.client();
+    registry.handshake_registry().unwrap();
+    for (source, requires_restart) in [
+        ("[client]\nmcp_quick_timeout_ms=2000\n", false),
+        (
+            "[client]\nmcp_quick_timeout_ms=3000\nipc_io_timeout_ms=1000\n",
+            true,
+        ),
+        (
+            "# comment-only edit\n[client]\nmcp_quick_timeout_ms=3000\n",
+            true,
+        ),
+    ] {
+        fs::write(env.global_config(), source).unwrap();
+        let status = registry.call_tool("status", serde_json::json!({})).unwrap();
+        assert_eq!(status["restart_required"], requires_restart, "{status}");
+    }
+}
+
+#[test]
 fn invalid_v2_global_fails_before_creating_daemon_state() {
     let oversized = format!(
         "config_version=2\n#{}",

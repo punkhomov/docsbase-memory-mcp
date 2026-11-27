@@ -441,26 +441,18 @@ fn daemon_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Routes `tool` through the live daemon; `Ok(None)` means no daemon is
-/// reachable and the caller should fall back to direct mode (FR-30).
-///
-/// `bind_session` registers the cwd-bound session first (I6); registry-wide
-/// tools such as `status` skip it so they work from any directory.
-///
-/// # Errors
-/// One read/control command scope, including all list pages. Bootstrap policy
-/// keeps status usable when a global source cannot be read or parsed.
+// A native transport scope covers one read/control command, including list pagination.
 fn with_transport<T: Send>(
-    work: impl FnOnce(crate::platform::transport::Transport, ClientSettings) -> anyhow::Result<T> + Send,
+    work: impl FnOnce(crate::platform::transport::Transport) -> anyhow::Result<T> + Send,
 ) -> anyhow::Result<T> {
     let settings = crate::daemon::settings::standalone()?;
     let policy =
         crate::ipc::transport::policy(settings.settings().max_connections, settings.settings())?;
-    let client = crate::config::resolve::diagnostic_client_settings()?;
-    crate::platform::transport::run(&policy, |transport| Ok(work(transport, client)))?
+    crate::platform::transport::run(&policy, |transport| Ok(work(transport)))?
 }
 
-/// Surfaces handshake/tool errors from a daemon that did answer.
+/// Routes `tool` through the daemon. `Ok(None)` permits direct mode (FR-30).
+/// Registry-wide tools can skip project session binding.
 pub(crate) fn try_daemon(
     transport: &crate::platform::transport::Transport,
     tool: &str,

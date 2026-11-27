@@ -2157,18 +2157,13 @@ impl Shared {
                 "global config is invalid ({err}); fix it and run `docsbase daemon stop`"
             ));
         }
-        if self.catalog_epoch.is_some() {
-            return crate::daemon::launch::effective_restart_notice(
-                self.global_config_path.as_deref(),
-                &self.global_config_stamp,
-                &self.global_config,
-                &self.global_config_overrides,
-                self.global_config_defaults,
-            );
-        }
-        crate::daemon::launch::restart_notice(
+        crate::daemon::launch::runtime_restart_notice(
             self.global_config_path.as_deref(),
             &self.global_config_stamp,
+            &self.global_config,
+            &self.global_config_overrides,
+            self.global_config_defaults,
+            self.catalog_epoch.is_some(),
         )
     }
 }

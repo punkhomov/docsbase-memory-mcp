@@ -135,14 +135,14 @@ pub(crate) fn diagnostic_client_settings() -> Result<crate::ipc::settings::Clien
         let path = directory.join("config.toml");
         let text = read_capped_if_exists(&path).ok().flatten()?;
         let mut document = super::parse_global_document(&path, &text).ok()?;
+        if document.contains_key("config_version") && !is_v2(&document) {
+            return None;
+        }
         Some((SourceId::Global(path), document.remove("client")?))
     });
     let mut resolution = Resolution::<ClientSpec>::new(&DefaultsContext::standalone());
     if let Some((source, policy)) = layer {
-        let patch = policy
-            .try_into()
-            .map_err(|_| invalid("invalid global client timeout fields"))?;
-        resolution.apply(&source, patch)?;
+        resolution.apply(&source, ClientSpec::decode_patch(policy)?)?;
     }
     resolution.finish().map(Resolved::into_settings)
 }
@@ -445,6 +445,29 @@ impl LaunchUse {
     }
 }
 
+fn parse_launch_document<'source>(
+    path: &Path,
+    bytes: &'source [u8],
+) -> std::result::Result<(&'source str, toml::Table), LaunchFailure> {
+    let text = std::str::from_utf8(bytes).map_err(|err| {
+        if has_version_header(bytes) {
+            return LaunchFailure::Versioned(invalid("invalid UTF-8 in versioned configuration"));
+        }
+        LaunchFailure::Legacy(Error::internal_with_source(
+            format!("read {}: {err}", path.display()),
+            err,
+        ))
+    })?;
+    let document = super::parse_global_document(path, text).map_err(|error| {
+        if has_version_header(bytes) {
+            LaunchFailure::Versioned(invalid("invalid versioned configuration TOML"))
+        } else {
+            LaunchFailure::Legacy(error)
+        }
+    })?;
+    Ok((text, document))
+}
+
 /// Resolve already captured launch bytes without filesystem access.
 pub(crate) fn launch_resolution(
     path: &Path,
@@ -455,27 +478,7 @@ pub(crate) fn launch_resolution(
     let mut resolution = Resolution::<ConfigSpec>::new(defaults);
     let mut website = false;
     if let Some(bytes) = bytes {
-        let text = std::str::from_utf8(bytes).map_err(|err| {
-            if has_version_header(bytes) {
-                return LaunchFailure::Versioned(invalid(
-                    "invalid UTF-8 in versioned configuration",
-                ));
-            }
-            LaunchFailure::Legacy(Error::internal_with_source(
-                format!("read {}: {err}", path.display()),
-                err,
-            ))
-        })?;
-        // Parse the canonical document once. Decode/validate the owner section
-        // first so neither its errors nor a recognized Website selector can be
-        // erased by the legacy Shared source-error adapter.
-        let mut document = super::parse_global_document(path, text).map_err(|error| {
-            if has_version_header(bytes) {
-                LaunchFailure::Versioned(invalid("invalid versioned configuration TOML"))
-            } else {
-                LaunchFailure::Legacy(error)
-            }
-        })?;
+        let (text, mut document) = parse_launch_document(path, bytes)?;
         let source = SourceId::Global(path.to_owned());
         if is_v2(&document) {
             launch_use.keep_consumed_v2_fields(&mut document);
@@ -538,6 +541,19 @@ pub(crate) fn launch_resolution(
                 crate::daemon::settings::DaemonProfile::Website { .. }
             );
         }
+        if let Some(client) = document.remove("client") {
+            let owner_patch = crate::ipc::settings::ClientSpec::decode_patch(client)
+                .map_err(LaunchFailure::Client)?;
+            resolution
+                .apply(
+                    &source,
+                    super::GlobalFileConfig {
+                        client: Some(owner_patch),
+                        ..super::GlobalFileConfig::default()
+                    },
+                )
+                .map_err(LaunchFailure::Client)?;
+        }
         resolution
             .apply(
                 &source,
@@ -567,6 +583,8 @@ pub(crate) enum LaunchFailure {
     Daemon(Error),
     // A recognized remote policy is never a legacy Shared source fallback.
     Remote(Error),
+    // A recognized client timeout policy must validate before startup.
+    Client(Error),
     // Versioned sources never use the legacy fallback after version recognition.
     Versioned(Error),
 }
@@ -583,6 +601,7 @@ impl LaunchFailure {
             Self::Legacy(error)
             | Self::Daemon(error)
             | Self::Remote(error)
+            | Self::Client(error)
             | Self::Versioned(error) => error,
         }
     }

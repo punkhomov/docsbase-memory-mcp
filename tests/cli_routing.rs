@@ -145,6 +145,23 @@ fn spawn_fake_daemon_with_reply(
 }
 
 #[test]
+fn connected_status_uses_bootstrap_policy_for_unsupported_config_versions() {
+    let env = Env::new(&[]);
+    write_file(
+        env.cache.path(),
+        "config/config.toml",
+        b"config_version=3\n[client]\nipc_io_timeout_ms=0\n",
+    );
+    let _peer = spawn_fake_daemon(env.cache.path());
+
+    env.cmd()
+        .arg("status")
+        .assert()
+        .success()
+        .stdout("{\n  \"routed_tool\": \"status\"\n}\n");
+}
+
+#[test]
 fn cli_status_applies_the_configured_blocking_io_timeout() {
     use tokio::io::AsyncBufReadExt as _;
 

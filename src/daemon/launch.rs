@@ -354,6 +354,7 @@ impl LaunchSnapshot {
             Err(
                 LaunchFailure::Daemon(error)
                 | LaunchFailure::Remote(error)
+                | LaunchFailure::Client(error)
                 | LaunchFailure::Versioned(error),
             ) => Err(error),
             Err(LaunchFailure::Legacy(error)) => {
@@ -444,12 +445,13 @@ pub(crate) fn restart_notice(path: Option<&Path>, baseline: &ConfigStamp) -> Opt
     source_notice(&current, baseline)
 }
 
-pub(crate) fn effective_restart_notice(
+pub(crate) fn runtime_restart_notice(
     path: Option<&Path>,
     baseline: &ConfigStamp,
     active: &Config,
     overrides: &DaemonPatch,
     defaults: DefaultsContext,
+    compare_effective_policy: bool,
 ) -> Option<String> {
     let Some(path) = path else {
         return restart_notice(None, baseline);
@@ -466,8 +468,17 @@ pub(crate) fn effective_restart_notice(
         snapshot
             .resolve(overrides.clone())
             .and_then(|resolved| {
-                Ok(crate::config::view::launch_identity(resolved.settings())?
-                    == crate::config::view::launch_identity(active)?)
+                if compare_effective_policy {
+                    Ok(crate::config::view::launch_identity(resolved.settings())?
+                        == crate::config::view::launch_identity(active)?)
+                } else {
+                    // Preserve the legacy source notice unless the frontend is
+                    // the only consumer of the changed effective policy.
+                    let mut current = resolved.into_settings();
+                    let client = current.client;
+                    current.client = client.with_mcp_timeouts_from(active.client);
+                    Ok(client != current.client && current == *active)
+                }
             })
             .unwrap_or(false)
     };
