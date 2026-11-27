@@ -784,11 +784,18 @@ generation through the running daemon. It leaves project registration and
 runtime unchanged. `restart_required` compares the current global file with
 the daemon's startup source. A query-only policy edit can change
 `project_runtime` without replacing the index. A changed construction recipe
-can require replacing a confirmed resident ANN graph while reusing vectors.
+can require replacing a confirmed ANN graph while reusing vectors.
 If a source edit also requires a new index, the plan orders its replacement
 before reconfiguring the project or restarting the daemon.
-An ANN graph absent from memory is reported as `unknown` when its persisted
-state has not been inspected.
+When the active graph is cold, the planner can report `ann.state = "persisted"`
+and the size of its dump files. It looks for a slot with the active index and
+recipe before hashing chunks from the leased SQLite generation. The digest
+scan uses `search.max_request_payload_bytes` and the live request deadline.
+The request uses `daemon.control_timeout_ms`, capped at the IPC exchange
+timeout. The SQLite read allows a full supported chunk.
+Eviction leaves the plan identity unchanged when the slot still qualifies. The
+inspection checks file presence, lengths and provenance without loading HNSW.
+Unconfirmed slots and absent runtime provenance report `unknown`.
 
 In live mode `--check` returns 3 for a reported change or restart and 5 when
 observation is blocked. Live plans describe proposed effects. Stop the daemon

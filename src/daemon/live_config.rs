@@ -2,10 +2,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::config::observe::{self, ActiveProjectConfig, AnnObservation, PlanningLimits};
 use crate::error::{Error, Result};
+use crate::hybrid::work::Cancellation;
 use crate::ipc::protocol;
+use crate::search::operation::SearchOperation;
 use crate::store::project_index::ProjectIndex;
 use crate::store::registry_inspect::{ProjectRecipeInspection, inspect_live_project_recipes};
 use crate::vector_cache::EmbeddingRecipe;
@@ -25,15 +28,33 @@ pub(super) async fn inspect(
             message: "restart the daemon with the same docsbase build before planning".into(),
         });
     }
-    let permit = shared.workers.control().await?;
+    let operation = inspection_operation(shared)?;
+    let permit = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(operation.deadline()),
+        shared.workers.control(),
+    )
+    .await
+    .map_err(|_| unavailable("live config planning deadline expired in the control queue"))??;
     let shared = Arc::clone(shared);
+    let work = operation.clone();
     let worker = request::spawn(Some(permit), Some(Arc::clone(&scope.activity)), move || {
-        report(&shared, &path)
+        report(&shared, &path, &work)
     });
-    request::run(worker, None).await
+    request::run(worker, Some(&operation)).await
 }
 
-pub(super) fn report(shared: &Shared, path: &Path) -> Result<serde_json::Value> {
+pub(super) fn inspection_operation(shared: &Shared) -> Result<SearchOperation> {
+    let timeout = Duration::from_millis(shared.daemon_settings().control_timeout_ms)
+        .min(crate::ipc::client::IO_TIMEOUT);
+    SearchOperation::with_timeout(Instant::now(), timeout, Cancellation::new())
+}
+
+pub(super) fn report(
+    shared: &Shared,
+    path: &Path,
+    operation: &SearchOperation,
+) -> Result<serde_json::Value> {
+    operation.check()?;
     let epoch = shared
         .catalog_epoch
         .ok_or_else(|| unavailable("live planning requires a v5 catalog"))?;
@@ -63,8 +84,10 @@ pub(super) fn report(shared: &Shared, path: &Path) -> Result<serde_json::Value> 
             &reader,
             &project,
             limits.registry,
-            |index, embedding| match slot.as_ref().zip(config.as_deref()) {
-                Some((slot, config)) => observe_ann(shared, slot, config, index, embedding),
+            |index, embedding, metadata| match slot.as_ref().zip(config.as_deref()) {
+                Some((slot, config)) => {
+                    observe_ann(shared, slot, config, index, embedding, metadata, operation)
+                }
                 None => AnnObservation::Unknown,
             },
         )?;
@@ -95,6 +118,7 @@ pub(super) fn report(shared: &Shared, path: &Path) -> Result<serde_json::Value> 
         };
         (inspection, config, ann)
     };
+    operation.check()?;
     let plan = observe::live_project_plan(
         config_dir,
         &shared.cache,
@@ -135,6 +159,8 @@ fn observe_ann(
     config: &crate::config::Config,
     index: ProjectIndex,
     embedding: Option<EmbeddingRecipe>,
+    metadata: Option<&rusqlite::Connection>,
+    operation: &SearchOperation,
 ) -> AnnObservation {
     let model = match capture_catalog_model(slot, config, &shared.payload_budget) {
         Ok(None) => return AnnObservation::Disabled,
@@ -144,14 +170,31 @@ fn observe_ann(
         Ok(Some(model)) if embedding == Some(EmbeddingRecipe::for_model(&model.key)) => model,
         _ => return AnnObservation::Unknown,
     };
-    shared
+    if let Some((vectors, estimated_bytes)) = shared
         .dense
         .ann_diagnostics_for(index, &model.key, config.ann_build)
         .resident
-        .map_or(AnnObservation::Unknown, |(vectors, estimated_bytes)| {
-            AnnObservation::Resident {
+    {
+        return AnnObservation::Resident {
+            vectors,
+            estimated_bytes,
+        };
+    }
+    metadata
+        .and_then(|metadata| {
+            shared.dense.persisted_ann_for(
+                index,
+                &model.key,
+                config.ann_build,
+                metadata,
+                shared.global_config.search.max_request_payload_bytes,
+                || operation.check(),
+            )
+        })
+        .map_or(AnnObservation::Unknown, |(vectors, dump_bytes)| {
+            AnnObservation::Persisted {
                 vectors,
-                estimated_bytes,
+                dump_bytes,
             }
         })
 }

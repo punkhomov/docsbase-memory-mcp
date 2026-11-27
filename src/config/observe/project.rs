@@ -72,6 +72,10 @@ pub(crate) enum AnnObservation {
         vectors: usize,
         estimated_bytes: u64,
     },
+    Persisted {
+        vectors: usize,
+        dump_bytes: u64,
+    },
 }
 
 pub(crate) struct ProjectReplacement {
@@ -427,15 +431,18 @@ fn assess_ann(
         crate::hybrid::ann_store::ANN_RECIPE_VERSION,
         crate::hybrid::ann_store::HNSW_RS_VERSION,
     );
-    let resident = matches!(active.ann, AnnObservation::Resident { .. });
+    let confirmed = matches!(
+        active.ann,
+        AnnObservation::Resident { .. } | AnnObservation::Persisted { .. }
+    );
     let previous = active
         .config
         .as_deref()
         .zip(inspection.selected.as_ref())
-        .filter(|_| resident);
+        .filter(|_| confirmed);
     let state = match previous {
         Some((old, selected)) => ExpectedState::KnownIdentity(change::policy_identity(
-            "resident-ann-v1",
+            "selected-ann-v1",
             &(
                 ann_format,
                 selected.index.generation_id,
@@ -481,7 +488,7 @@ fn assess_ann(
                 resource,
                 effect: Effect::Rebuild,
                 target: Some(Target::Identity(change::policy_identity(
-                    "resident-ann-target-v1",
+                    "selected-ann-target-v1",
                     &(
                         ann_format,
                         generation,

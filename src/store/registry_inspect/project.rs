@@ -91,7 +91,11 @@ pub(crate) fn inspect_live_project_recipes<T>(
     registry: &crate::store::Db,
     project: &Project,
     limits: InspectionLimits,
-    observe: impl FnOnce(ProjectIndex, Option<crate::vector_cache::EmbeddingRecipe>) -> T,
+    observe: impl FnOnce(
+        ProjectIndex,
+        Option<crate::vector_cache::EmbeddingRecipe>,
+        Option<&Connection>,
+    ) -> T,
 ) -> Result<Option<(SelectedIndexEvidence, T)>> {
     let cache = registry
         .cache_root()
@@ -116,28 +120,40 @@ pub(crate) fn inspect_live_project_recipes<T>(
             let Some(head) = generation_catalog::active_head(connection, project.id)? else {
                 return Ok(None);
             };
-            let selected = observe_catalog_head(
+            let evidence = observe_catalog_head(
                 connection,
                 &cache,
-                &directory,
                 epoch,
                 &head,
                 limits,
                 Some(root),
+                |selected, metadata| {
+                    let index =
+                        ProjectIndex::from_catalog_observation(selected.index, selected.seal)
+                            .map_err(|_| Why::InvalidRegistry)?;
+                    let embedding = selected
+                        .recipes
+                        .as_ref()
+                        .and_then(|recipes| recipes.embedding);
+                    if let Some(metadata) = metadata {
+                        allow_live_chunk_values(metadata)?;
+                    }
+                    Ok(observe(index, embedding, metadata))
+                },
             )?;
-            let index = ProjectIndex::from_catalog_observation(selected.index, selected.seal)
-                .map_err(|_| Why::InvalidRegistry)?;
-            let observed = observe(
-                index,
-                selected
-                    .recipes
-                    .as_ref()
-                    .and_then(|recipes| recipes.embedding),
-            );
-            Ok(Some((selected, observed)))
+            Ok(Some(evidence))
         })
     };
     evidence().map_err(live_unavailable)
+}
+
+pub(super) fn allow_live_chunk_values(metadata: &Connection) -> Observed<()> {
+    // A legal atomic Markdown chunk can be larger than an inspector
+    // metadata value. This is the final phase of the private connection.
+    let limit =
+        i32::try_from(crate::ipc::protocol::MAX_FRAME_BYTES).map_err(|_| Why::LimitExceeded)?;
+    super::lease::set_value_limit(metadata, limit);
+    Ok(())
 }
 
 fn live_unavailable(reason: Why) -> crate::error::Error {
@@ -302,13 +318,13 @@ fn observe_project_evidence(
                 return observe_catalog_head(
                     registry,
                     cache,
-                    &project,
                     epoch,
                     &head,
                     limits,
                     recipe_root,
+                    |_, _| Ok(()),
                 )
-                .map(Some);
+                .map(|(selected, ())| Some(selected));
             }
         };
         Ok(Some(SelectedIndexEvidence {
@@ -319,29 +335,38 @@ fn observe_project_evidence(
     })
 }
 
-fn observe_catalog_head(
+fn observe_catalog_head<T>(
     registry: &Connection,
     cache: &Path,
-    project: &Path,
     epoch: [u8; 16],
     head: &Head,
     limits: InspectionLimits,
     recipe_root: Option<&str>,
-) -> Observed<SelectedIndexEvidence> {
+    observe: impl FnOnce(&SelectedIndexEvidence, Option<&Connection>) -> Observed<T>,
+) -> Observed<(SelectedIndexEvidence, T)> {
+    let project = project_directory(cache, head.project_id);
     match head.layout {
         Layout::Legacy => {
             let index = with_read_lease(&project.join(".legacy-generation.lock"), || {
                 observe_legacy(registry, cache, head.project_id, Some((epoch, head.id)))
             })?;
-            Ok(SelectedIndexEvidence {
+            let selected = SelectedIndexEvidence {
                 index,
                 seal: None,
                 recipes: None,
-            })
+            };
+            let observed = observe(&selected, None)?;
+            Ok((selected, observed))
         }
-        Layout::Local { seal_digest } => {
-            observe_local(project, epoch, head, seal_digest, limits, recipe_root)
-        }
+        Layout::Local { seal_digest } => observe_local(
+            &project,
+            epoch,
+            head,
+            seal_digest,
+            limits,
+            recipe_root,
+            observe,
+        ),
     }
 }
 
@@ -412,14 +437,15 @@ fn legacy_revision(registry: &Connection, project_id: i64) -> Observed<Option<i6
     }
 }
 
-fn observe_local(
+fn observe_local<T>(
     project: &Path,
     epoch: [u8; 16],
     head: &Head,
     seal_digest: [u8; 32],
     limits: InspectionLimits,
     recipe_root: Option<&str>,
-) -> Observed<SelectedIndexEvidence> {
+    observe: impl FnOnce(&SelectedIndexEvidence, Option<&Connection>) -> Observed<T>,
+) -> Observed<(SelectedIndexEvidence, T)> {
     let generation = project.join("generations").join(head.id.to_string());
     check_directory(&generation)?;
     with_read_lease(&generation.join(".read.lock"), || {
@@ -481,11 +507,13 @@ fn observe_local(
                 } else {
                     None
                 };
-                Ok(SelectedIndexEvidence {
+                let selected = SelectedIndexEvidence {
                     index,
                     seal: Some(seal_digest),
                     recipes,
-                })
+                };
+                let observed = observe(&selected, Some(metadata))?;
+                Ok((selected, observed))
             },
         )
     })

@@ -1044,6 +1044,42 @@ impl DenseCache {
         AnnDiagnostics { outcome, resident }
     }
 
+    pub(crate) fn persisted_ann_for(
+        &self,
+        index: ProjectIndex,
+        model_id: &str,
+        settings: AnnBuildSettings,
+        metadata: &rusqlite::Connection,
+        input_bytes: u64,
+        check: impl Fn() -> Result<()>,
+    ) -> Option<(usize, u64)> {
+        let store = self.store.as_ref()?;
+        let dimension = model_dim(model_id)?;
+        if !store
+            .has_observation_candidate(index, model_id, dimension, settings, &check)
+            .ok()?
+        {
+            return None;
+        }
+        let (count, digest) = crate::hybrid::ann_store::catalog_chunk_set(
+            metadata,
+            index.project_id(),
+            input_bytes,
+            &check,
+        )
+        .ok()?;
+        let key = ann_key(
+            index.project_id(),
+            index.content_revision(),
+            model_id,
+            dimension,
+            count,
+            digest,
+        );
+        check().ok()?;
+        store.observe_artifact(AnnArtifact::for_index(&key, index), settings)
+    }
+
     fn ann_size(state: &DenseRows) -> Option<(usize, u64)> {
         match state {
             DenseRows::Ann(ann) => Some((

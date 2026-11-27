@@ -2213,3 +2213,30 @@ Rust 1.100.0 Linux cli-full passed 1,957 tests and the lean profile passed
 1,616. The search baseline and no-network checks passed. Linux and
 Windows GNU cross-Clippy and formatting passed. Live application, disk-only
 ANN observation and the final component audit remain open.
+
+## 2026-11-27 — CF4/CF8, план для сохранённого ANN
+
+Task CF4 persisted ANN observation: complete (native graph and SQLite
+fixtures, bounded observation and independent review). Native PR checks
+remain pending.
+
+Ruling: qualify a matching slot name before reading chunks. Hash the
+selected local SQLite pair in composite ID order with the request byte
+budget and original control deadline. The live callback can read a
+supported atomic chunk above the ordinary inspector value limit. Disk
+qualification shares the loader's bounded metadata and dump-file checks
+and the store's read pin. An evicted graph keeps the same plan identity
+and actions when the published slot still matches. Inspection stops after
+metadata and file-size validation. Absent or unconfirmed evidence remains
+unknown.
+
+Ruling: a separate end-to-end acceptance case remains open. Shared v5
+`index_project` with a 1,100,000-byte Markdown fence and
+`max_file_size = 2000000` can hit SQLite's value limit before a graph is
+published even after sufficient capture budget is granted. The bounded
+live SQLite test isolates and verifies the observation path independently.
+Carry the indexing case into the remaining settings-consumer acceptance.
+
+Rust 1.100.0 Linux cli-full passed 1,960 tests and lean passed 1,620,
+including the search baseline and offline checks. Linux and Windows GNU
+cross-Clippy and formatting passed.

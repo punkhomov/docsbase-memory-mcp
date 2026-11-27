@@ -1522,12 +1522,13 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
             "config_version = 2\n[ann.build]\nm = 12\n",
         ).unwrap();
         assert_live_ann_config_plan(&shared, &project);
-        assert_eq!(catalog_diagnostics(&shared, session).await["ann"]["vectors"], 2);
+        assert!(catalog_diagnostics(&shared, session).await["ann"]["vectors"].is_null());
 
         reopen_catalog_with_new_ann_recipe(&shared, &project, &provider);
         let reloaded = catalog_diagnostics(&shared, session).await;
         assert_eq!(reloaded["index_generation"], view["index_generation"]);
         assert!(reloaded["ann"]["vectors"].is_null());
+        assert_eq!(live_ann_plan(&shared, &project)["plan"]["ann"]["state"], "unknown");
 
         std::fs::write(root.path().join("new.md"), "catalogwarmnew").unwrap();
         let ack = call_tool(
@@ -1559,7 +1560,7 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
 
 #[cfg(unix)]
 fn assert_live_ann_config_plan(shared: &Shared, project: &Project) {
-    let report = live_config::report(shared, &project.canonical_root).unwrap();
+    let report = live_ann_plan(shared, project);
     let plan = &report["plan"];
     assert_eq!(plan["ann"]["state"], "resident");
     assert_eq!(plan["ann"]["vectors"], 2);
@@ -1573,6 +1574,15 @@ fn assert_live_ann_config_plan(shared: &Shared, project: &Project) {
     assert_eq!(graph["dependencies"], json!([]));
     assert_eq!(plan["required_grants"], json!([]));
 
+    shared.dense.invalidate_memory(project.id);
+    let persisted = live_ann_plan(shared, project);
+    assert_eq!(persisted["plan"]["ann"]["state"], "persisted");
+    assert_eq!(persisted["plan"]["ann"]["vectors"], 2);
+    assert_eq!(persisted["plan"]["plan_id"], plan["plan_id"]);
+    assert_eq!(persisted["plan"]["actions"], plan["actions"]);
+    assert!(shared.dense.ann_snapshot(project.id).is_none());
+    assert_persisted_ann_rejects_wrong_digest(shared, project);
+
     let project_file = project.canonical_root.join(".docsbase.toml");
     let construction = std::fs::read_to_string(&project_file).unwrap();
     let replaced = |max_chars| {
@@ -1581,7 +1591,7 @@ fn assert_live_ann_config_plan(shared: &Shared, project: &Project) {
             format!("{construction}\n[index.chunk]\nmax_chars = {max_chars}\n"),
         )
         .unwrap();
-        let report = live_config::report(shared, &project.canonical_root).unwrap();
+        let report = live_ann_plan(shared, project);
         let actions = report["plan"]["actions"].as_array().unwrap();
         let index = actions
             .iter()
@@ -1601,6 +1611,41 @@ fn assert_live_ann_config_plan(shared: &Shared, project: &Project) {
     };
     assert_ne!(replaced(1_200), replaced(1_400));
     std::fs::write(project_file, construction).unwrap();
+}
+
+#[cfg(unix)]
+fn live_ann_plan(shared: &Shared, project: &Project) -> serde_json::Value {
+    let operation = live_config::inspection_operation(shared).unwrap();
+    live_config::report(shared, &project.canonical_root, &operation).unwrap()
+}
+
+#[cfg(unix)]
+fn assert_persisted_ann_rejects_wrong_digest(shared: &Shared, project: &Project) {
+    let ann = crate::hybrid::ann_store::AnnStore::new(shared.cache.clone());
+    let meta = std::fs::read_dir(ann.project_ann_root(project.id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("meta.json"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let original = std::fs::read(&meta).unwrap();
+    let mut wrong: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    // The path uses only the short prefix. The evidence also checks all digest bytes.
+    let digest = wrong["chunk_set_digest"].as_str().unwrap();
+    let suffix = if digest.ends_with('0') { '1' } else { '0' };
+    wrong["chunk_set_digest"] = json!(format!("{}{suffix}", &digest[..63]));
+    let changed = serde_json::to_vec(&wrong).unwrap();
+    std::fs::write(&meta, &changed).unwrap();
+    let report = live_ann_plan(shared, project);
+    assert_eq!(report["plan"]["ann"]["state"], "unknown");
+    assert!(
+        report["plan"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|action| { action["resource"]["value"]["component"] != "ann_graph" })
+    );
+    assert_eq!(std::fs::read(&meta).unwrap(), changed);
+    std::fs::write(meta, original).unwrap();
 }
 
 #[cfg(unix)]
