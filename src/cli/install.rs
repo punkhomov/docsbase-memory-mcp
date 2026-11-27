@@ -10,7 +10,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
@@ -275,18 +275,22 @@ pub(crate) fn uninstall_with_settings(
 /// when the daemon process really exits; retries while a blocking job winds
 /// down (FR-5).
 fn acquire_after_stop(cache: &Path) -> anyhow::Result<Lease> {
-    let deadline = std::time::Instant::now() + Duration::from_mins(10);
+    acquire_after_stop_until(cache, Instant::now() + Duration::from_mins(10))
+}
+
+fn acquire_after_stop_until(cache: &Path, deadline: Instant) -> anyhow::Result<Lease> {
     let mut cleared_stale = false;
     loop {
-        let _ = lifecycle::stop_daemon(cache);
+        let _ = lifecycle::stop_daemon_with_limit(cache, Some(deadline));
         match Lease::acquire(cache, &protocol::build_id(), SCHEMA_VERSION) {
             Ok(lease) => return Ok(lease),
             Err(err) if crate::daemon::admission::is_lock_busy(&err) => {
-                if std::time::Instant::now() >= deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
                     return Err(anyhow::Error::new(err))
                         .context("daemon did not release the admission lease");
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(100).min(remaining));
             }
             // `Lease::acquire` only reports a build/schema mismatch after it
             // has taken the exclusive lock, so no daemon was serving when it
@@ -558,6 +562,56 @@ mod tests {
         assert_eq!(parse_build_id(""), None);
         assert_eq!(parse_build_id("docsbase\n"), None);
         assert_eq!(parse_build_id("othertool 1.0.0\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_deadline_bounds_an_unanswered_stop_request() {
+        use super::{Duration, Instant, Lease, SCHEMA_VERSION, acquire_after_stop_until, protocol};
+        use std::io::BufRead;
+        use std::os::unix::net::UnixListener;
+
+        let cache = tempfile::tempdir().unwrap();
+        let cache = cache.path();
+        let build = protocol::build_id();
+        let _lease = Lease::acquire(cache, &build, SCHEMA_VERSION).unwrap();
+        let endpoint = crate::platform::daemon_endpoint(cache);
+        let listener = UnixListener::bind(endpoint.as_path()).unwrap();
+        std::fs::write(
+            cache.join("state/daemon.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": std::process::id(), "socket": endpoint,
+                "build_id": build, "schema_version": SCHEMA_VERSION, "cache_root": cache,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let error =
+            acquire_after_stop_until(cache, started + Duration::from_millis(500)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("daemon did not release the admission lease")
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "installer overran its deadline"
+        );
+        assert!(cache.join("state/daemon.json").exists());
+
+        listener.set_nonblocking(true).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut request = Vec::new();
+        std::io::BufReader::new(stream)
+            .read_until(b'\n', &mut request)
+            .unwrap();
+        assert_eq!(
+            protocol::encode(&protocol::Request::StopDaemon).unwrap(),
+            request
+        );
     }
 
     #[cfg(unix)]

@@ -385,6 +385,10 @@ pub(super) fn run_with_admission<T: Send>(
 /// Returns [`Error::Internal`] when the stop request cannot be delivered or
 /// the daemon does not exit within the configured stop timeout.
 pub fn stop_daemon(cache: &Path) -> Result<()> {
+    stop_daemon_with_limit(cache, None)
+}
+
+pub(crate) fn stop_daemon_with_limit(cache: &Path, limit: Option<Instant>) -> Result<()> {
     let Some(state) = read_state(cache)? else {
         return Ok(());
     };
@@ -412,7 +416,11 @@ pub fn stop_daemon(cache: &Path) -> Result<()> {
         // be dropped silently — retry until the deadline.
         #[cfg(unix)]
         let mut no_listener_since: Option<Instant> = None;
-        let deadline = Instant::now()
+        let started = Instant::now();
+        let timeout = limit.map_or(timeout, |limit| {
+            timeout.min(limit.saturating_duration_since(started))
+        });
+        let deadline = started
             .checked_add(timeout)
             .ok_or_else(|| Error::internal("daemon stop timeout is outside the Instant range"))?;
         while Instant::now() < deadline {

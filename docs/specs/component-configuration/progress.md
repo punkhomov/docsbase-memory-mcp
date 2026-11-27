@@ -2331,3 +2331,9 @@ Stop through standalone policy. Only Unix uses socket absence as evidence;
 Windows verifies process exit and displays null for the Unix-only parameter.
 The settings change no stored recipe. All 32 lifecycle and daemon-settings
 checks passed locally on Linux. Windows GNU focused Clippy passed.
+
+Ruling: install, update and uninstall retain their own overall admission
+budget. The Stop exchange and its process wait are capped by that outer
+deadline. A native unanswered Unix socket reproduced an old 15-second wait
+with a 500 ms caller deadline. The corrected fixture returns in 0.52 s and
+leaves the still-owned daemon state intact.
