@@ -140,6 +140,8 @@ pub struct Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockerCode {
+    /// The observed configuration violates an effective settings constraint.
+    InvalidSettings,
     /// No execution path is provided in this planning slice.
     ExecutorUnavailable,
     /// No trustworthy artifact observation.

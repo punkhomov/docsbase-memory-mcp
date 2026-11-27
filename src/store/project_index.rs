@@ -407,19 +407,28 @@ pub(super) fn verify_local_outcome(
 ) -> Result<()> {
     let outcome = outcome::read(metadata, project.id).map_err(local_metadata_error)?;
     if !outcome.is_some_and(|outcome| {
-        // A full survey can report per-file omissions. Revised pairs can
-        // also carry a later subset outcome from the incremental writer.
-        (outcome.scope == outcome::SurveyScope::FullSurvey
-            || (revision.manifest.is_some() && outcome.scope == outcome::SurveyScope::Subset))
-            && outcome.index_generation == revision.content_revision
-            && project.canonical_root.to_str() == Some(outcome.canonical_root.as_str())
-            && outcome.recipe_id == seal.index_recipe
+        matches_local_outcome(&outcome, project.canonical_root.to_str(), revision, seal)
     }) {
         return Err(invalid_index(
             "published generation seal or revision does not match a successful index outcome",
         ));
     }
     Ok(())
+}
+
+pub(super) fn matches_local_outcome(
+    outcome: &outcome::IndexOutcome,
+    root: Option<&str>,
+    revision: registry_inspect::LocalRevision,
+    seal: &GenerationSeal,
+) -> bool {
+    // A full survey can report per-file omissions. Revised pairs can
+    // also carry a later subset outcome from the incremental writer.
+    (outcome.scope == outcome::SurveyScope::FullSurvey
+        || (revision.manifest.is_some() && outcome.scope == outcome::SurveyScope::Subset))
+        && outcome.index_generation == revision.content_revision
+        && root == Some(outcome.canonical_root.as_str())
+        && outcome.recipe_id == seal.index_recipe
 }
 
 /// Observe a registered base through the same leases and artifact proofs as

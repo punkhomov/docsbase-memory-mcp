@@ -328,6 +328,42 @@ pub(crate) fn resolve_v2_edit(layer: &SourceLayer, global: Option<&Config>) -> R
     resolution.finish().map(Resolved::into_settings)
 }
 
+pub(super) fn resolve_observed_v2(
+    global: Option<&SourceLayer>,
+    project: Option<&SourceLayer>,
+) -> Result<Option<Config>> {
+    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    if let Some(layer) = global {
+        if layer.version() != super::source::ConfigVersion::V2 {
+            return Ok(None);
+        }
+        resolution.apply_v2_global(layer)?;
+    } else {
+        resolution.bind_vector_policy(&crate::vector_cache::settings::standalone()?)?;
+    }
+    resolution.validate()?;
+    let website = matches!(
+        resolution.settings.daemon.profile,
+        crate::daemon::settings::DaemonProfile::Website { .. }
+    );
+    if website {
+        crate::daemon::launch::lexical_only(&resolution.settings)?;
+    }
+    if let Some(layer) = project {
+        let max_bytes = resolution
+            .settings
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| invalid("v2 planning requires the global vector policy"))?
+            .max_bytes;
+        resolution.apply_v2_project(layer, max_bytes)?;
+    }
+    if website {
+        crate::daemon::launch::lexical_only(&resolution.settings)?;
+    }
+    resolution.finish().map(|value| Some(value.into_settings()))
+}
+
 /// Loads versioned files while retaining each source’s provenance.
 ///
 /// # Errors

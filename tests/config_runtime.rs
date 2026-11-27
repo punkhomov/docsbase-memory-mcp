@@ -831,6 +831,188 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
 }
 
 #[test]
+fn v2_config_plan_compares_sources_with_the_published_generation() {
+    let env = Env::new(&[("guide.md", "indexplanningwidget")]);
+    let empty = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(empty["actions"], serde_json::json!([]));
+    assert!(!env.cache().join("registry.db").exists());
+    env.run_json(&["index"]);
+
+    let original = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(original["actions"], serde_json::json!([]));
+    assert_eq!(original["blockers"], serde_json::json!([]));
+    assert_eq!(original["full_survey"], true);
+    let registry = env.cache().join("registry.db");
+    let encoded = fs::read(&registry).unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty = 0.125\n",
+    )
+    .unwrap();
+    let query_only = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(query_only["actions"], serde_json::json!([]));
+    assert_ne!(query_only["plan_id"], original["plan_id"]);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let mut before = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut before);
+    snapshot_config_plan_files(env.root(), &mut before);
+    let output = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let changed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(changed["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(changed["actions"][0]["effect"], "rebuild");
+    assert_eq!(
+        changed["actions"][0]["resource"]["value"]["component"],
+        "project_index"
+    );
+    assert_eq!(fs::read(&registry).unwrap(), encoded);
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(!env.cache().join(format!("registry.db{suffix}")).exists());
+    }
+    let mut after = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut after);
+    snapshot_config_plan_files(env.root(), &mut after);
+    assert_eq!(after, before);
+
+    env.run_json(&["index"]);
+    let applied = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(applied["actions"], serde_json::json!([]));
+    assert_ne!(applied["plan_id"], changed["plan_id"]);
+}
+
+fn snapshot_config_plan_files(
+    root: &Path,
+    files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+) {
+    for entry in fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            snapshot_config_plan_files(&path, files);
+        } else {
+            let data = fs::read(&path).unwrap();
+            files.insert(path, data);
+        }
+    }
+}
+
+#[test]
+fn v2_config_plan_binds_empty_cache_context_and_reports_invalid_effective_settings() {
+    let env = Env::new(&[("guide.md", "configurationcontextwidget")]);
+    let alternative = tempfile::tempdir().unwrap();
+    let initial = env.run_json(&["config", "plan"]);
+    let different = env
+        .cmd()
+        .env("DOCSBASE_CACHE_DIR", alternative.path())
+        .args(["config", "plan"])
+        .output()
+        .unwrap();
+    assert!(different.status.success());
+    let other: Value = serde_json::from_slice(&different.stdout).unwrap();
+    assert_ne!(initial["plan_id"], other["plan_id"]);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\nmax_file_size = 0\n",
+    )
+    .unwrap();
+    let invalid = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(5));
+    let blocked: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(blocked["actions"], serde_json::json!([]));
+    assert_eq!(blocked["blockers"][0]["code"], "invalid_settings");
+    assert!(!env.cache().join("registry.db").exists());
+    assert!(!alternative.path().join("registry.db").exists());
+}
+
+#[test]
+fn v2_config_plan_reports_vector_changes_without_resolving_provider_credentials() {
+    let env = Env::new(&[("guide.md", "vectorplanningwidget")]);
+    env.run_json(&["index"]);
+    fs::write(env.project_config(),
+        "config_version = 2\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'planning-test-model'\ndimensions = 3\n",
+    ).unwrap();
+    let output = env
+        .cmd()
+        .env_remove("OPENROUTER_API_KEY")
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["actions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        plan["actions"][0]["resource"]["value"]["component"],
+        "document_vectors"
+    );
+    assert_eq!(
+        plan["actions"][1]["resource"]["value"]["component"],
+        "project_index"
+    );
+    assert_eq!(
+        plan["actions"][1]["dependencies"][0],
+        plan["actions"][0]["resource"]
+    );
+    assert_eq!(plan["required_grants"], serde_json::json!(["remote"]));
+    assert!(!env.cache().join("vectors.db").exists());
+
+    let root = toml::Value::String(env.root().canonicalize().unwrap().to_str().unwrap().into());
+    fs::write(env.global_config(), format!(
+        "config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {root} }}\n"
+    )).unwrap();
+    let blocked = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(blocked.status.code(), Some(5));
+    let report: Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(report["actions"], serde_json::json!([]));
+    assert_eq!(report["blockers"][0]["code"], "invalid_settings");
+}
+
+#[test]
+fn v2_config_plan_leaves_registry_recovery_to_the_owner() {
+    let env = Env::new(&[("guide.md", "recoveryplanningwidget")]);
+    env.run_json(&["index"]);
+    let recovery = env.cache().join("registry.db-journal");
+    fs::write(&recovery, b"unsettled fixture").unwrap();
+    let output = env
+        .cmd()
+        .args(["config", "plan", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["observation_failure"], "recovery_required");
+    assert_eq!(report["actions"], serde_json::json!([]));
+    assert_eq!(fs::read(recovery).unwrap(), b"unsettled fixture");
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn v2_first_index_reports_non_unicode_filename_and_publishes_other_files() {
     use std::os::unix::ffi::OsStrExt as _;

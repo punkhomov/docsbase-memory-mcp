@@ -576,6 +576,52 @@ fn catalog_watcher_retries_while_full_preparation_owns_the_active_base() {
 
 #[test]
 #[cfg(unix)]
+fn project_recipe_observation_accepts_an_original_schema_1_seal() {
+    let pair = RevisablePair::new();
+    pair.use_schema_1();
+    let generation = pair.generation;
+    let index = inspect_revisable_recipe(pair);
+    assert_eq!(index.index.generation_id, Some(generation));
+    assert!(index.recipes.unwrap().full_survey);
+}
+
+#[test]
+#[cfg(unix)]
+fn project_recipe_observation_rejects_subset_evidence_for_an_initial_seal() {
+    let pair = RevisablePair::new();
+    let metadata = Connection::open(pair.dir().join("metadata.db")).unwrap();
+    metadata.execute_batch(
+        "UPDATE projects SET index_outcome_json = json_set(index_outcome_json, '$.scope', 'subset');"
+    ).unwrap();
+    drop(metadata);
+    let generation = pair.generation;
+    let index = inspect_revisable_recipe(pair);
+    assert_eq!(index.index.generation_id, Some(generation));
+    assert!(index.recipes.is_none());
+}
+
+#[cfg(unix)]
+fn inspect_revisable_recipe(
+    pair: RevisablePair,
+) -> crate::store::registry_inspect::SelectedIndexEvidence {
+    let cache = pair.env.cache.path().canonicalize().unwrap();
+    let root = pair.project.canonical_root.clone();
+    let policy = pair.policy.clone();
+    drop(pair.registry);
+    let registry = Connection::open(cache.join(DB_FILE)).unwrap();
+    registry
+        .execute_batch("PRAGMA journal_mode=DELETE;")
+        .unwrap();
+    drop(registry);
+    crate::store::registry_inspect::inspect_project_recipes(&cache, &root, &policy, limits())
+        .unwrap()
+        .unwrap()
+        .selected
+        .unwrap()
+}
+
+#[test]
+#[cfg(unix)]
 fn catalog_reads_incremental_revision_after_schema_1_upgrade() {
     let pair = RevisablePair::new();
     let directory = pair.dir();

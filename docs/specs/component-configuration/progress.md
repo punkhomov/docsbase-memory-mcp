@@ -2125,3 +2125,20 @@ quality gate. Lean offline, all-target Clippy, Windows GNU cross-Clippy, and
 formatting passed locally. On a synthetic 10,000-file Linux corpus, debug Index took
 1.72 s for the first build and 0.28–0.30 s on three unchanged runs, each
 skipping 10,000 files and retaining generation 1.
+
+## 2026-11-27 — CF4, план изменения выбранной пары v5
+
+Task CF4 stopped v5 project plan: complete (local implementation, fresh review
+and fix review). Native PR checks remain pending.
+
+Ruling: `config plan [PATH] [--check]` compares the resolved Markdown and
+embedding recipes with the selected pair in a stopped v5 catalog. Its plan
+identity includes observed sources, project and cache paths, and the catalog
+epoch, head and revision. The report distinguishes a required replacement
+from blocked observation and identifies possible remote work without starting
+a provider. Query-only changes keep the pair. Tests compare project and
+cache files byte for byte and cover valid older lexical seals. Active runtime,
+the standalone ANN graph and plan application remain separate work.
+
+Rust 1.100.0 Linux cli-full passed 1,941 tests. Lean offline, all-target
+Clippy, Windows GNU cross-Clippy and formatting passed locally.

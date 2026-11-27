@@ -21,7 +21,8 @@ use crate::store::generation_catalog::{self, Head, Layout};
 use crate::store::generation_seal::{GenerationSeal, SEAL_FORMAT};
 use crate::store::models::ProjectStatus;
 use crate::store::project_index::{
-    LOCAL_SCHEMA_VERSION, ProjectIndex, SEALED_LOCAL_SCHEMA_VERSION, project_directory,
+    LOCAL_SCHEMA_VERSION, ProjectIndex, SEALED_LOCAL_SCHEMA_VERSION, matches_local_outcome,
+    project_directory,
 };
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{migrations, repo};
@@ -61,6 +62,95 @@ pub enum ProjectIndexObservation {
     Unavailable(Why),
     /// The selected metadata and Tantivy components opened under one lease.
     Present(ObservedProjectIndex),
+}
+
+pub(crate) struct SelectedIndexEvidence {
+    pub(crate) index: ObservedProjectIndex,
+    pub(crate) seal: Option<[u8; 32]>,
+    pub(crate) recipes: Option<IndexRecipeEvidence>,
+}
+
+pub(crate) struct IndexRecipeEvidence {
+    pub(crate) lexical: String,
+    pub(crate) embedding: Option<crate::vector_cache::EmbeddingRecipe>,
+    pub(crate) full_survey: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct ProjectRecipeInspection {
+    pub(crate) schema_version: Option<u32>,
+    pub(crate) epoch: Option<[u8; 16]>,
+    pub(crate) project_id: Option<i64>,
+    pub(crate) selected: Option<SelectedIndexEvidence>,
+}
+
+pub(crate) fn inspect_project_recipes(
+    cache: &Path,
+    root: &Path,
+    settings: &Resolved<DbSettings>,
+    limits: InspectionLimits,
+) -> Result<Observed<ProjectRecipeInspection>> {
+    let initial_bytes = validate(cache, limits)?;
+    DbSpec::validate(settings.settings(), &Capabilities::current())?;
+    let root = root
+        .to_str()
+        .filter(|root| !root.as_bytes().contains(&0))
+        .ok_or_else(|| crate::error::Error::Admission {
+            message: "project root is not lossless UTF-8".into(),
+        })?;
+    let Some(initial_bytes) = initial_bytes.checked_add(root.len()) else {
+        return Ok(Err(Why::LimitExceeded));
+    };
+    if initial_bytes > limits.max_metadata_bytes {
+        return Ok(Err(Why::LimitExceeded));
+    }
+    Ok(presence(cache).and_then(|present| {
+        if !present {
+            return Ok(ProjectRecipeInspection::default());
+        }
+        with_registry(
+            cache,
+            limits,
+            || {},
+            |registry, canonical_cache| {
+                use rusqlite::OptionalExtension as _;
+                let schema = require_registry_version(registry)?;
+                let epoch = (schema == generation_catalog::SCHEMA_VERSION)
+                    .then(|| generation_catalog::read_epoch(registry))
+                    .transpose()?;
+                let project = registry
+                    .query_row(
+                        "SELECT id FROM projects WHERE canonical_root=?1",
+                        [root],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_failure)?;
+                let selected = project
+                    .map(|project| {
+                        if project <= 0 {
+                            return Err(Why::InvalidRegistry);
+                        }
+                        observe_project_evidence(
+                            registry,
+                            canonical_cache,
+                            project,
+                            limits,
+                            initial_bytes,
+                            Some(root),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                Ok(ProjectRecipeInspection {
+                    schema_version: Some(schema),
+                    epoch,
+                    project_id: project,
+                    selected,
+                })
+            },
+        )
+    }))
 }
 
 /// Checks the selected pair from a quiescent registry without creating files.
@@ -105,13 +195,19 @@ pub(in crate::store) fn observe_project(
     limits: InspectionLimits,
     initial_bytes: usize,
 ) -> Observed<Option<ObservedProjectIndex>> {
-    let version = schema_version(registry)?;
-    if !matches!(
-        version,
-        migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
-    ) {
-        return Err(Why::UnsupportedSchema);
-    }
+    observe_project_evidence(registry, cache, project_id, limits, initial_bytes, None)
+        .map(|evidence| evidence.map(|evidence| evidence.index))
+}
+
+fn observe_project_evidence(
+    registry: &Connection,
+    cache: &Path,
+    project_id: i64,
+    limits: InspectionLimits,
+    initial_bytes: usize,
+    recipe_root: Option<&str>,
+) -> Observed<Option<SelectedIndexEvidence>> {
+    let version = require_registry_version(registry)?;
     let registered: bool = registry
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
@@ -137,22 +233,39 @@ pub(in crate::store) fn observe_project(
         return Ok(None);
     }
     check_directory(&project)?;
-    with_read_lease(&project.join(".writer.lock"), || match catalog {
-        None => observe_legacy(registry, cache, project_id, None).map(Some),
-        Some((epoch, head)) => {
-            let index = match head.layout {
+    with_read_lease(&project.join(".writer.lock"), || {
+        let index = match catalog {
+            None => observe_legacy(registry, cache, project_id, None)?,
+            Some((epoch, head)) => match head.layout {
                 Layout::Legacy => {
                     with_read_lease(&project.join(".legacy-generation.lock"), || {
                         observe_legacy(registry, cache, project_id, Some((epoch, head.id)))
                     })?
                 }
                 Layout::Local { seal_digest } => {
-                    observe_local(&project, epoch, &head, seal_digest, limits)?
+                    return observe_local(&project, epoch, &head, seal_digest, limits, recipe_root)
+                        .map(Some);
                 }
-            };
-            Ok(Some(index))
-        }
+            },
+        };
+        Ok(Some(SelectedIndexEvidence {
+            index,
+            seal: None,
+            recipes: None,
+        }))
     })
+}
+
+fn require_registry_version(registry: &Connection) -> Observed<u32> {
+    let version = schema_version(registry)?;
+    if matches!(
+        version,
+        migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
+    ) {
+        Ok(version)
+    } else {
+        Err(Why::UnsupportedSchema)
+    }
 }
 
 pub(in crate::store) fn check_identity_budget(
@@ -216,7 +329,8 @@ fn observe_local(
     head: &Head,
     seal_digest: [u8; 32],
     limits: InspectionLimits,
-) -> Observed<ObservedProjectIndex> {
+    recipe_root: Option<&str>,
+) -> Observed<SelectedIndexEvidence> {
     let generation = project.join("generations").join(head.id.to_string());
     check_directory(&generation)?;
     with_read_lease(&generation.join(".read.lock"), || {
@@ -232,13 +346,16 @@ fn observe_local(
                 let revision = local_revision(metadata, head.project_id, head.id)?;
                 let project_id = head.project_id;
                 let generation_id = head.id;
+                let seal: Option<GenerationSeal> = (recipe_root.is_some()
+                    || revision.schema != SEALED_LOCAL_SCHEMA_VERSION)
+                    .then(|| serde_json::from_slice(&seal))
+                    .transpose()
+                    .map_err(|_| Why::InvalidRegistry)?;
                 check_pair(metadata, project_id, &generation.join("tantivy"), |dir| {
-                    if revision.schema == SEALED_LOCAL_SCHEMA_VERSION {
+                    let Some(seal) = &seal else {
                         return check_tantivy_files(dir, None);
-                    }
-                    let seal: GenerationSeal =
-                        serde_json::from_slice(&seal).map_err(|_| Why::InvalidRegistry)?;
-                    if !revision.matches_seal(&seal, epoch, project_id, generation_id) {
+                    };
+                    if !revision.matches_seal(seal, epoch, project_id, generation_id) {
                         return Err(Why::InvalidRegistry);
                     }
                     if legacy_revision(metadata, project_id)? != Some(revision.content_revision) {
@@ -249,12 +366,31 @@ fn observe_local(
                         None => check_tantivy_files(dir, Some(&seal.files)),
                     }
                 })?;
-                Ok(ObservedProjectIndex {
+                let index = ObservedProjectIndex {
                     project_id,
                     epoch: Some(epoch),
                     generation_id: Some(generation_id),
                     content_revision: revision.content_revision,
                     layout: ProjectIndexLayout::Local,
+                };
+                let recipes = if let Some((seal, root)) = seal.zip(recipe_root) {
+                    crate::index::outcome::read_in(metadata, project_id)
+                        .map_err(|_| Why::Io)?
+                        .filter(|outcome| {
+                            matches_local_outcome(outcome, Some(root), revision, &seal)
+                        })
+                        .map(|outcome| IndexRecipeEvidence {
+                            lexical: seal.index_recipe,
+                            embedding: seal.embedding_recipe,
+                            full_survey: outcome.is_complete(),
+                        })
+                } else {
+                    None
+                };
+                Ok(SelectedIndexEvidence {
+                    index,
+                    seal: Some(seal_digest),
+                    recipes,
                 })
             },
         )

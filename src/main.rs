@@ -3,7 +3,7 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err:#}");
-            std::process::ExitCode::FAILURE
+            std::process::ExitCode::from(docsbase_memory::cli::error_exit_code(&err))
         }
     }
 }

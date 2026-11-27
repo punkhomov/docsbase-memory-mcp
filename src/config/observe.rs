@@ -11,8 +11,10 @@ use crate::error::Result;
 use crate::store::registry_inspect::{self, InspectionLimits, RegistryObservation, RegistryState};
 use crate::store::settings::DbSettings;
 
+mod project;
 mod source;
 mod view;
+pub(crate) use project::project_plan;
 use source::{Captured, SourceState};
 pub use view::MigrationPlan;
 

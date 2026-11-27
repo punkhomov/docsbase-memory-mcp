@@ -715,6 +715,39 @@ The library can also render an explicitly supplied CF3 preview with its v2
 budget key and scope.
 
 
+## Project configuration plan
+
+```sh
+docsbase config plan
+docsbase config plan ./project --check
+```
+
+The command compares the current v2 sources with the lexical and embedding
+recipes of the selected project generation in a stopped v5 catalog. Changing
+chunk size or the embedding model can require replacing the generation.
+Query-only settings such as `lexical.long_chunk_penalty` leave the recipe intact.
+The preview covers lexical and embedding artifacts. It reports the latest
+recorded coverage through `full_survey`. Markdown freshness, vector cache
+coverage, active daemon settings, and ANN graph settings require separate
+observations.
+
+The JSON report includes the bounded action graph and a `plan_id` bound to
+the observed sources, installation and generation. A document-vector action
+prepares any missing entries using the new recipe. Existing entries with
+compatible keys remain reusable. The `remote` grant marks possible provider
+usage at application time. The preview reads existing files without starting
+the daemon, loading models, or contacting providers. For an unavailable registry
+it reports `observation_failure`, and an existing legacy pair without recipe
+evidence produces an `unsupported_identity` blocker. Invalid effective settings,
+including hybrid stages in a Website project, produce `invalid_settings`.
+Source and catalog observations capture their identities at the time of each read.
+
+By default a completed report exits with code 0. With `--check`, exit code 3
+means that the configuration requires replacing the selected generation,
+5 means the check could not establish the relevant facts, and 0 means the
+observed state requires no replacement. A missing index is a first build.
+Use the explicit `index` command to publish a generation from current settings.
+
 ## Observed migration plan (CF4c2)
 
 ```sh

@@ -10,6 +10,17 @@ pub enum ConfigCommand {
         #[arg(long, value_enum, default_value = "json")]
         format: ViewFormat,
     },
+    /// Show which configured changes require replacing the selected project index.
+    Plan {
+        /// Project directory. Defaults to the current directory.
+        path: Option<std::path::PathBuf>,
+        /// Return 3 for a required change and 5 when observation was blocked.
+        #[arg(long)]
+        check: bool,
+        /// Versioned output format.
+        #[arg(long, value_enum, default_value = "json")]
+        format: ViewFormat,
+    },
     /// Preview migration from actual registered sources; never writes or applies.
     Migrate {
         /// Target configuration version (currently 2 only).
@@ -33,11 +44,56 @@ pub enum ViewFormat {
     Json,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum CheckStatus {
+    #[error("configuration changes require replacing the project index")]
+    Required,
+    #[error("configuration plan could not confirm the selected project state")]
+    Unavailable,
+}
+
+impl CheckStatus {
+    pub(super) const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Required => 3,
+            Self::Unavailable => 5,
+        }
+    }
+}
+
 pub(super) fn run(
     command: &ConfigCommand,
     db: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
     match command {
+        ConfigCommand::Plan {
+            path,
+            check,
+            format: ViewFormat::Json,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let config = cwd.join(crate::config::paths::config_dir()?);
+            let cache = cwd.join(crate::config::paths::cache_dir()?);
+            let path = path
+                .as_ref()
+                .map_or_else(|| cwd.clone(), |path| cwd.join(path));
+            let root = crate::daemon::registry::project_root_for(&path, &cache)?;
+            let limits = crate::config::observe::PlanningLimits::standard();
+            let report = crate::config::observe::project_plan(&config, &cache, &root, db, limits)?;
+            let encoded = serde_json::to_string(&report)?;
+            anyhow::ensure!(
+                encoded.len() <= limits.max_output_bytes,
+                "configuration plan exceeds the output limit"
+            );
+            println!("{encoded}");
+            if *check && !report.plan.body.actions.is_empty() {
+                return Err(CheckStatus::Required.into());
+            }
+            if *check && !report.plan.body.blockers.is_empty() {
+                return Err(CheckStatus::Unavailable.into());
+            }
+            Ok(())
+        }
         ConfigCommand::Migrate {
             to: _,
             format: ViewFormat::Json,

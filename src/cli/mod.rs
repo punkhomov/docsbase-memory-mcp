@@ -318,6 +318,15 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
+/// Process status for a CLI error. A completed configuration check can return
+/// a distinct status after writing its machine-readable report to stdout.
+#[must_use]
+pub fn error_exit_code(error: &anyhow::Error) -> u8 {
+    error
+        .downcast_ref::<config::CheckStatus>()
+        .map_or(1, config::CheckStatus::exit_code)
+}
+
 fn serve(
     detached: bool,
     grace_ms: Option<u64>,
