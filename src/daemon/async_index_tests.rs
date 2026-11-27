@@ -850,7 +850,9 @@ fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
         let cache = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let doc = root.path().join("watch.md");
+        // Directly submitted events use the same canonical root as the native watcher.
+        let root_path = root.path().canonicalize().unwrap();
+        let doc = root_path.join("watch.md");
         std::fs::write(&doc, "oldwatchproofwidget").unwrap();
         let shared = open_v5_index_shared(cache.path(), config_dir.path(), "config_version = 2\n");
         shared.activate_jobs(service).unwrap();
@@ -866,9 +868,8 @@ fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
         let source = shared.vector_source_for(project.id, &config);
         let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(config, stages, source));
         std::fs::write(&doc, "newwatchproofwidget").unwrap();
-        let (_events, mut receiver) = tokio::sync::mpsc::channel(1);
         let operation = shared.watch_operation().unwrap();
-        let paths = crate::watch::merge_pending(&shared.payload_budget, None, Some(vec![doc]), &mut receiver, &operation, &shared.watchers).unwrap();
+        let paths = catalog_test_watch_paths(&shared, doc, &operation);
         provider.invalid_on.store(2, Ordering::SeqCst);
         let watch = || {
             let shared = shared.clone();
@@ -901,7 +902,7 @@ fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
         assert_eq!(selected_catalog_hits(&shared, &project, "newwatchproofwidget"), 1);
         assert_eq!(watch().await.unwrap().unwrap().docs, 0);
         assert_eq!(catalog_diagnostics(&shared, session).await["index_generation"], after["index_generation"]);
-        let duplicate = root.path().join("duplicate.md");
+        let duplicate = root_path.join("duplicate.md");
         std::fs::write(&duplicate, "newwatchproofwidget").unwrap();
         let operation = shared.watch_operation().unwrap();
         let duplicate = catalog_test_watch_paths(&shared, duplicate, &operation);
@@ -928,8 +929,9 @@ fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
         let cache = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let guide = root.path().join("guide.md");
-        let removed = root.path().join("remove.md");
+        let root_path = root.path().canonicalize().unwrap();
+        let guide = root_path.join("guide.md");
+        let removed = root_path.join("remove.md");
         std::fs::write(&guide, "oldcapacitywatchwidget").unwrap();
         std::fs::write(&removed, "retiredcapacitywatchwidget").unwrap();
         let shared = open_v5_index_shared(
@@ -2632,59 +2634,52 @@ fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
         invalid_on: AtomicUsize::new(0),
     });
     let shared = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let policy = shared.global_config.daemon.clone();
-    let mut jobs = crate::daemon::job_service::JobRoot::new(&policy);
-    let service = jobs.service();
-    jobs.run(&runtime, async {
-        shared.activate_jobs(service).unwrap();
+    run_catalog_daemon(&shared, async {
         assert_configured_catalog_hybrid_routes(
             &shared,
             project.path(),
             &file,
             &wire,
-            policy.drain_poll_ms,
+            shared.global_config.daemon.drain_poll_ms,
         )
         .await;
-        Ok(())
-    })
-    .unwrap();
+    });
     drop(shared);
 
     let matching = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
-    let mut jobs = crate::daemon::job_service::JobRoot::new(&policy);
-    let service = jobs.service();
-    jobs.run(&runtime, async {
-        matching.activate_jobs(service).unwrap();
+    run_catalog_daemon(&matching, async {
         let project = registry::resolve_by_cwd(&matching.db(), project.path()).unwrap();
         assert!(matching.watchers.watching(project.id));
         assert_catalog_registration_refills_only_vectors(&matching, &project, &wire).await;
         assert_catalog_refill_rejects_a_late_vector(&matching, &project, &file, &wire).await;
-        Ok(())
-    })
-    .unwrap();
+    });
     drop(matching);
 
     let restarted = open_configured_remote_catalog(cache.path(), config.path(), &wire, 4);
-    let mut jobs = crate::daemon::job_service::JobRoot::new(&policy);
-    let service = jobs.service();
-    jobs.run(&runtime, async {
-        restarted.activate_jobs(service).unwrap();
+    run_catalog_daemon(&restarted, async {
         assert_catalog_reopen_requires_matching_seal(&restarted, project.path(), &wire).await;
-        Ok(())
-    })
-    .unwrap();
+    });
     drop(restarted);
 
     let lexical = open_v2_index_shared(cache.path(), config.path());
-    let mut jobs = crate::daemon::job_service::JobRoot::new(&policy);
+    run_catalog_daemon(&lexical, async {
+        assert_disabled_catalog_model_requires_a_lexical_pair(&lexical, project.path()).await;
+    });
+}
+
+#[cfg(unix)]
+fn run_catalog_daemon(shared: &Arc<Shared>, work: impl std::future::Future<Output = ()>) {
+    // Match the production lifetime: each daemon owns its runtime. Dropping
+    // it retires idle cancelled consumers that can still own vector leases.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(&shared.global_config.daemon);
     let service = jobs.service();
     jobs.run(&runtime, async {
-        lexical.activate_jobs(service).unwrap();
-        assert_disabled_catalog_model_requires_a_lexical_pair(&lexical, project.path()).await;
+        shared.activate_jobs(service)?;
+        work.await;
         Ok(())
     })
     .unwrap();

@@ -2060,3 +2060,13 @@ under pressure. Stopped status and list read the selected v5 pair.
 Ruling: Rust 1.100.0 Linux cli-full (including unchanged search gates), lean
 offline, all-target and opt-in Clippy, formatting, vendor integrity, Cargo age
 and CI observer checks passed locally. Native PR checks follow this commit.
+
+Task CF11d native acceptance fixture corrections: complete (PR #209).
+Ruling: Linux CI exposed a retained vector lease when the fixture reused
+one async runtime across restarts. Isolated pressure tests reproduced
+9 failures in 20 runs. Each incarnation now owns its runtime as in the
+daemon entry point, and 20/20 pressure runs passed. macOS CI exposed two
+synthetic events written under a temporary path alias. Both tests failed
+under an aliased TMPDIR on Linux and passed after using the same canonical
+paths as native delivery. Fresh fix review, all-target Clippy, formatting
+and the Linux cli-full suite passed. The corrections affect fixtures.
