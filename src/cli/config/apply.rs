@@ -33,6 +33,17 @@ pub(super) fn run(
     allow_remote: bool,
     settings: &Resolved<DbSettings>,
 ) -> anyhow::Result<()> {
+    println!("{}", execute(paths, plan_id, allow_remote, settings, None)?);
+    Ok(())
+}
+
+pub(super) fn execute(
+    paths: ProjectPaths,
+    plan_id: &str,
+    allow_remote: bool,
+    settings: &Resolved<DbSettings>,
+    profile: Option<&crate::daemon::settings::DaemonProfile>,
+) -> anyhow::Result<serde_json::Value> {
     let started = Instant::now();
     let limits = PlanningLimits::standard();
     let ProjectPaths {
@@ -40,20 +51,18 @@ pub(super) fn run(
         cache,
         root,
     } = paths;
-    let preview = observe::project_plan(&config, &cache, &root, settings, limits)?;
+    let preview =
+        observe::project_plan_for_profile(&config, &cache, &root, settings, limits, profile)?;
     authorize(preview.plan, plan_id, allow_remote)?;
     if preview.replacement.is_none() {
-        println!(
-            "{}",
-            serde_json::json!({"plan_id": plan_id, "applied": false})
-        );
-        return Ok(());
+        return Ok(serde_json::json!({"plan_id": plan_id, "applied": false}));
     }
 
     // Keep the daemon out until all native work retires. Direct Index can
     // still race this command and is serialized by the catalog project leases.
     let _admission = acquire_stopped(&cache)?;
-    let current = observe::project_plan(&config, &cache, &root, settings, limits)?;
+    let current =
+        observe::project_plan_for_profile(&config, &cache, &root, settings, limits, profile)?;
     authorize(current.plan, plan_id, allow_remote)?;
     let replacement = current.replacement.ok_or(CheckStatus::Stale)?;
     let reviewed = replacement.reviewed;
@@ -127,11 +136,7 @@ pub(super) fn run(
         cancelled.0 = None;
         Ok(stats)
     })?;
-    println!(
-        "{}",
-        serde_json::json!({"plan_id": plan_id, "applied": true, "project_id": id, "stats": stats})
-    );
-    Ok(())
+    Ok(serde_json::json!({"plan_id": plan_id, "applied": true, "project_id": id, "stats": stats}))
 }
 
 fn acquire_stopped(cache: &Path) -> anyhow::Result<admission::Lease> {

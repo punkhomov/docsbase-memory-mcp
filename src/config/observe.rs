@@ -16,9 +16,44 @@ mod source;
 mod view;
 pub(crate) use project::{
     ActiveProjectConfig, AnnObservation, ReviewedReplacement, live_project_plan, project_plan,
+    project_plan_for_profile,
 };
 use source::{Captured, SourceState};
 pub use view::MigrationPlan;
+
+pub(crate) fn verify_source_expectations(
+    sources: &std::collections::BTreeMap<SourceId, ExpectedState>,
+    limits: PlanningLimits,
+) -> bool {
+    sources.iter().all(|(source_id, expected)| {
+        let mut bytes_left = limits.max_source_bytes;
+        let current = source::capture(source_id.clone(), &mut bytes_left);
+        source_matches(&current.observation.state, expected)
+    })
+}
+
+pub(crate) fn verified_project_config(
+    global: &Resolved<super::Config>,
+    source_id: SourceId,
+    expected: &ExpectedState,
+) -> Result<Option<super::Config>> {
+    let mut bytes_left = PlanningLimits::standard().max_source_bytes;
+    let current = source::capture(source_id, &mut bytes_left);
+    if !source_matches(&current.observation.state, expected) {
+        return Ok(None);
+    }
+    super::resolve::for_observed_project(global, current.layer.as_ref()).map(Some)
+}
+
+fn source_matches(state: &SourceState, expected: &ExpectedState) -> bool {
+    match (state, expected) {
+        (SourceState::Missing, ExpectedState::Missing) => true,
+        (SourceState::Loaded { precondition, .. }, ExpectedState::KnownIdentity(expected)) => {
+            precondition == expected
+        }
+        _ => false,
+    }
+}
 
 /// Explicit policy owned by migration planning, not by search/runtime consumers.
 #[derive(Debug, Clone, Copy)]

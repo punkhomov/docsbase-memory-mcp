@@ -89,7 +89,6 @@ pub struct Shared {
     catalog_epoch: Option<[u8; 16]>,
     /// Cache root being served.
     pub cache: PathBuf,
-    db: Mutex<Db>,
     // Independent of the DB mutex: child construction never waits for a query
     // just to obtain its startup policy.
     db_settings: Resolved<DbSettings>,
@@ -119,10 +118,14 @@ pub struct Shared {
     /// Fingerprint of the global config file at daemon start (OQ-6).
     global_config_stamp: ConfigStamp,
     global_config_path: Option<PathBuf>,
+    invalidation: crate::config::policy::PolicyContext,
     /// Per-project config/stage slots; the map lock only protects lookup.
     project_states: Mutex<HashMap<i64, ProjectSlot>>,
     /// Dense candidate cache keyed by project and index generation (FR-16).
     pub dense: DenseCache,
+    // Close after the prepared readers so SQLite's last handle can clean up
+    // WAL sidecars. A final read-only connection cannot perform that cleanup.
+    db: Mutex<Db>,
 }
 
 type ProjectSlot = Arc<ProjectCell>;
@@ -404,6 +407,7 @@ fn prepare_metadata_store(
     pool_settings: &Resolved<ReadPoolSettings>,
     observed_epoch: Option<[u8; 16]>,
     initialize_catalog: bool,
+    launch: &LaunchConfig,
 ) -> Result<(Db, ReadPool, Option<[u8; 16]>)> {
     let db = if let Some(epoch) = observed_epoch {
         crate::store::generation_build::open_index_registry(cache, settings, epoch)?
@@ -412,6 +416,7 @@ fn prepare_metadata_store(
     } else {
         Db::open_with_settings(cache, settings)?
     };
+    launch.recheck_startup(Some(&db))?;
     // The writer chooses the schema under SQLite admission. A direct Index
     // may have initialized the cache after the launch observation.
     let catalog_epoch = db
@@ -590,13 +595,17 @@ impl Shared {
             pool_settings.settings(),
             &Capabilities::current(),
         )?;
-        let global_config = launch.config.into_settings();
+        // Admission has already observed the stopped registry. Its native
+        // SQLite reader can leave WAL sidecars, so compare logical registry
+        // identity on the startup writer after opening it.
+        launch.verify_startup_sources()?;
         let ann_policy = if website.is_some() {
             AnnPolicy::Disabled
         } else {
             AnnPolicy::BuildOrLoad
         };
-        let dense = DenseCache::for_config(ann_policy, cache, dense_settings, &global_config)?;
+        let dense =
+            DenseCache::for_config(ann_policy, cache, dense_settings, launch.config.settings())?;
         let (db, readers, catalog_epoch) = prepare_metadata_store(
             cache,
             settings,
@@ -604,8 +613,12 @@ impl Shared {
             catalog_epoch,
             // Library compatibility constructors can serve without a JobRoot.
             // Their in-place Index writer still requires a legacy registry.
-            owners.is_some() && website.is_none() && global_config.vector_store.is_some(),
+            owners.is_some()
+                && website.is_none()
+                && launch.config.settings().vector_store.is_some(),
+            &launch,
         )?;
+        let global_config = launch.config.into_settings();
         let readers = Arc::new(readers);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
@@ -659,6 +672,7 @@ impl Shared {
             global_config_error: launch.error,
             global_config_stamp: launch.stamp,
             global_config_path: launch.path,
+            invalidation: launch.invalidation,
             project_states: Mutex::new(project_states),
             dense,
         });
@@ -1398,6 +1412,14 @@ impl Shared {
         project: &crate::store::models::Project,
         operation: Option<crate::search::operation::SearchOperation>,
     ) -> Result<()> {
+        if matches!(
+            self.invalidation,
+            crate::config::policy::PolicyContext::Managed(_)
+        ) {
+            // The startup receipt permits only its reviewed work. Opening a
+            // project does not authorize a new embedding job for its vectors.
+            return Ok(());
+        }
         let operation = match operation {
             Some(operation) => operation,
             None => self.watch_operation()?,
@@ -1815,7 +1837,7 @@ impl Shared {
                     .cloned(),
             )
         };
-        if let Some(current) = current
+        let (config, stages) = if let Some(current) = current
             && (current == desired
                 || (shared_catalog
                     && catalog_requires_index(&current, &desired)
@@ -1824,13 +1846,31 @@ impl Shared {
                         project,
                         &crate::index::outcome::recipe_id(&desired),
                         configured_catalog_embedding(&desired),
-                    )?))
-        {
+                    )?)) {
             // Opens retain the active recipe until explicit Index can
             // publish the required pair together with the new settings.
-            return Ok((current, stages));
+            (current, stages)
+        } else {
+            (desired, None)
+        };
+        if shared_catalog
+            && matches!(
+                self.invalidation,
+                crate::config::policy::PolicyContext::Managed(_)
+            )
+            && crate::store::project_index::catalog_needs_index_for(
+                self.readers.try_acquire()?,
+                project,
+                &crate::index::outcome::recipe_id(&config),
+                configured_catalog_embedding(&config),
+            )?
+        {
+            return Err(Error::Admission {
+                message: "published index does not match the project settings; run docsbase index"
+                    .into(),
+            });
         }
-        Ok((desired, None))
+        Ok((config, stages))
     }
 
     fn publish_project_config<F, O>(

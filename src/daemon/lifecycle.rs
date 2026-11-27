@@ -82,9 +82,18 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    crate::daemon::launch::require_shared_without_daemon(
+    let launch = crate::daemon::launch::require_shared_without_daemon(
         crate::config::resolve::LaunchUse::Runtime,
     )?;
+    if let Err(error) = crate::daemon::launch::preflight::autostart(cache, &launch) {
+        if is_running(cache) {
+            return Ok(());
+        }
+        if admission_lock_held(cache) {
+            return wait_for_daemon(cache, START_TIMEOUT);
+        }
+        return Err(error);
+    }
     create_state_dir(cache)?;
     let lock_file = open_lock_file(&start_lock_path(cache))?;
     let mut lock = RwLock::new(lock_file);
@@ -272,21 +281,7 @@ pub fn run_daemon_with_launch_and_bootstrap(
 }
 
 // The existing CLI retains its documented warning/default startup adapter.
-pub(crate) fn run_daemon_from_launch(
-    cache: &Path,
-    snapshot: &LaunchSnapshot,
-    patch: DaemonPatch,
-    detached: bool,
-) -> Result<()> {
-    let launch = snapshot.legacy(patch)?;
-    if detached
-        && matches!(
-            launch.config.settings().daemon.profile,
-            crate::daemon::settings::DaemonProfile::Website { .. }
-        )
-    {
-        return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() });
-    }
+pub(crate) fn run_daemon_from_launch(cache: &Path, launch: LaunchConfig) -> Result<()> {
     let settings = crate::store::settings::db_from_config(&launch.config)?;
     let pool = crate::store::settings::pool_from_config(&launch.config)?;
     let dense = launch.config.settings().dense.clone();

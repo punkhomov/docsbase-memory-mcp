@@ -302,6 +302,60 @@ impl Db {
         })
     }
 
+    /// Finish SQLite-only recovery before a new daemon observes the catalog.
+    /// Caller holds stopped daemon admission. Existing registry only.
+    pub(crate) fn recover_catalog_for_startup(
+        cache: &Path,
+        settings: &Resolved<DbSettings>,
+    ) -> Result<()> {
+        use rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE;
+
+        let cache = cache.canonicalize().map_err(|error| {
+            Error::internal_with_source("resolve registry cache before startup recovery", error)
+        })?;
+        check_catalog_database_paths(&cache)?;
+        let path = cache.join(DB_FILE);
+        let conn = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|error| sql_error(&path, error))?;
+        // The effective schema can be in WAL. Before qualifying that schema,
+        // even closing the last connection must leave its committed frames.
+        conn.set_db_config(SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .map_err(|error| sql_error(&path, error))?;
+        conn.busy_timeout(settings.settings().write_busy_timeout)
+            .map_err(|error| sql_error(&path, error))?;
+        match migrations::read_version(&conn)? {
+            GENERATION_SCHEMA_VERSION => {
+                generation_build::admit_catalog_cache(&cache)?;
+                generation_catalog::read_epoch(&conn).map_err(|reason| Error::Admission {
+                    message: format!(
+                        "invalid generation catalog during startup recovery ({reason:?})"
+                    ),
+                })?;
+            }
+            // A legacy first commit can also live entirely in WAL.
+            1..=migrations::SCHEMA_VERSION => {}
+            _ => {
+                return Err(Error::Admission {
+                    message: "registry changed before startup recovery".into(),
+                });
+            }
+        }
+        let busy: u32 = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+            .map_err(|error| sql_error(&path, error))?;
+        if busy != 0 {
+            return Err(Error::Admission {
+                message: "registry is busy during startup recovery; retry".into(),
+            });
+        }
+        conn.set_db_config(SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
+            .map_err(|error| sql_error(&path, error))?;
+        conn.close().map_err(|(_, error)| sql_error(&path, error))
+    }
+
     pub(crate) fn close(self) -> Result<()> {
         self.conn
             .close()
@@ -566,6 +620,78 @@ mod tests {
                 .is_err()
         );
         assert!(!cache.path().join("logs").exists());
+    }
+
+    #[test]
+    fn startup_recovers_the_first_catalog_commit_from_wal() {
+        check_first_commit_recovery(RegistryOpen::FreshCatalog, GENERATION_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn startup_preserves_the_legacy_layout_when_the_first_commit_is_in_wal() {
+        check_first_commit_recovery(RegistryOpen::Legacy, migrations::SCHEMA_VERSION);
+    }
+
+    fn check_first_commit_recovery(mode: RegistryOpen, expected_version: u32) {
+        let source = tempfile::tempdir().unwrap();
+        let writer = Connection::open(source.path().join(DB_FILE)).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        let catalog = migrations::migrate_registry(&writer, mode, || Ok(())).unwrap();
+        let epoch = catalog.then(|| generation_catalog::read_epoch(&writer).unwrap());
+        let stopped = copy_uncheckpointed_registry(source.path());
+        assert_eq!(
+            &std::fs::read(stopped.path().join(DB_FILE)).unwrap()[60..64],
+            &0_u32.to_be_bytes()
+        );
+        assert!(registry_inspect::startup_catalog_requires_recovery(
+            stopped.path()
+        ));
+        Db::recover_catalog_for_startup(stopped.path(), &settings::standalone().unwrap()).unwrap();
+        assert!(!stopped.path().join("registry.db-wal").exists());
+        let observer = Connection::open(stopped.path().join(DB_FILE)).unwrap();
+        assert_eq!(
+            migrations::read_version(&observer).unwrap(),
+            expected_version
+        );
+        if let Some(epoch) = epoch {
+            assert_eq!(generation_catalog::read_epoch(&observer).unwrap(), epoch);
+        }
+    }
+
+    fn copy_uncheckpointed_registry(source: &Path) -> tempfile::TempDir {
+        let stopped = tempfile::tempdir().unwrap();
+        for name in [DB_FILE, "registry.db-wal"] {
+            std::fs::copy(source.join(name), stopped.path().join(name)).unwrap();
+        }
+        stopped
+    }
+
+    #[test]
+    fn rejected_startup_recovery_does_not_checkpoint_on_close() {
+        let source = tempfile::tempdir().unwrap();
+        let writer = Connection::open(source.path().join(DB_FILE)).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        writer
+            .pragma_update(None, "user_version", GENERATION_SCHEMA_VERSION + 1)
+            .unwrap();
+        let stopped = copy_uncheckpointed_registry(source.path());
+        let registry = || {
+            [DB_FILE, "registry.db-wal"].map(|name| {
+                std::fs::read(stopped.path().join(name))
+                    .ok()
+                    .map(|bytes| blake3::hash(&bytes))
+            })
+        };
+        let before = registry();
+        assert!(matches!(
+            Db::recover_catalog_for_startup(stopped.path(), &settings::standalone().unwrap()),
+            Err(Error::Admission { .. })
+        ));
+        assert_eq!(registry(), before);
     }
 
     #[test]

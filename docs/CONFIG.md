@@ -794,6 +794,43 @@ In live mode `--check` returns 3 for a reported change or restart and 5 when
 observation is blocked. Live plans describe proposed effects. Stop the daemon
 and generate a fresh stopped plan for `config apply`.
 
+### Start after configuration changes
+
+```sh
+docsbase serve --on-invalidation fail
+docsbase serve --on-invalidation prompt
+docsbase serve --on-invalidation apply --allow-remote
+```
+
+Before startup, v5 Shared checks the registered projects. Website checks its
+fixed project. First startup and a restart with compatible recipes need no
+approval. A foreground terminal defaults to `prompt`. A noninteractive
+launch, including MCP autostart, defaults to `fail`.
+
+`fail` exits with code 3 when a replacement is required. `prompt` displays the
+plans and asks for consent before starting the service. A required prompt
+without a terminal exits with code 5. `apply` accepts reviewed local replacements.
+Remote embedding requires `--allow-remote` or separate interactive consent.
+All approvals are collected before the first replacement. Each project is
+published independently, so a later execution failure can leave earlier
+approved replacements complete. Rerun the preview to review the remaining work.
+A stale plan exits with code 4 and an unavailable plan or missing consent uses
+code 5.
+
+On an ordinary restart after interruption, the startup command can
+checkpoint already committed SQLite transactions under stopped-daemon
+admission before it checks the configuration. This can change the registry
+file and remove its recovery sidecars even when the configuration then
+requires a replacement and startup refuses. Recovery preserves published
+generations and does not build indexes, open vector storage or call providers.
+Explicit policies and dry-run planning report unsettled state without
+changing SQLite.
+
+The remote grant covers the reviewed startup work. Opening an indexed project
+on a managed daemon leaves vector repair to an explicit Index or Sync.
+Older catalog formats retain their ordinary startup when no policy flag is
+passed. Existing indexes require a v5 catalog for an explicit startup review.
+
 ## Observed migration plan (CF4c2)
 
 ```sh
@@ -1101,8 +1138,8 @@ partial until a complete survey succeeds. A watcher retry can rebuild a
 generation left pending by a failed commit. With embeddings enabled, the watcher
 prepares vectors before applying edits. After enabling or disabling
 embeddings or changing the embedding recipe, run `docsbase index` to
-publish a matching generation. Opening an indexed project can refill
-missing vectors without rewriting the index. The coverage counter reports
+publish a matching generation. In a managed daemon, explicit Sync repairs
+missing vectors without requiring a configuration migration. The coverage counter reports
 persisted cache keys. Search and refill also validate the vector payload.
 Stopped `docsbase status` and `docsbase list` report the selected generation's
 metadata.

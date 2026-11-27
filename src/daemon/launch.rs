@@ -9,6 +9,8 @@ use crate::config::{Config, paths};
 use crate::daemon::settings::DaemonPatch;
 use crate::error::{Error, Result};
 
+pub(crate) mod preflight;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ConfigStamp {
     Missing,
@@ -35,6 +37,8 @@ pub(crate) struct LaunchConfig {
     pub path: Option<PathBuf>,
     pub stamp: ConfigStamp,
     pub error: Option<String>,
+    pub invalidation: crate::config::policy::PolicyContext,
+    pub startup: Option<preflight::StartupExpectations>,
 }
 /// Existing fixed identity and pure project policy, captured before startup resources.
 pub(crate) struct FixedProject {
@@ -70,13 +74,50 @@ pub(crate) fn lexical_only(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn website_project(
+    db: &crate::store::Db,
+    root: &Path,
+) -> Result<Option<crate::store::models::Project>> {
+    let normalized = crate::platform::paths::normalize_for_compare(root);
+    Ok(crate::daemon::registry::list_projects(db)?
+        .into_iter()
+        .find(|project| {
+            crate::platform::paths::normalize_for_compare(&project.canonical_root) == normalized
+        }))
+}
+
 impl LaunchConfig {
+    pub(crate) fn verify_startup_sources(&self) -> Result<()> {
+        if self
+            .startup
+            .as_ref()
+            .is_some_and(|expected| !expected.verify_sources(self))
+        {
+            return Err(Error::StartupPlanStale);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn recheck_startup(&self, db: Option<&crate::store::Db>) -> Result<()> {
+        if let Some(expected) = &self.startup {
+            let current = match db {
+                Some(db) => expected.verify_opened(self, db)?,
+                None => expected.verify(self)?,
+            };
+            if !current {
+                return Err(Error::StartupPlanStale);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit(
         self,
         cache: &Path,
         settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     ) -> Result<AdmittedLaunch> {
         self.config.settings().validate()?;
+        self.recheck_startup(None)?;
         let mut catalog_epoch = None;
         let website = match &self.config.settings().daemon.profile {
             crate::daemon::settings::DaemonProfile::Shared => {
@@ -111,16 +152,13 @@ impl LaunchConfig {
                             "website requires an existing registered indexed project: {error}"
                         ),
                     })?;
-                let project = crate::daemon::registry::list_projects(&db)?
-                    .into_iter()
-                    .find(|project| {
-                        crate::platform::paths::normalize_for_compare(&project.canonical_root)
-                            == crate::platform::paths::normalize_for_compare(&root)
-                    })
-                    .ok_or_else(|| Error::Admission {
-                        message: "website root must match an existing registered project"
-                            .to_owned(),
-                    })?;
+                let project = match &self.startup {
+                    Some(expected) => expected.fixed_project(&db, &root)?,
+                    None => website_project(&db, &root)?,
+                }
+                .ok_or_else(|| Error::Admission {
+                    message: "website root must match an existing registered project".to_owned(),
+                })?;
                 if db.has_generation_catalog() {
                     crate::store::generation_build::admit_catalog_cache(cache)?;
                     catalog_epoch = Some(db.generation_epoch()?);
@@ -134,8 +172,27 @@ impl LaunchConfig {
                         message: "website project must already be indexed".to_owned(),
                     });
                 }
-                let config = Config::for_project(self.config.settings(), &project.canonical_root)?;
+                let config = match &self.startup {
+                    Some(expected) => expected.fixed_config(&self, &project.canonical_root)?,
+                    None => Config::for_project(self.config.settings(), &project.canonical_root)?,
+                };
                 lexical_only(&config)?;
+                if catalog_epoch.is_some()
+                    && matches!(
+                        self.invalidation,
+                        crate::config::policy::PolicyContext::Managed(_)
+                    )
+                    && crate::store::project_index::catalog_needs_index_for(
+                        &db,
+                        &project,
+                        &crate::index::outcome::recipe_id(&config),
+                        None,
+                    )?
+                {
+                    return Err(Error::Admission {
+                        message: "published Website index does not match the project settings; run docsbase index".into(),
+                    });
+                }
                 Some(FixedProject {
                     project,
                     config: std::sync::Arc::new(config),
@@ -216,6 +273,8 @@ impl LaunchSnapshot {
             path: self.path.clone(),
             stamp: self.stamp(),
             error: None,
+            invalidation: crate::config::policy::PolicyContext::Legacy,
+            startup: None,
         })
     }
 
@@ -229,6 +288,8 @@ impl LaunchSnapshot {
                 path: self.path.clone(),
                 stamp: self.stamp(),
                 error: None,
+                invalidation: crate::config::policy::PolicyContext::Legacy,
+                startup: None,
             })
         } else {
             self.legacy(patch)
@@ -248,6 +309,8 @@ impl LaunchSnapshot {
                 path: self.path.clone(),
                 stamp: self.stamp(),
                 error: None,
+                invalidation: crate::config::policy::PolicyContext::Legacy,
+                startup: None,
             }),
             Err(
                 LaunchFailure::Daemon(error)
@@ -270,6 +333,8 @@ impl LaunchSnapshot {
                     path: self.path.clone(),
                     stamp: self.stamp(),
                     error: Some(error.to_string()),
+                    invalidation: crate::config::policy::PolicyContext::Legacy,
+                    startup: None,
                 })
             }
         }
@@ -308,7 +373,7 @@ pub(crate) fn website_unavailable() -> Error {
     Error::Admission { message: "website daemon unavailable; start it in the foreground with `docsbase serve` (or `docsbase serve --project ABS`)".to_owned() }
 }
 
-pub(crate) fn require_shared_without_daemon(launch_use: LaunchUse) -> Result<()> {
+pub(crate) fn require_shared_without_daemon(launch_use: LaunchUse) -> Result<LaunchConfig> {
     let launch = LaunchSnapshot::capture().legacy_for(DaemonPatch::default(), launch_use)?;
     if matches!(
         launch.config.settings().daemon.profile,
@@ -316,7 +381,7 @@ pub(crate) fn require_shared_without_daemon(launch_use: LaunchUse) -> Result<()>
     ) {
         return Err(website_unavailable());
     }
-    Ok(())
+    Ok(launch)
 }
 
 pub(crate) fn restart_notice(path: Option<&Path>, baseline: &ConfigStamp) -> Option<String> {

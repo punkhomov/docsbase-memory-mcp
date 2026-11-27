@@ -109,6 +109,73 @@ pub fn inspect_registry(
     inspect_with(cache, settings, limits, || {}, |_| {})
 }
 
+/// Identify legacy storage before applying the bounded v5 inventory policy.
+/// The compatibility opener owns linked v4 registries. A legacy header is
+/// only a layout hint and never attests to WAL contents or index readiness.
+pub(crate) fn has_legacy_startup_layout(cache: &Path) -> bool {
+    startup_schema_version(cache)
+        .is_some_and(|version| (1..=super::migrations::SCHEMA_VERSION).contains(&version))
+}
+
+pub(crate) fn startup_catalog_requires_recovery(cache: &Path) -> bool {
+    let path = cache.join(super::DB_FILE);
+    std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file())
+        && sidecars_absent(&path) == Err(UnavailableReason::RecoveryRequired)
+        && match startup_schema_version(cache) {
+            Some(generation_catalog::SCHEMA_VERSION) => true,
+            // The first catalog commit can be entirely in WAL. A zero
+            // main-file version is only a candidate for operational recovery.
+            Some(0) => std::fs::symlink_metadata(cache.join(format!("{}-wal", super::DB_FILE)))
+                .is_ok_and(|metadata| metadata.is_file()),
+            _ => false,
+        }
+}
+
+fn startup_schema_version(cache: &Path) -> Option<u32> {
+    let path = cache.join(super::DB_FILE);
+    let target = path.canonicalize().ok()?;
+    let locked = lease::LockedConnection::open(&target, || {}).ok()?;
+    let header = locked.header().ok()?;
+    let version = u32::from_be_bytes([header[60], header[61], header[62], header[63]]);
+    (&header[..16] == b"SQLite format 3\0"
+        && locked.check_namespace().is_ok()
+        && path.canonicalize().is_ok_and(|current| current == target))
+    .then_some(version)
+}
+
+pub(crate) fn inspect_startup_project(
+    cache: &Path,
+    root: &Path,
+    limits: InspectionLimits,
+) -> Result<RegistryState> {
+    let initial_bytes = validate(cache, limits)?;
+    let state = match presence(cache) {
+        Ok(false) => return Ok(RegistryState::Missing),
+        Err(reason) => return Ok(RegistryState::Unavailable(reason)),
+        Ok(true) => with_registry(
+            cache,
+            limits,
+            || {},
+            |connection, _| read_registry(connection, cache, Some(root), limits, initial_bytes),
+        ),
+    };
+    Ok(state.unwrap_or_else(RegistryState::Unavailable))
+}
+
+pub(crate) fn inspect_open_startup_registry(
+    connection: &Connection,
+    cache: &Path,
+    root: Option<&Path>,
+    limits: InspectionLimits,
+) -> Result<RegistryState> {
+    let initial_bytes = validate(cache, limits)?;
+    let txn = connection
+        .unchecked_transaction()
+        .map_err(super::repo::db_error)?;
+    Ok(read_registry(&txn, cache, root, limits, initial_bytes)
+        .unwrap_or_else(RegistryState::Unavailable))
+}
+
 fn inspect_with(
     cache: &Path,
     settings: &Resolved<DbSettings>,
@@ -181,24 +248,108 @@ fn capture(
 ) -> std::result::Result<RegistryState, UnavailableReason> {
     with_registry(cache, limits, before_lock, |connection, _| {
         after_lock(connection);
-        let version = schema_version(connection)?;
-        if !matches!(
-            version,
-            super::migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
-        ) {
-            return Err(UnavailableReason::UnsupportedSchema);
-        }
-        let projects = read_rows(connection, limits, initial_bytes)?;
-        let catalog = (version == generation_catalog::SCHEMA_VERSION)
-            .then(|| generation_catalog::identity(connection, &projects))
-            .transpose()?;
-        let revision = revision(cache, version, &projects, catalog)?;
-        Ok(RegistryState::Ready {
-            schema_version: version,
-            revision,
-            projects,
-        })
+        read_registry(connection, cache, None, limits, initial_bytes)
     })
+}
+
+fn read_registry(
+    connection: &Connection,
+    cache: &Path,
+    fixed: Option<&Path>,
+    limits: InspectionLimits,
+    initial_bytes: usize,
+) -> std::result::Result<RegistryState, UnavailableReason> {
+    let version = schema_version(connection)?;
+    if !matches!(
+        version,
+        super::migrations::SCHEMA_VERSION | generation_catalog::SCHEMA_VERSION
+    ) {
+        return Err(UnavailableReason::UnsupportedSchema);
+    }
+    let projects = match fixed {
+        Some(root) => read_fixed_row(connection, root, limits, initial_bytes)?,
+        None => read_rows(connection, limits, initial_bytes)?,
+    };
+    let catalog = (version == generation_catalog::SCHEMA_VERSION)
+        .then(|| match fixed {
+            Some(_) => {
+                generation_catalog::project_identity(connection, projects.first().map(|p| p.id))
+            }
+            None => generation_catalog::identity(connection, &projects),
+        })
+        .transpose()?;
+    Ok(RegistryState::Ready {
+        schema_version: version,
+        revision: revision(cache, version, &projects, catalog)?,
+        projects,
+    })
+}
+
+fn read_fixed_row(
+    connection: &Connection,
+    root: &Path,
+    limits: InspectionLimits,
+    initial_bytes: usize,
+) -> std::result::Result<Vec<RegistryProject>, UnavailableReason> {
+    use rusqlite::OptionalExtension as _;
+    let value = root.to_str().ok_or(UnavailableReason::InvalidRegistry)?;
+    let id: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM projects WHERE canonical_root=?1",
+            [value],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite_failure)?;
+    let project = if let Some(id) = id {
+        Some(RegistryProject {
+            id,
+            root: root.to_owned(),
+        })
+    } else if cfg!(any(windows, target_os = "macos")) {
+        find_normalized_root(connection, root)?
+    } else {
+        None
+    };
+    let Some(project) = project else {
+        return Ok(Vec::new());
+    };
+    if project.id <= 0 {
+        return Err(UnavailableReason::InvalidRegistry);
+    }
+    if initial_bytes
+        .checked_add(8)
+        .and_then(|bytes| bytes.checked_add(project.root.as_os_str().len()))
+        .is_none_or(|bytes| bytes > limits.max_metadata_bytes)
+    {
+        return Err(UnavailableReason::LimitExceeded);
+    }
+    Ok(vec![project])
+}
+
+// Only a miss on the indexed exact lookup needs to consider case and slash
+// variants. Preserve the stored spelling used by the project's recipe reads.
+fn find_normalized_root(
+    connection: &Connection,
+    root: &Path,
+) -> std::result::Result<Option<RegistryProject>, UnavailableReason> {
+    let key = crate::platform::paths::normalize_for_compare(root);
+    let mut statement = connection
+        .prepare("SELECT id, canonical_root FROM projects ORDER BY id")
+        .map_err(sqlite_failure)?;
+    let mut rows = statement.query([]).map_err(sqlite_failure)?;
+    while let Some(row) = rows.next().map_err(sqlite_failure)? {
+        let value = row.get_ref(1).map_err(sqlite_failure)?;
+        if let Ok(value) = value.as_str()
+            && crate::platform::paths::normalize_for_compare(Path::new(value)) == key
+        {
+            return Ok(Some(RegistryProject {
+                id: row.get(0).map_err(sqlite_failure)?,
+                root: PathBuf::from(value),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn with_registry<T>(

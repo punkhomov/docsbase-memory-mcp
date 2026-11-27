@@ -653,6 +653,7 @@ impl SharedFailure {
 
     fn into_error(self) -> Error {
         match self.0.as_ref() {
+            Error::StartupPlanStale => Error::StartupPlanStale,
             Error::Admission { message } => Error::Admission {
                 message: message.clone(),
             },

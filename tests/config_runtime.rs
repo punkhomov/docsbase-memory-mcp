@@ -1289,6 +1289,259 @@ fn v2_config_apply_refuses_remote_work_before_vector_or_provider_setup() {
 }
 
 #[test]
+fn v2_startup_policy_refuses_or_applies_a_required_local_replacement() {
+    let mut env = Env::new(&[("guide.md", "startupreplacementwidget")]);
+    env.run_json(&["index"]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let plan = env.run_json(&["config", "plan"]);
+    let serve = |options: &[&str]| {
+        env.cmd()
+            .args(["serve", "--grace-ms", "1"])
+            .args(options)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    for (options, code) in [
+        (&["--on-invalidation", "fail"][..], 3),
+        (&["--detached"][..], 3),
+        (&["--on-invalidation", "prompt"][..], 5),
+    ] {
+        let output = serve(options);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(env.run_json(&["config", "plan"]), plan);
+        assert!(!env.cache().join("state").exists());
+    }
+    env.daemon = Some(
+        env.cmd()
+            .args(["serve", "--on-invalidation", "apply"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_until(Duration::from_secs(10), || platform::exists(
+        &platform::daemon_endpoint(env.cache())
+    )));
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    assert_eq!(
+        search(&mut client, "startupreplacementwidget"),
+        vec!["guide.md"]
+    );
+    stop_daemon(env.cache()).unwrap();
+    assert!(env.daemon.take().unwrap().wait().unwrap().success());
+    assert_eq!(
+        env.run_json(&["config", "plan", "--check"])["actions"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_startup_checks_all_project_grants_before_any_replacement() {
+    let env = Env::new(&[("guide.md", "localstartupwidget")]);
+    env.run_json(&["index"]);
+    let remote = tempfile::tempdir().unwrap();
+    fs::write(remote.path().join("guide.md"), "remotestartupwidget").unwrap();
+    env.run_json(&["index", remote.path().to_str().unwrap()]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    fs::write(
+        remote.path().join(".docsbase.toml"),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    ).unwrap();
+    let before = env.run_json(&["config", "plan"]);
+    let output = env
+        .cmd()
+        .env_remove("OPENROUTER_API_KEY")
+        .args(["serve", "--grace-ms", "1", "--on-invalidation", "apply"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-remote"));
+    assert_eq!(env.run_json(&["config", "plan"]), before);
+    assert!(!env.cache().join("vectors.db").exists());
+    assert!(!env.cache().join("state").exists());
+}
+
+#[test]
+fn v2_startup_uses_the_cli_profile_override_for_planning_and_apply() {
+    let env = Env::new(&[("guide.md", "fixedprofilestartupwidget")]);
+    env.run_json(&["index"]);
+    let second = tempfile::tempdir().unwrap();
+    let other = second.path().join("manuals");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join("guide.md"), "sharedprofilestartupwidget").unwrap();
+    env.run_json(&["index", other.to_str().unwrap()]);
+    let fixed = toml::Value::String(env.root().canonicalize().unwrap().to_str().unwrap().into());
+    fs::write(
+        env.global_config(),
+        format!("config_version=2\n[daemon]\nprofile={{mode='website',project_root={fixed}}}\n"),
+    )
+    .unwrap();
+    fs::write(
+        other.join(".docsbase.toml"),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let detached = env
+        .cmd()
+        .args([
+            "serve",
+            "--detached",
+            "--project",
+            other.to_str().unwrap(),
+            "--on-invalidation",
+            "apply",
+        ])
+        .output()
+        .unwrap();
+    assert!(!detached.status.success());
+    assert!(String::from_utf8_lossy(&detached.stderr).contains("--detached is inapplicable"));
+    let renamed = second.path().join("Manuals");
+    let intermediate = second.path().join("case-change");
+    let selected = if cfg!(any(windows, target_os = "macos")) {
+        fs::rename(&other, &intermediate).unwrap();
+        fs::rename(&intermediate, &renamed).unwrap();
+        if other.is_dir() {
+            &renamed
+        } else {
+            fs::rename(&renamed, &other).unwrap();
+            &other
+        }
+    } else {
+        &other
+    };
+    let mut fixed = env
+        .cmd()
+        .args([
+            "serve",
+            "--project",
+            selected.to_str().unwrap(),
+            "--on-invalidation",
+            "fail",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    if !wait_until(Duration::from_secs(10), || {
+        fixed.try_wait().unwrap().is_some()
+    }) {
+        let _ = fixed.kill();
+    }
+    let fixed_override = fixed.wait_with_output().unwrap();
+    assert_eq!(
+        fixed_override.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&fixed_override.stderr)
+    );
+    if selected == &renamed {
+        fs::rename(&renamed, &intermediate).unwrap();
+        fs::rename(&intermediate, &other).unwrap();
+    }
+    let applied = env
+        .cmd()
+        .args([
+            "serve",
+            "--grace-ms",
+            "1",
+            "--profile",
+            "shared",
+            "--on-invalidation",
+            "apply",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    fs::remove_file(env.global_config()).unwrap();
+    let plan = env.run_json(&["config", "plan", other.to_str().unwrap(), "--check"]);
+    assert_eq!(plan["actions"], serde_json::json!([]));
+}
+
+#[test]
+fn v2_startup_recovers_an_interrupted_registry_before_considering_replacements() {
+    let mut env = Env::new(&[("guide.md", "registryrecoverywidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let job = {
+        let conn = rusqlite::Connection::open(env.cache().join("registry.db")).unwrap();
+        conn.execute(
+            "INSERT INTO sync_jobs (project_id,state,started_at) VALUES (1,'queued',0)",
+            [],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let mut daemon = env.daemon.take().unwrap();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    let main = env.cache().join("registry.db");
+    let wal = env.cache().join("registry.db-wal");
+    let before = (fs::read(&main).unwrap(), fs::read(&wal).unwrap());
+    let edited = env.root().join(".docsbase.toml");
+    fs::write(
+        &edited,
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let explicit = env
+        .cmd()
+        .args(["serve", "--grace-ms", "1", "--on-invalidation", "fail"])
+        .output()
+        .unwrap();
+    assert_eq!(explicit.status.code(), Some(5));
+    assert_eq!((fs::read(&main).unwrap(), fs::read(&wal).unwrap()), before);
+    let automatic = env
+        .cmd()
+        .args(["serve", "--grace-ms", "1"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        automatic.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&automatic.stderr)
+    );
+    assert!(!wal.exists());
+    assert!(!env.cache().join("vectors.db").exists());
+    fs::remove_file(edited).unwrap();
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake_registry().unwrap();
+    let status = client
+        .call_tool("sync_status", serde_json::json!({"job_id":job}))
+        .unwrap();
+    assert_eq!(status["state"], "error");
+    assert_eq!(status["stats"]["orphaned"], true);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn v2_first_index_reports_non_unicode_filename_and_publishes_other_files() {
     use std::os::unix::ffi::OsStrExt as _;

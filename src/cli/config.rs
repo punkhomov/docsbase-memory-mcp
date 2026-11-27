@@ -3,6 +3,8 @@ use clap::{Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 mod apply;
+pub(super) mod startup;
+pub use startup::StartupOptions;
 
 /// Optional commands under the legacy `config` command.
 #[derive(Debug, Subcommand)]
@@ -73,6 +75,10 @@ pub(super) enum CheckStatus {
     MissingGrants,
     #[error("live configuration plan requires a running v5 daemon")]
     DaemonUnavailable,
+    #[error("configuration changes require consent from an interactive terminal")]
+    PromptUnavailable,
+    #[error("startup configuration plan was declined")]
+    Declined,
 }
 
 impl CheckStatus {
@@ -80,7 +86,11 @@ impl CheckStatus {
         match self {
             Self::Required => 3,
             Self::Stale => 4,
-            Self::Unavailable | Self::MissingGrants | Self::DaemonUnavailable => 5,
+            Self::Unavailable
+            | Self::MissingGrants
+            | Self::DaemonUnavailable
+            | Self::PromptUnavailable
+            | Self::Declined => 5,
         }
     }
 }

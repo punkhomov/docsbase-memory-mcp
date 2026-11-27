@@ -2182,3 +2182,34 @@ upstream recipes. A graph absent from memory has unknown disk provenance.
 Rust 1.100.0 Linux cli-full passed 1,948 tests. Lean CLI and offline checks,
 Linux and Windows GNU cross-Clippy, and formatting passed. Startup consent,
 live application and disk-only ANN observation remain subsequent work.
+
+## 2026-11-27 — CF5, политика инвалидации при запуске
+
+Task CF5 startup policy: complete (implementation, local cli-full
+verification and independent review with fix rounds). Native PR checks
+remain pending.
+
+Ruling: the controlling CLI handles fail, prompt and apply before daemon
+startup. It collects consent and grants for all affected projects before
+applying the first reviewed plan. Project plans inherit the selected launch
+profile. The daemon checks the approved source and registry expectations
+before admission and checks them again against its startup writer before
+restoring watchers. A late stale plan exits with code 4.
+
+Ruling: Website limits normal observation to the selected registry row and
+generation. The native comparison preserves existing case-insensitive
+registration behavior. MCP autostart checks for required replacements before
+creating launch files. Managed project opens leave vector repair to Index or
+Sync. Legacy v4 retains its ordinary startup.
+
+Ruling: ordinary interrupted restarts can checkpoint already committed
+registry WAL under daemon admission before deciding whether the config
+requires a replacement. The recovery checks paths and the effective schema.
+It also handles a first commit still in WAL, preserving v4 or v5. Explicit
+policy and dry-run leave interrupted registry files unchanged. Unit tests
+prove that a rejected recovery cannot checkpoint on connection close.
+
+Rust 1.100.0 Linux cli-full passed 1,957 tests and the lean profile passed
+1,616. The search baseline and no-network checks passed. Linux and
+Windows GNU cross-Clippy and formatting passed. Live application, disk-only
+ANN observation and the final component audit remain open.

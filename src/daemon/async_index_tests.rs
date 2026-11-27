@@ -2873,6 +2873,13 @@ fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
     });
     drop(shared);
 
+    assert_managed_launch_leaves_vector_repair_explicit(
+        cache.path(),
+        config.path(),
+        project.path(),
+        &wire,
+    );
+
     let matching = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
     run_catalog_daemon(&matching, async {
         let project = registry::resolve_by_cwd(&matching.db(), project.path()).unwrap();
@@ -2891,6 +2898,46 @@ fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
     let lexical = open_v2_index_shared(cache.path(), config.path());
     run_catalog_daemon(&lexical, async {
         assert_disabled_catalog_model_requires_a_lexical_pair(&lexical, project.path()).await;
+    });
+}
+
+fn assert_managed_launch_leaves_vector_repair_explicit(
+    cache: &Path,
+    config: &Path,
+    root: &Path,
+    wire: &Arc<FactoryWire>,
+) {
+    use crate::config::{
+        bootstrap::EntrypointFacts,
+        policy::{self, PolicyMode},
+    };
+    let mut shared = open_configured_remote_catalog(cache, config, wire, 3);
+    Arc::get_mut(&mut shared).unwrap().invalidation =
+        policy::resolve(PolicyMode::Managed, None, EntrypointFacts::standalone());
+    let malformed = rusqlite::Connection::open(cache.join(crate::vector_cache::VECTOR_DB_FILE))
+        .unwrap()
+        .execute(
+            "UPDATE vector_cache SET dim=1, vector=x'0000807f' WHERE chunk_hash = ?1",
+            [crate::vector_cache::chunk_hash(
+                "latestsharedhybridrevision",
+            )],
+        )
+        .unwrap();
+    assert_eq!(malformed, 1);
+    let calls = wire.calls.load(Ordering::SeqCst);
+    run_catalog_daemon(&shared, async {
+        let (_, binding, _cancel) =
+            register_session_in(&shared, std::process::id(), root, false, None)
+                .await
+                .unwrap();
+        assert_eq!(binding["status"], "indexed");
+        shared
+            .activity
+            .drain(Duration::from_millis(
+                shared.global_config.daemon.drain_poll_ms,
+            ))
+            .await;
+        assert_eq!(wire.calls.load(Ordering::SeqCst), calls);
     });
 }
 

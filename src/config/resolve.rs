@@ -331,6 +331,7 @@ pub(crate) fn resolve_v2_edit(layer: &SourceLayer, global: Option<&Config>) -> R
 pub(super) fn resolve_observed_v2(
     global: Option<&SourceLayer>,
     project: Option<&SourceLayer>,
+    profile: Option<&crate::daemon::settings::DaemonProfile>,
 ) -> Result<Option<(Resolved<Config>, Config)>> {
     let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
     if let Some(layer) = global {
@@ -340,6 +341,18 @@ pub(super) fn resolve_observed_v2(
         resolution.apply_v2_global(layer)?;
     } else {
         resolution.bind_vector_policy(&crate::vector_cache::settings::standalone()?)?;
+    }
+    if let Some(profile) = profile {
+        resolution.apply(
+            &SourceId::Cli,
+            super::GlobalFileConfig {
+                daemon: Some(crate::daemon::settings::DaemonPatch {
+                    profile: Some(profile.clone()),
+                    ..crate::daemon::settings::DaemonPatch::default()
+                }),
+                ..super::GlobalFileConfig::default()
+            },
+        )?;
     }
     resolution.validate()?;
     let website = matches!(
@@ -582,6 +595,24 @@ pub(super) fn for_provided_project(global: &Config, root: &Path) -> Result<Resol
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), global);
     resolution.apply_project(root)?;
     resolution.finish()
+}
+
+pub(super) fn for_observed_project(
+    global: &Resolved<Config>,
+    project: Option<&SourceLayer>,
+) -> Result<Config> {
+    let mut resolution =
+        Resolution::<ConfigSpec>::from_resolved(&DefaultsContext::standalone(), global);
+    if let Some(layer) = project {
+        let max_bytes = global
+            .settings()
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| invalid("observed project requires global v2 configuration"))?
+            .max_bytes;
+        resolution.apply_v2_project(layer, max_bytes)?;
+    }
+    resolution.finish().map(Resolved::into_settings)
 }
 
 /// Resolves caller-supplied versioned sources for offline review only.

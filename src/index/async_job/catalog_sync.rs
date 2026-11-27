@@ -830,13 +830,17 @@ impl CatalogJob {
         let config_dir = &direct.config_dir;
         with_index_config_write_locks(Some(&config_dir.join("config.toml")), root, || {
             operation.check()?;
-            let current = Config::load_from(config_dir, Some(root))?;
+            let current = if direct.reviewed.is_some() {
+                self.context.config.clone()
+            } else {
+                Arc::new(Config::load_from(config_dir, Some(root))?)
+            };
             let current_recipe = current
                 .hybrid_cfg
                 .embedding_model_key()
                 .as_deref()
                 .map(EmbeddingRecipe::for_model);
-            if current != *self.context.config || current_recipe != recipe {
+            if current != self.context.config || current_recipe != recipe {
                 return Err(Error::Admission {
                     message: "project index configuration changed before publication; retry index"
                         .into(),

@@ -73,6 +73,26 @@ fn writer_appearing_after_open_refuses_capture_and_releases_partial_lock() {
     drop(writer.into_inner());
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn fixed_startup_observation_accepts_a_case_variant_of_the_registered_root() {
+    let (cache, project) = fixture();
+    let root = project.path().canonicalize().unwrap();
+    let cache = cache.path().canonicalize().unwrap();
+    let registered = inspect_registry(&cache, &settings::standalone().unwrap(), limits())
+        .unwrap()
+        .state;
+    let RegistryState::Ready { projects, .. } = registered else {
+        panic!("expected the registered project");
+    };
+    let requested = PathBuf::from(root.to_str().unwrap().to_uppercase());
+    assert_ne!(&requested, &projects[0].root);
+    let state = inspect_startup_project(&cache, &requested, limits()).unwrap();
+    assert!(
+        matches!(state, RegistryState::Ready { projects: selected, .. } if selected == projects)
+    );
+}
+
 #[test]
 fn lease_prevents_writes_until_capture_finishes() {
     let (cache, _project) = fixture();

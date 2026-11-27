@@ -523,6 +523,42 @@ fn sync_job_persists_across_restart() {
 }
 
 #[test]
+fn mcp_autostart_refuses_required_v5_replacement_before_launch_files() {
+    let env = Env::new(&[("README.md", DOC)]);
+    let indexed = env
+        .cmd()
+        .env("DOCSBASE_DATA_DIR", env.cache().join("data"))
+        .arg("index")
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    fs::write(
+        env.root().join(".docsbase.toml"),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let registry = env.cache().join("registry.db");
+    let before = fs::read(&registry).unwrap();
+    let mut mcp = Mcp::start(&env);
+    mcp.initialize();
+    let refused = mcp.call_tool(2, "status", json!({}));
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        refused
+            .to_string()
+            .contains("configuration changes require action"),
+        "{refused}"
+    );
+    assert!(!env.cache().join("state").exists());
+    assert!(!env.cache().join("logs").exists());
+    assert_eq!(fs::read(registry).unwrap(), before);
+}
+
+#[test]
 fn orphaned_job_marked_error_on_restart() {
     let mut env = Env::new(&[("README.md", DOC)]);
     env.start_daemon();

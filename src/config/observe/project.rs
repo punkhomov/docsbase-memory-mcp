@@ -11,6 +11,7 @@ use crate::config::change::{
     Observation, PlanLimits, Reason, ResourceId, Target,
 };
 use crate::config::schema::{ArtifactId, Resolved, SourceId};
+use crate::daemon::settings::DaemonProfile;
 use crate::error::Result;
 use crate::store::{
     generation_build::CatalogHead, registry_inspect, registry_inspect::ObservedProjectIndex,
@@ -134,7 +135,18 @@ pub(crate) fn project_plan(
     settings: &Resolved<DbSettings>,
     limits: PlanningLimits,
 ) -> Result<ProjectConfigPlan> {
-    project_plan_using(config_dir, cache, root, limits, None, || {
+    project_plan_for_profile(config_dir, cache, root, settings, limits, None)
+}
+
+pub(crate) fn project_plan_for_profile(
+    config_dir: &Path,
+    cache: &Path,
+    root: &Path,
+    settings: &Resolved<DbSettings>,
+    limits: PlanningLimits,
+    profile: Option<&DaemonProfile>,
+) -> Result<ProjectConfigPlan> {
+    project_plan_using(config_dir, cache, root, limits, None, profile, || {
         registry_inspect::inspect_project_recipes(cache, root, settings, limits.registry)
     })
 }
@@ -147,7 +159,7 @@ pub(crate) fn live_project_plan(
     observed: registry_inspect::ProjectRecipeInspection,
     active: ActiveProjectConfig,
 ) -> Result<ProjectConfigPlan> {
-    project_plan_using(config_dir, cache, root, limits, Some(active), || {
+    project_plan_using(config_dir, cache, root, limits, Some(active), None, || {
         Ok(Ok(observed))
     })
 }
@@ -163,6 +175,7 @@ fn project_plan_using(
     root: &Path,
     limits: PlanningLimits,
     active: Option<ActiveProjectConfig>,
+    profile: Option<&DaemonProfile>,
     inspect: impl FnOnce() -> Result<Inspected>,
 ) -> Result<ProjectConfigPlan> {
     let mut bytes_left = limits.max_source_bytes;
@@ -179,7 +192,7 @@ fn project_plan_using(
         resource: artifact("project_plan_context", None),
         state: ExpectedState::KnownIdentity(change::policy_identity(
             "project-plan-context-v1",
-            &(cache, root),
+            &(cache, root, profile),
         )?),
     });
     for captured in [&global, &project] {
@@ -194,6 +207,7 @@ fn project_plan_using(
         match crate::config::resolve::resolve_observed_v2(
             global.layer.as_ref(),
             project.layer.as_ref(),
+            profile,
         ) {
             Ok(Some((global_config, config))) if permits_project(&config, root) => {
                 match inspect()? {
@@ -244,19 +258,7 @@ fn project_plan_using(
     } else {
         (None, None)
     };
-    let plan = change::compile_for(
-        &[assessment],
-        PlanLimits {
-            max_actions: 5,
-            max_dependencies: 5,
-            max_metadata_bytes: limits.max_output_bytes,
-        },
-        |action| {
-            replacement
-                .as_ref()
-                .is_some_and(|replacement| replacement.supports(action))
-        },
-    )?;
+    let plan = compile_project_plan(assessment, limits, replacement.as_ref())?;
     Ok(ProjectConfigPlan {
         plan,
         full_survey,
@@ -266,6 +268,22 @@ fn project_plan_using(
         ann: active.map(|active| active.ann),
         replacement,
     })
+}
+
+fn compile_project_plan(
+    assessment: Assessment,
+    limits: PlanningLimits,
+    replacement: Option<&ProjectReplacement>,
+) -> Result<ChangePlan> {
+    change::compile_for(
+        &[assessment],
+        PlanLimits {
+            max_actions: 5,
+            max_dependencies: 5,
+            max_metadata_bytes: limits.max_output_bytes,
+        },
+        |action| replacement.is_some_and(|replacement| replacement.supports(action)),
+    )
 }
 
 fn replacement_for(
@@ -504,11 +522,12 @@ fn assess_unavailable_project(
 
 fn permits_project(config: &Config, root: &Path) -> bool {
     use crate::daemon::settings::DaemonProfile;
+    use crate::platform::paths::normalize_for_compare;
     match &config.daemon.profile {
         DaemonProfile::Shared => true,
-        DaemonProfile::Website { project_root } => {
-            project_root.canonicalize().is_ok_and(|fixed| fixed == root)
-        }
+        DaemonProfile::Website { project_root } => project_root
+            .canonicalize()
+            .is_ok_and(|fixed| normalize_for_compare(&fixed) == normalize_for_compare(root)),
     }
 }
 
