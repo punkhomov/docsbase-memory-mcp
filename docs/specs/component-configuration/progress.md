@@ -2436,3 +2436,27 @@ a provider, including empty generations).
 Ruling: Live replacement can retain the exact prior stages if their settings
 are equal. A complete native stopped fixture proves this route with the
 provider credentials absent; a miss keeps the prior pair selected.
+
+## 2026-11-27 — retrieval defaults and operating limits
+
+Task I12/I14: complete (resolved CLI and IPC retrieval defaults and runtime RRF
+candidate window). Real CLI and IPC requests distinguish omitted values from
+explicit zero and none. RRF keeps the reranker's configured window precedence.
+Ruling: request ceilings and artifact recipes are unchanged.
+
+Task I17/I53: complete (owned Sync receipt retention and detached daemon log
+rotation). Native CLI tests cover both registry generations and log rollover.
+Ruling: in-flight jobs and the independent registration conflict log retain
+their contracts.
+
+Task I33/I34: complete (resolved legacy ANN traversal, per-file read cap).
+The cap preserves valid stored files and releases the load reservation when it
+refuses a dump. Legacy v1 migration compares effective traversal.
+Ruling: no rebuild or vector invalidation follows a read cap change.
+
+Task I50: complete (installation-wide bounded config-lock retry policy). A
+resolved custom policy runs against a real contended lock, including retry
+handoff and exhaustion. Canonical alias locking and source rereads remain in
+the publication path.
+Ruling: the bound applies per lock file. Editors can acquire the lock with the
+built-in policy if decoding the policy source fails.

@@ -196,6 +196,7 @@ max_projects = 8
 min_vectors = 4096
 build_backoff = 30000
 max_ann_disk_bytes = 4294967296
+max_ann_read_file_bytes = 2147483648
 ann_keep_generations = 2
 query_cache_max_entries = 256
 query_cache_max_bytes = 4194304
@@ -219,6 +220,11 @@ resident projects, and `min_vectors` controls eligibility for ANN. A zero
 resident capacity permits exact streaming without retaining those rows.
 `min_vectors = 0` permits ANN for any nonempty corpus that fits the other caps.
 `build_backoff = 0` permits retry on the next eligible lookup.
+
+`max_ann_read_file_bytes` caps each persisted HNSW file read. It accepts 1 byte
+through 2 GiB. A compatible dump above the configured cap remains on disk.
+Queries can use exact search while a graph is unavailable. The cap affects
+read admission and leaves vector and graph recipes unchanged.
 
 `ann_keep_generations` must be positive. Retention cleanup keeps the newest
 generations for each project and model, including their different ANN recipes.
@@ -657,29 +663,36 @@ and the widening multiplier must be at least 2.
 Reopen the project to apply project settings in a running daemon. These
 settings apply to queries on the existing indexes and vector cache.
 
-### Document-cap retrieval
+### Retrieval defaults and document-cap search
 
-The v2 global and project configurations accept a positive integer multiplier
-for candidate windows on searches with `dedupe = "path"`.
+The v2 global and project configurations accept these settings.
 
 ```toml
 [retrieval]
+default_limit = 10
+default_dedupe = "none"
+default_n_per_doc = 2
+rrf_candidate_window = 50
 post_filter_overscan = 4
 ```
 
-The default is `4`. A lexical search with a document cap starts with the
-requested limit times this multiplier, up to 1000 candidates. For RRF and
-reranking, the base window is the larger of the requested limit and the
-configured reranker window, up to 1000. If too few candidates fit under the
-document cap to fill the requested limit, refill grows the window by the
-multiplier up to the effective `search.dedupe_max_candidates` ceiling. A
-multiplier of `1` starts lexical search at the requested limit and refills
-by doubling.
+These defaults apply when a CLI or tool request omits the corresponding option.
+The limit accepts 0–1000, the dedupe mode accepts `"none"` or `"path"`, and the
+per-document cap accepts 1–10. Select `"path"` to apply the cap.
 
-Path-prefix and tag restrictions are applied before retrieval. The lexical
-collector has its own window policy under `[lexical]`. A project override takes
-effect when the project is reopened and uses the existing index and vector
-cache. Restart the daemon to pick up a changed global value.
+With a document cap, lexical search starts at the requested limit times
+`post_filter_overscan`, up to 1000 candidates. The hybrid base window is the
+larger of the requested limit and the configured reranker window, up to 1000.
+RRF without a reranker uses `rrf_candidate_window` (1–1000) as its base minimum.
+If too few candidates fit under the document cap, refill grows the window
+by the overscan multiplier up to the effective `search.dedupe_max_candidates`
+ceiling. A multiplier of 1 starts lexical search at the requested limit and
+refills by doubling.
+
+Path-prefix and tag restrictions apply before retrieval. The lexical collector
+has its own window policy under `[lexical]`. Reopen the project to apply its
+overrides and restart the daemon to pick up a changed global value. Searches
+use the existing index and vector cache.
 
 ### Reciprocal rank fusion
 
@@ -1091,7 +1104,8 @@ With an explicit table, the ANN traversal uses the larger of `ef_base` and
 `1 <= ef_base <= ef_max <= 4096` with a positive multiplier. Candidate windows
 above `ef_max` use exact streaming without loading or building a graph for that request. Changing
 these values keeps the existing graph and vectors. A project without an
-explicit or inherited table retains the existing ANN behavior.
+explicit or inherited table resolves to `legacy` and retains the historical
+traversal behavior.
 
 ### ANN construction
 
