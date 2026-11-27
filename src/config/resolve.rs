@@ -331,7 +331,7 @@ pub(crate) fn resolve_v2_edit(layer: &SourceLayer, global: Option<&Config>) -> R
 pub(super) fn resolve_observed_v2(
     global: Option<&SourceLayer>,
     project: Option<&SourceLayer>,
-) -> Result<Option<Config>> {
+) -> Result<Option<(Resolved<Config>, Config)>> {
     let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
     if let Some(layer) = global {
         if layer.version() != super::source::ConfigVersion::V2 {
@@ -349,6 +349,7 @@ pub(super) fn resolve_observed_v2(
     if website {
         crate::daemon::launch::lexical_only(&resolution.settings)?;
     }
+    let global = Resolved::new(resolution.settings.clone(), resolution.origins.clone());
     if let Some(layer) = project {
         let max_bytes = resolution
             .settings
@@ -361,7 +362,9 @@ pub(super) fn resolve_observed_v2(
     if website {
         crate::daemon::launch::lexical_only(&resolution.settings)?;
     }
-    resolution.finish().map(|value| Some(value.into_settings()))
+    resolution
+        .finish()
+        .map(|value| Some((global, value.into_settings())))
 }
 
 /// Loads versioned files while retaining each source’s provenance.

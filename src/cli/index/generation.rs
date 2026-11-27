@@ -136,7 +136,7 @@ impl Target {
         })? {
             return Ok(serde_json::json!({ "project_id": project_id, "stats": stats }));
         }
-        let prepared = job.stage(&mut capture)?;
+        let prepared = job.stage(&mut capture, None)?;
         operation.check()?;
         let stats = prepared.publish(|commit| {
             self.with_current_recipe(&config_dir, &recipe, operation, || {

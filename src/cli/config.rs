@@ -1,5 +1,8 @@
-//! Read-only configuration views; no daemon or provider construction.
+//! Configuration inspection and explicit application of a reviewed plan.
 use clap::{Subcommand, ValueEnum};
+use std::path::{Path, PathBuf};
+
+mod apply;
 
 /// Optional commands under the legacy `config` command.
 #[derive(Debug, Subcommand)]
@@ -20,6 +23,17 @@ pub enum ConfigCommand {
         /// Versioned output format.
         #[arg(long, value_enum, default_value = "json")]
         format: ViewFormat,
+    },
+    /// Apply a reviewed configuration plan to an existing stopped v5 project.
+    Apply {
+        /// Project directory. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Exact ID printed by `config plan`.
+        #[arg(long)]
+        plan_id: String,
+        /// Permit remote embedding requests that may incur costs.
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// Preview migration from actual registered sources; never writes or applies.
     Migrate {
@@ -50,13 +64,18 @@ pub(super) enum CheckStatus {
     Required,
     #[error("configuration plan could not confirm the selected project state")]
     Unavailable,
+    #[error("configuration plan changed; review a new config plan")]
+    Stale,
+    #[error("configuration plan requires --allow-remote to authorize possible embedding costs")]
+    MissingGrants,
 }
 
 impl CheckStatus {
     pub(super) const fn exit_code(&self) -> u8 {
         match self {
             Self::Required => 3,
-            Self::Unavailable => 5,
+            Self::Stale => 4,
+            Self::Unavailable | Self::MissingGrants => 5,
         }
     }
 }
@@ -71,13 +90,11 @@ pub(super) fn run(
             check,
             format: ViewFormat::Json,
         } => {
-            let cwd = std::env::current_dir()?;
-            let config = cwd.join(crate::config::paths::config_dir()?);
-            let cache = cwd.join(crate::config::paths::cache_dir()?);
-            let path = path
-                .as_ref()
-                .map_or_else(|| cwd.clone(), |path| cwd.join(path));
-            let root = crate::daemon::registry::project_root_for(&path, &cache)?;
+            let ProjectPaths {
+                config,
+                cache,
+                root,
+            } = ProjectPaths::resolve(path.as_deref())?;
             let limits = crate::config::observe::PlanningLimits::standard();
             let report = crate::config::observe::project_plan(&config, &cache, &root, db, limits)?;
             let encoded = serde_json::to_string(&report)?;
@@ -86,14 +103,24 @@ pub(super) fn run(
                 "configuration plan exceeds the output limit"
             );
             println!("{encoded}");
-            if *check && !report.plan.body.actions.is_empty() {
-                return Err(CheckStatus::Required.into());
-            }
             if *check && !report.plan.body.blockers.is_empty() {
                 return Err(CheckStatus::Unavailable.into());
             }
+            if *check && !report.plan.body.actions.is_empty() {
+                return Err(CheckStatus::Required.into());
+            }
             Ok(())
         }
+        ConfigCommand::Apply {
+            path,
+            plan_id,
+            allow_remote,
+        } => apply::run(
+            ProjectPaths::resolve(path.as_deref())?,
+            plan_id,
+            *allow_remote,
+            db,
+        ),
         ConfigCommand::Migrate {
             to: _,
             format: ViewFormat::Json,
@@ -135,5 +162,26 @@ pub(super) fn run(
             println!("{}", serde_json::to_string_pretty(&view)?);
             Ok(())
         }
+    }
+}
+
+struct ProjectPaths {
+    config: PathBuf,
+    cache: PathBuf,
+    root: PathBuf,
+}
+
+impl ProjectPaths {
+    fn resolve(path: Option<&Path>) -> anyhow::Result<Self> {
+        let cwd = std::env::current_dir()?;
+        let config = cwd.join(crate::config::paths::config_dir()?);
+        let cache = cwd.join(crate::config::paths::cache_dir()?);
+        let path = path.map_or_else(|| cwd.clone(), |path| cwd.join(path));
+        let root = crate::daemon::registry::project_root_for(&path, &cache)?;
+        Ok(Self {
+            config,
+            cache,
+            root,
+        })
     }
 }

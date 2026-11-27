@@ -63,6 +63,7 @@ impl Env {
         command
             .env("DOCSBASE_CACHE_DIR", self.cache())
             .env("DOCSBASE_CONFIG_DIR", self.cache().join("config"))
+            .env("DOCSBASE_DATA_DIR", self.cache().join("data"))
             .current_dir(self.root());
         command
     }
@@ -958,7 +959,11 @@ fn v2_config_plan_reports_vector_changes_without_resolving_provider_credentials(
         .unwrap();
     assert_eq!(
         output.status.code(),
-        Some(3),
+        Some(if cfg!(feature = "hybrid-remote") {
+            3
+        } else {
+            5
+        }),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -977,6 +982,11 @@ fn v2_config_plan_reports_vector_changes_without_resolving_provider_credentials(
         plan["actions"][0]["resource"]
     );
     assert_eq!(plan["required_grants"], serde_json::json!(["remote"]));
+    if cfg!(feature = "hybrid-remote") {
+        assert_eq!(plan["blockers"], serde_json::json!([]));
+    } else {
+        assert_eq!(plan["blockers"][0]["code"], "executor_unavailable");
+    }
     assert!(!env.cache().join("vectors.db").exists());
 
     let root = toml::Value::String(env.root().canonicalize().unwrap().to_str().unwrap().into());
@@ -1010,6 +1020,108 @@ fn v2_config_plan_leaves_registry_recovery_to_the_owner() {
     assert_eq!(report["observation_failure"], "recovery_required");
     assert_eq!(report["actions"], serde_json::json!([]));
     assert_eq!(fs::read(recovery).unwrap(), b"unsettled fixture");
+}
+
+#[test]
+fn v2_config_apply_requires_the_current_plan_and_publishes_its_replacement() {
+    let env = Env::new(&[("guide.md", "# Guide\n\nreviewedconfigwidget")]);
+    env.run_json(&["index"]);
+    let before = env.run_json(&["config", "plan"]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let requested = env.run_json(&["config", "plan"]);
+    let apply = |plan: &Value| {
+        env.cmd()
+            .args([
+                "config",
+                "apply",
+                "--plan-id",
+                plan["plan_id"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let stale = apply(&before);
+    assert_eq!(
+        stale.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    assert_eq!(env.run_json(&["config", "plan"]), requested);
+    let maintenance = docsbase_memory::daemon::admission::Lease::acquire(
+        env.cache(),
+        &docsbase_memory::ipc::protocol::build_id(),
+        5,
+    )
+    .unwrap();
+    let busy = apply(&requested);
+    assert_eq!(
+        busy.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&busy.stderr)
+    );
+    drop(maintenance);
+    assert_eq!(env.run_json(&["config", "plan"]), requested);
+    let applied = apply(&requested);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let after = env.run_json(&["config", "plan", "--check"]);
+    assert_eq!(after["actions"], serde_json::json!([]));
+    assert_ne!(after["plan_id"], requested["plan_id"]);
+    assert_eq!(apply(&requested).status.code(), Some(4));
+    assert!(
+        apply(&after).status.success(),
+        "a current no-op is accepted"
+    );
+    assert_eq!(env.run_json(&["config", "plan"]), after);
+    // A normal search may start the daemon, so exercise it after the
+    // assertions that require the catalog to be stopped.
+    assert_eq!(
+        env.run_json(&["search", "reviewedconfigwidget"])[0]["path"],
+        "guide.md"
+    );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_config_apply_refuses_remote_work_before_vector_or_provider_setup() {
+    let env = Env::new(&[("guide.md", "grantconfigwidget")]);
+    env.run_json(&["index"]);
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    )
+    .unwrap();
+    let before = env.run_json(&["config", "plan"]);
+    let mut before_files = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut before_files);
+    let output = env
+        .cmd()
+        .env_remove("OPENROUTER_API_KEY")
+        .args([
+            "config",
+            "apply",
+            "--plan-id",
+            before["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(5), "{stderr}");
+    assert!(stderr.contains("--allow-remote"), "{stderr}");
+    assert!(!env.cache().join("vectors.db").exists());
+    let mut after_files = std::collections::BTreeMap::new();
+    snapshot_config_plan_files(env.cache(), &mut after_files);
+    assert_eq!(after_files, before_files);
+    assert_eq!(env.run_json(&["config", "plan"]), before);
 }
 
 #[test]

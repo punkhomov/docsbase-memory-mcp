@@ -14,7 +14,7 @@ use crate::store::settings::DbSettings;
 mod project;
 mod source;
 mod view;
-pub(crate) use project::project_plan;
+pub(crate) use project::{ReviewedReplacement, project_plan};
 use source::{Captured, SourceState};
 pub use view::MigrationPlan;
 

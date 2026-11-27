@@ -19,7 +19,7 @@ pub(super) use project::{
 pub use project::{
     ObservedProjectIndex, ProjectIndexLayout, ProjectIndexObservation, inspect_project_index,
 };
-pub(crate) use project::{SelectedIndexEvidence, inspect_project_recipes};
+pub(crate) use project::{ProjectRecipeInspection, SelectedIndexEvidence, inspect_project_recipes};
 
 /// Caller-owned limits; no runtime fallback/default is chosen by the observer.
 #[derive(Debug, Clone, Copy)]

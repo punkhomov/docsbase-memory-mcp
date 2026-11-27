@@ -740,6 +740,8 @@ the daemon, loading models, or contacting providers. For an unavailable registry
 it reports `observation_failure`, and an existing legacy pair without recipe
 evidence produces an `unsupported_identity` blocker. Invalid effective settings,
 including hybrid stages in a Website project, produce `invalid_settings`.
+An embedding action whose provider is absent from the build produces an
+`executor_unavailable` blocker.
 Source and catalog observations capture their identities at the time of each read.
 
 By default a completed report exits with code 0. With `--check`, exit code 3
@@ -747,6 +749,29 @@ means that the configuration requires replacing the selected generation,
 5 means the check could not establish the relevant facts, and 0 means the
 observed state requires no replacement. A missing index is a first build.
 Use the explicit `index` command to publish a generation from current settings.
+
+### Apply a reviewed plan
+
+```sh
+docsbase config apply ./project --plan-id '<plan_id>'
+docsbase config apply ./project --plan-id '<plan_id>' --allow-remote
+```
+
+Stop the daemon and pass the ID from a fresh `config plan` report. The command
+rechecks the sources and the selected v5 generation, then uses staged indexing
+to prepare and publish a replacement. A current plan with no actions returns
+`"applied": false`. A completed replacement returns `"applied": true` with
+its project ID and indexing statistics.
+
+Exit code 4 means the ID differed at preflight. Exit code 5 means execution
+was blocked by the plan, the daemon had admission, or the plan required
+permission for possible OpenRouter embedding requests.
+`--allow-remote` grants that permission for this invocation. FastEmbed uses
+explicitly provisioned models. If configuration, indexed inputs, or the
+selected generation changes during preparation, the replacement can fail with
+an execution error. The selected generation remains usable on a failed
+preparation. Compatible vectors already fetched during an authorized attempt
+can be reused on retry.
 
 ## Observed migration plan (CF4c2)
 

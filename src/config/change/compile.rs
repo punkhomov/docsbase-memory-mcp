@@ -15,6 +15,16 @@ use crate::error::Result;
 /// Exceeded caller limits, inconsistent observations/actions, missing inputs or
 /// dependency cycles. The borrowed input remains unchanged on every path.
 pub fn compile(assessments: &[Assessment], limits: PlanLimits) -> Result<ChangePlan> {
+    compile_for(assessments, limits, |_| false)
+}
+
+/// Compile for a particular executable route. The route advertises only
+/// action types it can run. Owner blockers and observed facts are preserved.
+pub(crate) fn compile_for(
+    assessments: &[Assessment],
+    limits: PlanLimits,
+    supports: impl Fn(&Action) -> bool,
+) -> Result<ChangePlan> {
     admit_input(assessments, limits)?;
     let mut expected = BTreeMap::new();
     let mut actions: BTreeMap<ResourceId, Action> = BTreeMap::new();
@@ -49,14 +59,16 @@ pub fn compile(assessments: &[Assessment], limits: PlanLimits) -> Result<ChangeP
         canonicalize(&mut action.reasons);
         canonicalize(&mut action.dependencies);
     }
-    for resource in actions.keys() {
-        if !expected.contains_key(resource) {
+    for action in actions.values() {
+        if !expected.contains_key(&action.resource) {
             return Err(invalid("action lacks an explicit observation"));
         }
-        blockers.insert(Blocker {
-            resource: Some(resource.clone()),
-            code: BlockerCode::ExecutorUnavailable,
-        });
+        if !supports(action) {
+            blockers.insert(Blocker {
+                resource: Some(action.resource.clone()),
+                code: BlockerCode::ExecutorUnavailable,
+            });
+        }
     }
     let blocked_resources: BTreeSet<_> = blockers
         .iter()

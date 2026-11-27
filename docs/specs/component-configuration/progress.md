@@ -2142,3 +2142,23 @@ the standalone ANN graph and plan application remain separate work.
 
 Rust 1.100.0 Linux cli-full passed 1,941 tests. Lean offline, all-target
 Clippy, Windows GNU cross-Clippy and formatting passed locally.
+
+## 2026-11-27 — CF5, применение плана в остановленном каталоге v5
+
+Task CF5 stopped v5 project apply: complete (CLI implementation, fresh review
+and fix review). Native PR checks remain pending.
+
+Ruling: `config apply --plan-id` recompiles the plan, refuses blockers and
+requires an explicit remote grant before opening the writer or constructing
+provider stages. A current empty plan returns without writes. The stopped
+lease excludes daemon startup through native retirement. Staged Index owns
+the reviewed base; publication checks its revision and seal and reads the
+exact config sources under the existing publication locks. A comment edit
+during a hermetic OpenRouter request keeps the selected head, and an updated
+plan can reuse that compatible vector. Tests also exercise real lexical
+search, stale plan IDs, busy admission and lean capability blockers.
+
+Rust 1.100.0 Linux cli-full passed 1,944 tests. Targeted lean CLI tests,
+lean offline, Linux and Windows GNU cross-Clippy, and formatting passed
+locally. Preview and apply will ship in one functional PR. Live runtime and ANN
+observation and startup invalidation policy remain subsequent tasks.

@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 mod compile;
 mod path;
 pub use compile::compile;
+pub(crate) use compile::compile_for;
 
 /// Explicit caller-owned limits, checked on raw input and serialized output.
 #[derive(Debug, Clone, Copy)]

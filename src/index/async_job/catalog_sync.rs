@@ -4,8 +4,8 @@ use super::{
     Activity, BatchPacket, Config, IndexState, JobOwner, JobService, PayloadPermit, Project,
     SearchOperation, WorkerAdmission,
 };
-use crate::config::paths::with_index_config_write_locks;
 use crate::config::schema::Resolved;
+use crate::config::{observe::ReviewedReplacement, paths::with_index_config_write_locks};
 use crate::daemon::{
     readiness::SyncAttribution,
     server::{CatalogConfigPublication, CatalogRuntimeProof, ProjectCell, ProjectState},
@@ -36,7 +36,7 @@ use crate::vector_cache::{
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, RwLockReadGuard},
     time::Duration,
 };
@@ -170,7 +170,12 @@ pub(super) struct CatalogJob {
 )]
 enum Publication {
     Sync(SyncPublication),
-    Direct(PathBuf),
+    Direct(DirectPublication),
+}
+
+pub(crate) struct DirectPublication {
+    pub(crate) config_dir: PathBuf,
+    pub(crate) reviewed: Option<ReviewedReplacement>,
 }
 
 struct SyncPublication {
@@ -303,14 +308,14 @@ pub(crate) async fn index_direct(
     operation: &SearchOperation,
     budget: &PayloadBudget,
     context: BuildContext,
-    config_dir: PathBuf,
+    publication: DirectPublication,
 ) -> Result<JobStats> {
     let owner = service
         .admit_with_account(workers.clone(), activity.clone(), operation, budget, None)
         .await?;
     let (owner, started) = service
         .phase(workers, activity.clone(), operation, owner, move |state| {
-            state.catalog_job = Some(CatalogJob::new(context, Publication::Direct(config_dir)));
+            state.catalog_job = Some(CatalogJob::new(context, Publication::Direct(publication)));
             Ok(())
         })
         .await?;
@@ -552,7 +557,20 @@ impl CatalogJob {
             observed: None,
         };
         drop(self.publication.preparation_lease(config)?);
-        let prepared = self.context.generation_job().stage(&mut capture)?;
+        let reviewed = match &self.publication {
+            Publication::Direct(direct) => direct.reviewed.as_ref(),
+            Publication::Sync(_) => None,
+        };
+        if let Some(reviewed) = reviewed {
+            reviewed.verify_sources()?;
+        }
+        let prepared = self
+            .context
+            .generation_job()
+            .stage(&mut capture, reviewed.map(|reviewed| reviewed.base))?;
+        if let Some(reviewed) = reviewed {
+            reviewed.verify_sources()?;
+        }
         if let Some(embedder) = &self.context.stages.embedder {
             if embedder.model_id().len() as u64 > EmbeddingRecipe::MAX_MODEL_BYTES {
                 return Err(Error::Admission {
@@ -749,8 +767,8 @@ impl CatalogJob {
             .as_ref()
             .map(|embedder| EmbeddingRecipe::for_model(embedder.model_id()));
         match &self.publication {
-            Publication::Direct(config_dir) => prepared.publish_with_embedding(recipe, |commit| {
-                self.commit_direct(commit, config_dir, recipe, operation)
+            Publication::Direct(direct) => prepared.publish_with_embedding(recipe, |commit| {
+                self.commit_direct(commit, direct, recipe, operation)
             }),
             Publication::Sync(sync) => {
                 let outcome = prepared.outcome().clone();
@@ -804,11 +822,12 @@ impl CatalogJob {
     fn commit_direct(
         &self,
         commit: LexicalCommit<'_>,
-        config_dir: &Path,
+        direct: &DirectPublication,
         recipe: Option<EmbeddingRecipe>,
         operation: &SearchOperation,
     ) -> Result<ObservedProjectIndex> {
         let root = &self.context.project.canonical_root;
+        let config_dir = &direct.config_dir;
         with_index_config_write_locks(Some(&config_dir.join("config.toml")), root, || {
             operation.check()?;
             let current = Config::load_from(config_dir, Some(root))?;
@@ -824,6 +843,12 @@ impl CatalogJob {
                 });
             }
             let verification = self.vector_verification(|| operation.check())?;
+            let commit = if let Some(reviewed) = &direct.reviewed {
+                reviewed.verify_sources()?;
+                commit.with_reviewed_head(reviewed.head)
+            } else {
+                commit
+            };
             commit.commit_with(
                 || {
                     operation.check()?;
@@ -832,7 +857,13 @@ impl CatalogJob {
                         .transpose()
                 },
                 |_, _| Ok(()),
-                || operation.check(),
+                || {
+                    operation.check()?;
+                    if let Some(reviewed) = &direct.reviewed {
+                        reviewed.verify_sources()?;
+                    }
+                    Ok(())
+                },
                 |_| {},
             )
         })

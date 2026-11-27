@@ -138,14 +138,16 @@ pub struct ConsentReview {
     plan: ChangePlan,
 }
 impl ConsentReview {
+    pub(crate) const fn from_compiled(plan: ChangePlan) -> Self {
+        Self { plan }
+    }
+
     /// Compile a new review; mutable or unvalidated `ChangePlan`s are not inputs.
     ///
     /// # Errors
     /// The existing compiler rejects inconsistent, cyclic or over-limit input.
     pub fn compile(assessments: &[Assessment], limits: PlanLimits) -> Result<Self> {
-        Ok(Self {
-            plan: change::compile(assessments, limits)?,
-        })
+        Ok(Self::from_compiled(change::compile(assessments, limits)?))
     }
     /// Original plan, including every execution and observation blocker.
     #[must_use]

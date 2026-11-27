@@ -553,7 +553,7 @@ impl RevisablePair {
             config: &config,
         };
         rebuild
-            .stage(&mut capture)?
+            .stage(&mut capture, None)?
             .publish(|commit| commit.commit(admit))
     }
 }

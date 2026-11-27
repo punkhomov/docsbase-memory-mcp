@@ -29,11 +29,15 @@ impl GenerationJob<'_> {
     pub(crate) fn stage(
         &self,
         capture: &mut CaptureBudget<'_>,
+        reviewed_base: Option<ObservedProjectIndex>,
     ) -> Result<PreparedLexicalPublication> {
         let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
-        let (base, replacement) =
-            observe_replacement_base(self.cache, project_id, self.epoch, self.settings, limits)?;
+        let (base, replacement) = if let Some(base) = reviewed_base {
+            (Some(base), None)
+        } else {
+            observe_replacement_base(self.cache, project_id, self.epoch, self.settings, limits)?
+        };
         prepare_operational_lexical_generation(
             self.cache,
             OperationalBuild {
