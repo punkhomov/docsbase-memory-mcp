@@ -146,7 +146,7 @@ async fn control<T: Send + 'static>(
 
 pub(super) fn inspection_operation(shared: &Shared) -> Result<SearchOperation> {
     let timeout = Duration::from_millis(shared.daemon_settings().control_timeout_ms)
-        .min(crate::ipc::client::IO_TIMEOUT);
+        .min(shared.global_config.client.ipc_io_timeout());
     SearchOperation::with_timeout(Instant::now(), timeout, Cancellation::new())
 }
 

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::ipc::{
     async_client::{AsyncClient, within_operation},
-    client::{Client, IO_TIMEOUT},
+    client::Client,
     protocol::{self, Request, Response},
 };
 
@@ -201,8 +201,8 @@ pub(super) fn run(
 }
 
 fn live_plan(cache: PathBuf, root: PathBuf, check: bool) -> anyhow::Result<()> {
-    let result = super::with_transport(move |transport| {
-        let mut client = Client::try_connect(&transport, &cache)
+    let result = super::with_transport(move |transport, settings| {
+        let mut client = Client::try_connect_with_settings(&transport, &cache, settings)
             .context(CheckStatus::Unavailable)?
             .ok_or(CheckStatus::DaemonUnavailable)?;
         let response = client
@@ -238,23 +238,24 @@ fn live_apply(
     allow_remote: bool,
     started: Instant,
 ) -> anyhow::Result<()> {
-    let result = super::with_transport(move |transport| {
+    let result = super::with_transport(move |transport, settings| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build live configuration apply runtime")?;
         runtime.block_on(async {
+            let timeout = settings.ipc_io_timeout();
             let mut client =
-                tokio::time::timeout(IO_TIMEOUT, AsyncClient::connect(&transport, &cache))
+                tokio::time::timeout(timeout, AsyncClient::connect(&transport, &cache))
                     .await
                     .map_err(|_| CheckStatus::DaemonUnavailable)?
                     .map_err(|_| CheckStatus::DaemonUnavailable)?;
-            tokio::time::timeout(IO_TIMEOUT, client.handshake_registry())
+            tokio::time::timeout(timeout, client.handshake_registry())
                 .await
                 .context(CheckStatus::Unavailable)?
                 .context(CheckStatus::Unavailable)?;
             let response = tokio::time::timeout(
-                IO_TIMEOUT,
+                timeout,
                 client.call(Request::ApplyProjectConfig {
                     path: root,
                     plan_id: plan_id.to_owned(),

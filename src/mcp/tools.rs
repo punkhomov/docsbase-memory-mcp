@@ -6,6 +6,7 @@ use rmcp::model::{JsonObject, Tool};
 use serde_json::{Value, json};
 
 use crate::index::QueryMode;
+use crate::ipc::settings::ClientSpec;
 
 /// Tools that need a session bound to a registered project (I6).
 pub const PROJECT_TOOLS: &[&str] = &[
@@ -21,11 +22,11 @@ pub const PROJECT_TOOLS: &[&str] = &[
 /// `sync_status` only enqueue/read job rows and stay quick.
 pub const LONG_TOOLS: &[&str] = &["index_project"];
 
-/// Default IPC read timeout for fast tools.
-pub const QUICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Default MCP setup, quick tool exchange and post-index rebind timeout.
+pub const QUICK_TIMEOUT: std::time::Duration = ClientSpec::DEFAULTS.mcp_quick_timeout();
 
-/// IPC read timeout for long-running tools.
-pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
+/// Default MCP timeout for a long tool exchange.
+pub const LONG_TIMEOUT: std::time::Duration = ClientSpec::DEFAULTS.mcp_long_timeout();
 
 /// MCP tool definitions with JSON input schemas.
 #[must_use]

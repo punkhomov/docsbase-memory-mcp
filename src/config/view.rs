@@ -11,6 +11,7 @@ use super::schema::{FieldOrigin, Provenance, Resolved, SourceId};
 use super::{Config, ConfigSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::provider::{self, Provider};
+use crate::ipc::settings::ClientSpec;
 
 /// Compiled support from the existing provider registry, not model readiness.
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +83,8 @@ pub struct EffectiveView {
     pub fields: Vec<EffectiveField>,
     /// Existing registry capabilities, including feature-disabled providers.
     pub provider_capabilities: Vec<ProviderCapability>,
+    /// Where the current platform enforces the blocking IPC timeout.
+    pub blocking_ipc_timeout_capability: &'static str,
     /// Launch inputs captured locally by the CLI when this view is requested.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap: Option<BootstrapView>,
@@ -124,6 +127,7 @@ pub fn from_resolved(snapshot: &Resolved<Config>) -> Result<EffectiveView> {
         provisioning_checked: false,
         fields: builder.finish()?,
         provider_capabilities,
+        blocking_ipc_timeout_capability: ClientSpec::blocking_ipc_timeout_capability(),
         bootstrap: None,
     })
 }
@@ -149,10 +153,14 @@ fn settings_identity(
     let snapshot =
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), config).finish()?;
     let view = from_resolved(&snapshot)?;
+    // Only the blocking IPC timeout participates in live daemon control.
     let fields: Vec<_> = view
         .fields
         .iter()
-        .filter(|field| scope.is_none_or(|scope| field.origin.scope == scope))
+        .filter(|field| {
+            scope.is_none_or(|scope| field.origin.scope == scope)
+                && !ClientSpec::is_mcp_only_field(field.key)
+        })
         .map(|field| (field.key, &field.value))
         .collect();
     if scope.is_some() {
@@ -399,6 +407,30 @@ mod tests {
             assert_eq!(value("providers"), json!([]));
             assert_eq!(value("providers.fastembed.batch_size"), 64);
             assert_eq!(value("providers.fastembed.intra_threads"), expected_threads);
+        }
+    }
+
+    #[test]
+    fn client_timeout_changes_follow_runtime_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let baseline = Config::global_from(directory.path()).unwrap();
+        let launch = launch_identity(&baseline).unwrap();
+        let project = runtime_identity(&baseline).unwrap();
+
+        for (field, affects_daemon) in [
+            ("ipc_io_timeout_ms", true),
+            ("mcp_quick_timeout_ms", false),
+            ("mcp_long_timeout_ms", false),
+        ] {
+            std::fs::write(
+                directory.path().join("config.toml"),
+                format!("config_version=2\n[client]\n{field}=9000\n"),
+            )
+            .unwrap();
+            let changed = Config::global_from(directory.path()).unwrap();
+            assert_eq!(launch_identity(&changed).unwrap() != launch, affects_daemon);
+            assert_eq!(runtime_identity(&changed).unwrap(), project);
+            assert!(!changed.changes_dense_state(&baseline));
         }
     }
 

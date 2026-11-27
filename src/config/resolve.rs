@@ -127,6 +127,26 @@ fn global_resolution(
     Ok(resolution)
 }
 
+// Connected diagnostics historically work with unavailable or broken non-client settings.
+pub(crate) fn diagnostic_client_settings() -> Result<crate::ipc::settings::ClientSettings> {
+    use crate::ipc::settings::ClientSpec;
+
+    let layer = super::paths::config_dir().ok().and_then(|directory| {
+        let path = directory.join("config.toml");
+        let text = read_capped_if_exists(&path).ok().flatten()?;
+        let mut document = super::parse_global_document(&path, &text).ok()?;
+        Some((SourceId::Global(path), document.remove("client")?))
+    });
+    let mut resolution = Resolution::<ClientSpec>::new(&DefaultsContext::standalone());
+    if let Some((source, policy)) = layer {
+        let patch = policy
+            .try_into()
+            .map_err(|_| invalid("invalid global client timeout fields"))?;
+        resolution.apply(&source, patch)?;
+    }
+    resolution.finish().map(Resolved::into_settings)
+}
+
 fn is_v2(document: &toml::Table) -> bool {
     document.get("config_version") == Some(&toml::Value::Integer(2))
 }

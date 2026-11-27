@@ -19,6 +19,7 @@ use crate::index::writer_settings::{IndexWriterSettings, WriterSpec};
 use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
 use crate::search::RetrievalSettings;
 use crate::search::retrieval::RetrievalSpec;
+use crate::ipc::settings::{ClientPatch, ClientSettings, ClientSpec};
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
@@ -63,6 +64,8 @@ pub struct Config {
     pub search: SearchSettings,
     /// Project candidate window policy for document caps.
     pub retrieval: RetrievalSettings,
+    /// Installation-wide timeout policy for local IPC and MCP callers.
+    pub client: ClientSettings,
     /// Installation-wide SQLite connection policy.
     pub store: DbSettings,
     /// Global prepared metadata reader capacity.
@@ -121,7 +124,7 @@ pub struct ConfigOverrides {
 }
 
 /// Raw **global** file shape; every key optional so sources can be layered.
-/// Only the global file may carry `[daemon]`, `[search]` or `[providers.*]`: a project file is
+/// Only the global file may carry `[daemon]`, `[search]`, `[client]` or `[providers.*]`: a project file is
 /// parsed by [`ProjectFileConfig`], which has no `providers` field, so a
 /// provider section in a project is a parse error, not a post-merge check.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -133,6 +136,7 @@ struct GlobalFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     search: Option<SearchPatch>,
+    client: Option<ClientPatch>,
     daemon: Option<DaemonPatch>,
     remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
@@ -166,6 +170,7 @@ impl ProjectFileConfig {
             ann: self.ann,
             providers: None,
             search: None,
+            client: None,
             daemon: None,
             remote: None,
         }
@@ -292,7 +297,8 @@ impl Config {
     }
 
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
-        if self.ann_search == previous.ann_search
+        if self.client == previous.client
+            && self.ann_search == previous.ann_search
             && self.watch == previous.watch
             && self.lexical == previous.lexical
             && self.rrf == previous.rrf
@@ -302,6 +308,7 @@ impl Config {
             self != previous
         } else {
             let mut previous = previous.clone();
+            previous.client = self.client;
             previous.ann_search = self.ann_search;
             previous.watch = self.watch;
             previous.lexical = self.lexical;
@@ -345,6 +352,7 @@ impl Config {
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
         RetrievalSpec::validate(&self.retrieval, &Capabilities::current())?;
+        ClientSpec::validate(&self.client, &Capabilities::current())?;
         DbSpec::validate(&self.store, &Capabilities::current())?;
         ReadPoolSpec::validate(&self.read_pool, &Capabilities::current())?;
         DenseSpec::validate(&self.dense, &Capabilities::current())?;
@@ -459,6 +467,7 @@ impl SettingsSpec for ConfigSpec {
         fields.extend_from_slice(local_settings::INFERENCE_FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(RetrievalSpec::FIELDS);
+        fields.extend_from_slice(ClientSpec::FIELDS);
         fields.extend_from_slice(DbSpec::FIELDS);
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
         fields.extend(DenseSpec::file_fields());
@@ -488,6 +497,7 @@ impl SettingsSpec for ConfigSpec {
             index_writer: WriterSpec::defaults(context),
             search: SearchSpec::initial(&search),
             retrieval: RetrievalSpec::defaults(context),
+            client: ClientSpec::defaults(context),
             store: DbSpec::defaults(context),
             read_pool: ReadPoolSpec::defaults(context),
             dense: DenseSpec::defaults(context),
@@ -561,6 +571,15 @@ impl SettingsSpec for ConfigSpec {
                 &mut settings.search,
                 patch,
                 &defaults.search,
+                source,
+                origins,
+            )?;
+        }
+        if let Some(patch) = patch.client {
+            ClientSpec::overlay(
+                &mut settings.client,
+                patch,
+                &defaults.initial.client,
                 source,
                 origins,
             )?;
@@ -650,6 +669,7 @@ impl ConfigSpec {
         }
         SearchSpec::view_fields(&settings.search, view)?;
         RetrievalSpec::view_fields(settings.retrieval, view)?;
+        ClientSpec::view_fields(settings.client, view)?;
         settings.store.view_fields(view)?;
         view.push(
             "read_pool.max_connections",

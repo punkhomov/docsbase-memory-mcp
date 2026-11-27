@@ -52,6 +52,7 @@ use clap::{Parser, Subcommand};
 use crate::config::{Config, paths};
 use crate::error::Error;
 use crate::ipc::client::Client;
+use crate::ipc::settings::ClientSettings;
 
 /// `docsbase` command-line interface.
 #[derive(Debug, Parser)]
@@ -448,14 +449,15 @@ fn daemon_stop() -> anyhow::Result<()> {
 ///
 /// # Errors
 /// One read/control command scope, including all list pages. Bootstrap policy
-/// is independent of a malformed user config so stop/status remain usable.
+/// keeps status usable when a global source cannot be read or parsed.
 fn with_transport<T: Send>(
-    work: impl FnOnce(crate::platform::transport::Transport) -> anyhow::Result<T> + Send,
+    work: impl FnOnce(crate::platform::transport::Transport, ClientSettings) -> anyhow::Result<T> + Send,
 ) -> anyhow::Result<T> {
     let settings = crate::daemon::settings::standalone()?;
     let policy =
         crate::ipc::transport::policy(settings.settings().max_connections, settings.settings())?;
-    crate::platform::transport::run(&policy, |transport| Ok(work(transport)))?
+    let client = crate::config::resolve::diagnostic_client_settings()?;
+    crate::platform::transport::run(&policy, |transport| Ok(work(transport, client)))?
 }
 
 /// Surfaces handshake/tool errors from a daemon that did answer.
@@ -464,10 +466,12 @@ pub(crate) fn try_daemon(
     tool: &str,
     args: serde_json::Value,
     bind_session: bool,
+    client_settings: ClientSettings,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
-    let Some(mut client) = Client::try_connect(transport, &cache)? else {
+    let Some(mut client) = Client::try_connect_with_settings(transport, &cache, client_settings)?
+    else {
         crate::daemon::launch::require_shared_without_daemon(
             crate::config::resolve::LaunchUse::StandaloneDiagnostic,
         )?;

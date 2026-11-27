@@ -21,6 +21,7 @@ const WATCHDOG: Duration = Duration::from_mins(5);
 enum Mode {
     Reply,
     HoldFirst,
+    HoldLegacyTool,
     CloseFirst,
     CloseAlways,
     CancelFirst(crate::hybrid::work::Cancellation),
@@ -175,6 +176,16 @@ async fn serve(stream: platform::Stream, state: std::sync::Arc<State>) {
             || matches!(&request, Request::CallTool { name, .. } if name == "ask_docs")
         {
             search_reply(&state, request, &mut reader).await
+        } else if matches!(state.mode, Mode::HoldLegacyTool)
+            && matches!(&request, Request::CallTool { .. })
+        {
+            state.sent.send(request).expect("observe held tool");
+            let frame = reader.read_frame().await;
+            assert!(
+                terminal(&frame),
+                "timed-out tool peer must close: {frame:?}"
+            );
+            None
         } else {
             state.sent.send(request.clone()).expect("observe request");
             Some(match request {
@@ -267,6 +278,45 @@ async fn search_reply(state: &State, request: Request, reader: &mut Reader) -> O
         _ => {}
     }
     Some(Response::ToolResult { value: json!([]) })
+}
+
+#[tokio::test]
+async fn configured_quick_and_long_timeouts_reach_their_mcp_tools() {
+    for (tool, quick, long) in [("status", 200, 20_000), ("index_project", 20_000, 200)] {
+        let mut fake = Fake::with_mode(true, Mode::HoldLegacyTool);
+        let directory = tempfile::tempdir().expect("config directory");
+        std::fs::write(
+            directory.path().join("config.toml"),
+            format!("[client]\nmcp_quick_timeout_ms={quick}\nmcp_long_timeout_ms={long}\n"),
+        )
+        .expect("global config");
+        let config = crate::config::Config::global_from(directory.path()).expect("caller policy");
+        fake.frontend = Frontend::for_config(
+            fake.transport.clone(),
+            fake.cache.path().to_path_buf(),
+            config,
+        );
+
+        let error =
+            tokio::time::timeout(Duration::from_secs(5), fake.frontend.proxy(tool, json!({})))
+                .await
+                .expect("configured exchange timeout")
+                .expect_err("held tool should not complete");
+        assert!(matches!(error, Error::Transport { .. }), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for the daemon")
+        );
+
+        let mut observed = 0;
+        while let Ok(request) = fake.received.try_recv() {
+            if matches!(request, Request::CallTool { name, .. } if name == tool) {
+                observed += 1;
+            }
+        }
+        assert_eq!(observed, 2, "both attempts reach {tool}");
+    }
 }
 
 async fn check_post_index_rebind_rejection(rejection: RebindRejection) {

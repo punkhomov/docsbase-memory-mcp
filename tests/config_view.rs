@@ -78,6 +78,63 @@ fn effective_view_matches_real_v1_resolution_and_field_origins() {
 }
 
 #[test]
+fn client_timeouts_report_defaults_overrides_and_native_enforcement() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("config.toml");
+    fs::write(
+        &source,
+        "config_version=2\n[client]\nipc_io_timeout_ms=1234\nmcp_long_timeout_ms=5678\n",
+    )
+    .unwrap();
+
+    let output = serde_json::to_value(view::load_from(directory.path(), None).unwrap()).unwrap();
+    let ipc = row(&output, "client.ipc_io_timeout_ms");
+    assert_eq!(ipc["value"], 1234);
+    assert_eq!(ipc["scope"], "machine");
+    assert_eq!(ipc["unit"], "milliseconds");
+    assert_eq!(ipc["source"], json!({"kind":"global","value":source}));
+    let quick = row(&output, "client.mcp_quick_timeout_ms");
+    assert_eq!(quick["value"], 30_000);
+    assert_eq!(quick["source"], json!({"kind":"defaults"}));
+    assert_eq!(row(&output, "client.mcp_long_timeout_ms")["value"], 5678);
+    assert_eq!(
+        output["blocking_ipc_timeout_capability"],
+        if cfg!(windows) {
+            "windows_named_pipe_io_and_busy_connect"
+        } else {
+            "unix_socket_io"
+        }
+    );
+}
+
+#[test]
+fn client_timeouts_reject_invalid_values_and_project_overrides() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("config.toml");
+    for field in [
+        "ipc_io_timeout_ms",
+        "mcp_quick_timeout_ms",
+        "mcp_long_timeout_ms",
+    ] {
+        for bad in [0_i64, -1, 4_294_967_295] {
+            fs::write(&source, format!("[client]\n{field}={bad}\n")).unwrap();
+            assert!(Config::global_from(directory.path()).is_err());
+        }
+    }
+
+    fs::write(&source, "config_version=2\n").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    for header in ["", "config_version=2\n"] {
+        fs::write(
+            project.path().join(".docsbase.toml"),
+            format!("{header}[client]\nipc_io_timeout_ms=10\n"),
+        )
+        .unwrap();
+        assert!(Config::load_from(directory.path(), Some(project.path())).is_err());
+    }
+}
+
+#[test]
 fn view_defaults_and_v2_budget_do_not_invent_provenance() {
     let missing = tempfile::tempdir().unwrap();
     let output = serde_json::to_value(view::load_from(missing.path(), None).unwrap()).unwrap();
