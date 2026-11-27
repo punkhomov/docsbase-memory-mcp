@@ -895,6 +895,170 @@ fn v2_config_plan_compares_sources_with_the_published_generation() {
     assert_ne!(applied["plan_id"], changed["plan_id"]);
 }
 
+#[test]
+fn v2_live_config_plan_observes_current_runtime_without_loading_new_settings() {
+    let mut env = Env::new(&[("guide.md", "liveconfigurationwidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let baseline = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(baseline["basis"], "live");
+    assert_eq!(baseline["actions"], serde_json::json!([]));
+    assert_eq!(baseline["ann"]["state"], "disabled");
+
+    let mut mismatched = env.client();
+    let response = mismatched
+        .call(
+            docsbase_memory::ipc::protocol::Request::InspectProjectConfig {
+                protocol_version: docsbase_memory::ipc::protocol::PROTOCOL_VERSION,
+                build_id: "mismatched-build".into(),
+                path: env.root().to_owned(),
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            response,
+            docsbase_memory::ipc::protocol::Response::Error { .. }
+        ),
+        "{response:?}"
+    );
+    assert!(!env.cache().join("logs/conflicts.ndjson").exists());
+
+    let indexed = fs::read(env.cache().join("registry.db")).unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty = 0.125\n",
+    )
+    .unwrap();
+    let output = env
+        .cmd()
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let changed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(changed["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(changed["actions"][0]["effect"], "reconfigure_runtime");
+    assert_ne!(changed["plan_id"], baseline["plan_id"]);
+    assert_eq!(env.run_json(&["config", "plan", "--live"]), changed);
+    assert_eq!(fs::read(env.cache().join("registry.db")).unwrap(), indexed);
+    assert_eq!(
+        search(&mut client, "liveconfigurationwidget"),
+        vec!["guide.md"]
+    );
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[ann.search]\nef_base = 64\nef_max = 4096\nfetch_multiplier = 4\n",
+    )
+    .unwrap();
+    let explicit = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(explicit["actions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        explicit["actions"][0]["resource"]["value"],
+        "project_runtime"
+    );
+
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    let restart = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(restart["restart_required"], true);
+    assert_eq!(restart["actions"][0]["resource"]["value"], "daemon_global");
+    assert_restart_follows_replacement(&env);
+}
+
+fn assert_restart_follows_replacement(env: &Env) {
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[index.chunk]\nmax_chars = 1200\n",
+    )
+    .unwrap();
+    let replacement = env.run_json(&["config", "plan", "--live"]);
+    let actions = replacement["actions"].as_array().unwrap();
+    let index = &actions[0]["resource"];
+    assert_eq!(index["value"]["component"], "project_index");
+    assert_eq!(actions[1]["resource"]["value"], "daemon_global");
+    assert_eq!(actions[1]["dependencies"], serde_json::json!([index]));
+}
+
+#[test]
+fn v2_live_config_plan_leaves_wal_metadata_to_recovery() {
+    let mut env = Env::new(&[("guide.md", "configurationrecoverywidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let metadata = env.cache().join("projects/1/generations/1/metadata.db");
+    let db = rusqlite::Connection::open(&metadata).unwrap();
+    db.pragma_update(None, "journal_mode", "WAL").unwrap();
+    db.close().unwrap();
+    let before = fs::read(&metadata).unwrap();
+    assert_eq!(&before[18..20], &[2, 2]);
+    let result = env
+        .cmd()
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("RecoveryRequired"));
+    assert_eq!(fs::read(&metadata).unwrap(), before);
+    for suffix in ["metadata.db-wal", "metadata.db-shm", "metadata.db-journal"] {
+        assert!(!metadata.with_file_name(suffix).exists());
+    }
+}
+
+#[test]
+fn v2_live_config_plan_rejects_unreadable_published_tantivy() {
+    let mut env = Env::new(&[("guide.md", "configurationtantivywidget")]);
+    env.run_json(&["index"]);
+    env.start_daemon();
+    let metadata = env
+        .cache()
+        .join("projects/1/generations/1/tantivy/meta.json");
+    let mut bytes = fs::read(&metadata).unwrap();
+    bytes[0] = b'!';
+    fs::write(&metadata, &bytes).unwrap();
+    let result = env
+        .cmd()
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(&metadata).unwrap(), bytes);
+}
+
+#[test]
+fn v2_live_config_plan_without_daemon_does_not_start_one() {
+    let env = Env::new(&[("guide.md", "noautostartwidget")]);
+    let result = env
+        .cmd()
+        .args(["config", "plan", "--live"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!env.cache().join("registry.db").exists());
+    assert!(!env.cache().join("state").exists());
+}
+
 fn snapshot_config_plan_files(
     root: &Path,
     files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,

@@ -81,6 +81,9 @@ mod ask;
 #[path = "search_async.rs"]
 pub(crate) mod search_async;
 
+#[path = "live_config.rs"]
+mod live_config;
+
 /// Daemon state shared by all connections.
 pub struct Shared {
     catalog_epoch: Option<[u8; 16]>,
@@ -2448,6 +2451,21 @@ async fn handle_request<R: tokio::io::AsyncBufRead + Unpin>(
                 return (hello_required(), true);
             }
             scoped::call(shared, peer, args, scope, reader).await
+        }
+        Request::InspectProjectConfig {
+            protocol_version,
+            build_id,
+            path,
+        } => {
+            let result =
+                live_config::inspect(shared, scope, protocol_version, &build_id, path).await;
+            (
+                result.map_or_else(
+                    |error| error_response(&error),
+                    |value| Response::ToolResult { value },
+                ),
+                true,
+            )
         }
         Request::BindReadOnly { pid, project_id } => {
             if !peer.hello_done {

@@ -133,6 +133,11 @@ impl Pairs {
         .unwrap();
         fs::copy(other.path().join(DB_FILE), local.join("metadata.db")).unwrap();
         let mut metadata = Connection::open(local.join("metadata.db")).unwrap();
+        // The fixture starts from a legacy WAL registry. Local generations
+        // are published in rollback format.
+        metadata
+            .pragma_update(None, "journal_mode", "DELETE")
+            .unwrap();
         let tx = metadata.transaction().unwrap();
         tx.execute_batch(crate::store::project_index::LOCAL_SCHEMA_SQL)
             .unwrap();

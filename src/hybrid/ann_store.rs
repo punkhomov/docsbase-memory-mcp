@@ -30,7 +30,7 @@ pub const ANN_DEFAULT_EF_CONSTRUCTION: usize = AnnBuildSettings::owner_defaults(
 
 // Version of the construction recipe in the slot name. The HNSW dump layout
 // and its own on-disk format version are unchanged.
-const ANN_RECIPE_VERSION: u32 = 1;
+pub(crate) const ANN_RECIPE_VERSION: u32 = 1;
 
 /// Provisional per-file size ceiling; a bigger graph/data file is treated as
 /// corrupt and rejected (design §6, NFR-6).

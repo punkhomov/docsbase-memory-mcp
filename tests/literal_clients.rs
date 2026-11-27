@@ -89,7 +89,9 @@ impl Peer {
                     Request::RegisterSession { .. }
                     | Request::RegisterUnbound { .. }
                     | Request::BindReadOnly { .. } => Response::ToolResult { value: Value::Null },
-                    Request::StopDaemon => panic!("unexpected stop"),
+                    Request::StopDaemon | Request::InspectProjectConfig { .. } => {
+                        panic!("unexpected control request")
+                    }
                 };
                 requests.push(request);
                 write

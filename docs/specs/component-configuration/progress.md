@@ -2162,3 +2162,23 @@ Rust 1.100.0 Linux cli-full passed 1,944 tests. Targeted lean CLI tests,
 lean offline, Linux and Windows GNU cross-Clippy, and formatting passed
 locally. Preview and apply will ship in one functional PR. Live runtime and ANN
 observation and startup invalidation policy remain subsequent tasks.
+
+## 2026-11-27 — CF4, план работающего демона и ANN
+
+Task CF4 live project plan: complete (CLI route, warmed ANN acceptance,
+fresh review and fix reviews). Native PR checks remain pending.
+
+Ruling: `config plan --live` sends one versioned diagnostic request with
+no session registration. It reads the active project settings and current
+pair under the existing leases, including the immutable SQLite inspection
+and segment health check. A WAL header with absent sidecars is blocked.
+Query-only overrides, including explicitly enabled default ANN traversal,
+appear as runtime changes. A changed ANN build recipe plans replacement of
+the qualified resident graph with reuse of compatible vectors. If the
+project pair must be replaced, that action precedes dependent runtime,
+restart and graph actions. Graph identities include owner formats and
+upstream recipes. A graph absent from memory has unknown disk provenance.
+
+Rust 1.100.0 Linux cli-full passed 1,948 tests. Lean CLI and offline checks,
+Linux and Windows GNU cross-Clippy, and formatting passed. Startup consent,
+live application and disk-only ANN observation remain subsequent work.

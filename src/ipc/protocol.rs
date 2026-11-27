@@ -178,6 +178,12 @@ pub enum Request {
     },
     /// Nonmutating session binding for registered projects or registry keepalive.
     BindReadOnly { pid: u32, project_id: Option<i64> },
+    /// One read-only configuration plan without session registration.
+    InspectProjectConfig {
+        protocol_version: u32,
+        build_id: String,
+        path: PathBuf,
+    },
     /// Graceful daemon shutdown request.
     StopDaemon,
 }

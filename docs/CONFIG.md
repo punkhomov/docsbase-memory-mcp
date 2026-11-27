@@ -773,6 +773,27 @@ an execution error. The selected generation remains usable on a failed
 preparation. Compatible vectors already fetched during an authorized attempt
 can be reused on retry.
 
+### Inspect the running daemon
+
+```sh
+docsbase config plan ./project --live --check
+```
+
+This mode reads a registered v5 project's active settings and selected
+generation through the running daemon. It leaves project registration and
+runtime unchanged. `restart_required` compares the current global file with
+the daemon's startup source. A query-only policy edit can change
+`project_runtime` without replacing the index. A changed construction recipe
+can require replacing a confirmed resident ANN graph while reusing vectors.
+If a source edit also requires a new index, the plan orders its replacement
+before reconfiguring the project or restarting the daemon.
+An ANN graph absent from memory is reported as `unknown` when its persisted
+state has not been inspected.
+
+In live mode `--check` returns 3 for a reported change or restart and 5 when
+observation is blocked. Live plans describe proposed effects. Stop the daemon
+and generate a fresh stopped plan for `config apply`.
+
 ## Observed migration plan (CF4c2)
 
 ```sh

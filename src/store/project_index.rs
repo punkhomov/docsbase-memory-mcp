@@ -42,6 +42,18 @@ struct Generation {
 }
 
 impl ProjectIndex {
+    pub(super) fn from_catalog_observation(
+        index: ObservedProjectIndex,
+        seal: Option<[u8; 32]>,
+    ) -> Result<Self> {
+        let (Some(epoch), Some(id)) = (index.epoch, index.generation_id) else {
+            return Err(invalid_index("observed generation has no catalog identity"));
+        };
+        let mut binding = Self::legacy(index.project_id, index.content_revision)?;
+        binding.generation = Some(Generation { epoch, id, seal });
+        Ok(binding)
+    }
+
     pub(crate) fn legacy(project_id: i64, content_revision: i64) -> Result<Self> {
         if project_id <= 0 || content_revision < 0 {
             return Err(Error::Project {

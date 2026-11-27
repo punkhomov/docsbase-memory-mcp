@@ -17,6 +17,9 @@ pub enum ConfigCommand {
     Plan {
         /// Project directory. Defaults to the current directory.
         path: Option<std::path::PathBuf>,
+        /// Inspect the running v5 daemon without starting or reloading it.
+        #[arg(long)]
+        live: bool,
         /// Return 3 for a required change and 5 when observation was blocked.
         #[arg(long)]
         check: bool,
@@ -60,7 +63,7 @@ pub enum ViewFormat {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CheckStatus {
-    #[error("configuration changes require replacing the project index")]
+    #[error("configuration changes require action")]
     Required,
     #[error("configuration plan could not confirm the selected project state")]
     Unavailable,
@@ -68,6 +71,8 @@ pub(super) enum CheckStatus {
     Stale,
     #[error("configuration plan requires --allow-remote to authorize possible embedding costs")]
     MissingGrants,
+    #[error("live configuration plan requires a running v5 daemon")]
+    DaemonUnavailable,
 }
 
 impl CheckStatus {
@@ -75,7 +80,7 @@ impl CheckStatus {
         match self {
             Self::Required => 3,
             Self::Stale => 4,
-            Self::Unavailable | Self::MissingGrants => 5,
+            Self::Unavailable | Self::MissingGrants | Self::DaemonUnavailable => 5,
         }
     }
 }
@@ -88,6 +93,7 @@ pub(super) fn run(
         ConfigCommand::Plan {
             path,
             check,
+            live,
             format: ViewFormat::Json,
         } => {
             let ProjectPaths {
@@ -95,6 +101,9 @@ pub(super) fn run(
                 cache,
                 root,
             } = ProjectPaths::resolve(path.as_deref())?;
+            if *live {
+                return live_plan(cache, root, *check);
+            }
             let limits = crate::config::observe::PlanningLimits::standard();
             let report = crate::config::observe::project_plan(&config, &cache, &root, db, limits)?;
             let encoded = serde_json::to_string(&report)?;
@@ -163,6 +172,56 @@ pub(super) fn run(
             Ok(())
         }
     }
+}
+
+fn live_plan(cache: PathBuf, root: PathBuf, check: bool) -> anyhow::Result<()> {
+    use crate::ipc::{
+        client::Client,
+        protocol::{self, Request, Response},
+    };
+    super::with_transport(move |transport| {
+        let mut client = Client::try_connect(&transport, &cache)
+            .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?
+            .ok_or(CheckStatus::DaemonUnavailable)?;
+        let response = client
+            .call(Request::InspectProjectConfig {
+                protocol_version: protocol::PROTOCOL_VERSION,
+                build_id: protocol::build_id(),
+                path: root,
+            })
+            .map_err(|error| anyhow::Error::from(error).context(CheckStatus::Unavailable))?;
+        let result = match response {
+            Response::ToolResult { value } => value,
+            Response::Error {
+                code,
+                message,
+                instruction,
+            } => {
+                return Err(anyhow::Error::from(crate::error::Error::from_mcp_code(
+                    code,
+                    message,
+                    instruction,
+                ))
+                .context(CheckStatus::Unavailable));
+            }
+            Response::Hello { .. } => anyhow::bail!("unexpected live config plan reply"),
+        };
+        let plan = result
+            .get("plan")
+            .filter(|value| value["basis"] == "live")
+            .ok_or_else(|| anyhow::anyhow!("missing live config plan"))?;
+        let status = match result["check_status"].as_u64() {
+            Some(0) => Ok(()),
+            Some(3) => Err(CheckStatus::Required),
+            Some(5) => Err(CheckStatus::Unavailable),
+            _ => anyhow::bail!("invalid live config plan status"),
+        };
+        println!("{}", serde_json::to_string(plan)?);
+        if check {
+            status?;
+        }
+        Ok(())
+    })
 }
 
 struct ProjectPaths {

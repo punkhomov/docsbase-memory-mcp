@@ -19,7 +19,7 @@ use crate::platform::fs::{
 };
 use crate::store::generation_catalog::{self, Head, Layout};
 use crate::store::generation_seal::{GenerationSeal, SEAL_FORMAT};
-use crate::store::models::ProjectStatus;
+use crate::store::models::{Project, ProjectStatus};
 use crate::store::project_index::{
     LOCAL_SCHEMA_VERSION, ProjectIndex, SEALED_LOCAL_SCHEMA_VERSION, matches_local_outcome,
     project_directory,
@@ -82,6 +82,68 @@ pub(crate) struct ProjectRecipeInspection {
     pub(crate) epoch: Option<[u8; 16]>,
     pub(crate) project_id: Option<i64>,
     pub(crate) selected: Option<SelectedIndexEvidence>,
+}
+
+/// Read the selected pair without reopening the live registry. Its existing
+/// pooled reader is already attached to SQLite; the local metadata uses the
+/// same immutable pager and file/namespace proofs as stopped inspection.
+pub(crate) fn inspect_live_project_recipes<T>(
+    registry: &crate::store::Db,
+    project: &Project,
+    limits: InspectionLimits,
+    observe: impl FnOnce(ProjectIndex, Option<crate::vector_cache::EmbeddingRecipe>) -> T,
+) -> Result<Option<(SelectedIndexEvidence, T)>> {
+    let cache = registry
+        .cache_root()
+        .canonicalize()
+        .map_err(|_| live_unavailable(Why::Io))?;
+    let initial_bytes = validate(&cache, limits)?;
+    let connection = registry.connection();
+    let root = project
+        .canonical_root
+        .to_str()
+        .ok_or_else(|| live_unavailable(Why::InvalidRegistry))?;
+    let evidence = || {
+        check_identity_budget(limits, initial_bytes, true)?;
+        // A registered project can precede creation of its coordination file.
+        if generation_catalog::active_head(connection, project.id)?.is_none() {
+            return Ok(None);
+        }
+        let directory = project_directory(&cache, project.id);
+        check_directory(&directory)?;
+        with_read_lease(&directory.join(".writer.lock"), || {
+            let epoch = generation_catalog::read_epoch(connection)?;
+            let Some(head) = generation_catalog::active_head(connection, project.id)? else {
+                return Ok(None);
+            };
+            let selected = observe_catalog_head(
+                connection,
+                &cache,
+                &directory,
+                epoch,
+                &head,
+                limits,
+                Some(root),
+            )?;
+            let index = ProjectIndex::from_catalog_observation(selected.index, selected.seal)
+                .map_err(|_| Why::InvalidRegistry)?;
+            let observed = observe(
+                index,
+                selected
+                    .recipes
+                    .as_ref()
+                    .and_then(|recipes| recipes.embedding),
+            );
+            Ok(Some((selected, observed)))
+        })
+    };
+    evidence().map_err(live_unavailable)
+}
+
+fn live_unavailable(reason: Why) -> crate::error::Error {
+    crate::error::Error::Admission {
+        message: format!("live index observation is unavailable ({reason:?})"),
+    }
 }
 
 pub(crate) fn inspect_project_recipes(
@@ -236,17 +298,18 @@ fn observe_project_evidence(
     with_read_lease(&project.join(".writer.lock"), || {
         let index = match catalog {
             None => observe_legacy(registry, cache, project_id, None)?,
-            Some((epoch, head)) => match head.layout {
-                Layout::Legacy => {
-                    with_read_lease(&project.join(".legacy-generation.lock"), || {
-                        observe_legacy(registry, cache, project_id, Some((epoch, head.id)))
-                    })?
-                }
-                Layout::Local { seal_digest } => {
-                    return observe_local(&project, epoch, &head, seal_digest, limits, recipe_root)
-                        .map(Some);
-                }
-            },
+            Some((epoch, head)) => {
+                return observe_catalog_head(
+                    registry,
+                    cache,
+                    &project,
+                    epoch,
+                    &head,
+                    limits,
+                    recipe_root,
+                )
+                .map(Some);
+            }
         };
         Ok(Some(SelectedIndexEvidence {
             index,
@@ -254,6 +317,32 @@ fn observe_project_evidence(
             recipes: None,
         }))
     })
+}
+
+fn observe_catalog_head(
+    registry: &Connection,
+    cache: &Path,
+    project: &Path,
+    epoch: [u8; 16],
+    head: &Head,
+    limits: InspectionLimits,
+    recipe_root: Option<&str>,
+) -> Observed<SelectedIndexEvidence> {
+    match head.layout {
+        Layout::Legacy => {
+            let index = with_read_lease(&project.join(".legacy-generation.lock"), || {
+                observe_legacy(registry, cache, head.project_id, Some((epoch, head.id)))
+            })?;
+            Ok(SelectedIndexEvidence {
+                index,
+                seal: None,
+                recipes: None,
+            })
+        }
+        Layout::Local { seal_digest } => {
+            observe_local(project, epoch, head, seal_digest, limits, recipe_root)
+        }
+    }
 }
 
 fn require_registry_version(registry: &Connection) -> Observed<u32> {
@@ -342,6 +431,11 @@ fn observe_local(
             limits,
             || {},
             |locked| {
+                // Both local writers use rollback format. A WAL header still
+                // needs recovery even when its sidecars are absent.
+                if locked.header()?[18..20] != [1, 1] {
+                    return Err(Why::RecoveryRequired);
+                }
                 let metadata = locked.connection();
                 let revision = local_revision(metadata, head.project_id, head.id)?;
                 let project_id = head.project_id;

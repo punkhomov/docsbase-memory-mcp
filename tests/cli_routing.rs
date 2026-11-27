@@ -131,7 +131,7 @@ fn spawn_fake_daemon_with_reply(
                         message: "legacy fake daemon does not support scoped search".to_owned(),
                         instruction: None,
                     },
-                    Request::StopDaemon => break,
+                    Request::StopDaemon | Request::InspectProjectConfig { .. } => break,
                 };
                 writer
                     .write_all(&encode(&response).expect("encode"))

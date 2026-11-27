@@ -105,7 +105,9 @@ async fn serve(
                 }
                 answer.clone()
             }
-            Request::StopDaemon => panic!("unexpected stop"),
+            Request::StopDaemon | Request::InspectProjectConfig { .. } => {
+                panic!("unexpected control request")
+            }
         };
         requests.push(request);
         if let Some(response) = response {

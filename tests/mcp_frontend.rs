@@ -208,6 +208,7 @@ fn serve_fake_connection(
                     value: json!({ "routed_tool": name }),
                 }
             }
+            Request::InspectProjectConfig { .. } => panic!("unexpected live configuration request"),
             Request::StopDaemon => {
                 stop.store(true, Ordering::SeqCst);
                 Response::ToolResult { value: Value::Null }

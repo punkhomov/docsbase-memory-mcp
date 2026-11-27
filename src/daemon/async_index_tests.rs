@@ -1517,6 +1517,13 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
         assert_eq!(view["ann"]["vectors"], 2);
         assert_eq!(view["ann"]["state"], "loading");
 
+        std::fs::write(
+            project.canonical_root.join(".docsbase.toml"),
+            "config_version = 2\n[ann.build]\nm = 12\n",
+        ).unwrap();
+        assert_live_ann_config_plan(&shared, &project);
+        assert_eq!(catalog_diagnostics(&shared, session).await["ann"]["vectors"], 2);
+
         reopen_catalog_with_new_ann_recipe(&shared, &project, &provider);
         let reloaded = catalog_diagnostics(&shared, session).await;
         assert_eq!(reloaded["index_generation"], view["index_generation"]);
@@ -1551,16 +1558,57 @@ fn catalog_index_and_detached_sync_warm_the_published_ann() {
 }
 
 #[cfg(unix)]
+fn assert_live_ann_config_plan(shared: &Shared, project: &Project) {
+    let report = live_config::report(shared, &project.canonical_root).unwrap();
+    let plan = &report["plan"];
+    assert_eq!(plan["ann"]["state"], "resident");
+    assert_eq!(plan["ann"]["vectors"], 2);
+    let actions = plan["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 2);
+    let graph = actions
+        .iter()
+        .find(|action| action["resource"]["value"]["component"] == "ann_graph")
+        .unwrap();
+    assert_eq!(graph["effect"], "rebuild");
+    assert_eq!(graph["dependencies"], json!([]));
+    assert_eq!(plan["required_grants"], json!([]));
+
+    let project_file = project.canonical_root.join(".docsbase.toml");
+    let construction = std::fs::read_to_string(&project_file).unwrap();
+    let replaced = |max_chars| {
+        std::fs::write(
+            &project_file,
+            format!("{construction}\n[index.chunk]\nmax_chars = {max_chars}\n"),
+        )
+        .unwrap();
+        let report = live_config::report(shared, &project.canonical_root).unwrap();
+        let actions = report["plan"]["actions"].as_array().unwrap();
+        let index = actions
+            .iter()
+            .find(|action| action["resource"]["value"]["component"] == "project_index")
+            .unwrap();
+        let graph = actions
+            .iter()
+            .find(|action| action["resource"]["value"]["component"] == "ann_graph")
+            .unwrap();
+        let runtime = actions
+            .iter()
+            .find(|action| action["resource"]["value"] == "project_runtime")
+            .unwrap();
+        assert_eq!(graph["dependencies"], json!([index["resource"]]));
+        assert_eq!(runtime["dependencies"], json!([index["resource"]]));
+        graph["target"].clone()
+    };
+    assert_ne!(replaced(1_200), replaced(1_400));
+    std::fs::write(project_file, construction).unwrap();
+}
+
+#[cfg(unix)]
 fn reopen_catalog_with_new_ann_recipe(
     shared: &Shared,
     project: &Project,
     provider: &Arc<DocumentGate>,
 ) {
-    std::fs::write(
-        project.canonical_root.join(".docsbase.toml"),
-        "config_version = 2\n[ann.build]\nm = 12\n",
-    )
-    .unwrap();
     let reopened = shared
         .open_project_config_with(project, |_| {
             Ok(HybridStages {
