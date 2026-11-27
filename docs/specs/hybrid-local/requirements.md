@@ -507,3 +507,13 @@ manual/ignored, сборка/providers/runtime behavior не меняются. �
 выше — исторические. Ограничения RAM, очередей, IPC и поисковых операций
 сохраняются. `cli-full` включает optional feature `web`; Cargo default=[]
 остаётся без HTTP frontend. Rust 1.88; frontend собирается явно до Cargo.
+
+## Delta 2026-11-27 — NFR-4, resolved inference policy
+
+The FastEmbed owner resolves `batch_size` and `intra_threads` from global
+`[providers.fastembed]`. Omission keeps batch size 64 and the captured
+`min(4, available CPUs)` thread default. An explicit positive representable
+thread count replaces that default. The effective view and constructed stages
+use the same immutable settings. Neither knob changes the persistent model
+recipe or the vector cache ID. Runtime replacement retains existing model
+handles and their shared file lease until the last consumer releases them.

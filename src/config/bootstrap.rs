@@ -52,6 +52,15 @@ pub struct DefaultsContext {
     pub entrypoint: EntrypointFacts,
 }
 impl DefaultsContext {
+    /// Captures host CPU availability for a new operational settings snapshot.
+    pub(crate) fn for_host() -> Self {
+        Self {
+            available_parallelism: std::thread::available_parallelism()
+                .unwrap_or(NonZeroUsize::MIN),
+            ..Self::standalone()
+        }
+    }
+
     /// Legacy defaults need neither a home directory nor ambient environment.
     #[must_use]
     pub const fn standalone() -> Self {

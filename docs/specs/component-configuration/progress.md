@@ -2366,3 +2366,22 @@ trusted read ceiling. The reader consumes at most the limit plus one byte
 regardless of earlier metadata. Missing/corrupt handling remains local to
 its owner. A valid oversized Web file fails before trying an occupied port.
 Forty focused Linux tests and focused Linux/Windows GNU Clippy passed.
+
+## 2026-11-27 — CF13, исполнение FastEmbed
+
+Task CF13 FastEmbed inference ownership: complete (typed policy, actual
+consumer options, shared model lifetime and independent fix review).
+Native PR checks remain pending.
+
+Ruling: resolve batch and thread counts once and use the same stored values
+in the view and both local stages. Launch, status and live-plan comparison
+retain the original CPU facts. Keys and default truncation are unchanged.
+A live shared session owns its model file lease. The last stage releases
+both. Fixtures exercise resolved settings, option construction, batch
+sizes and file-lock retirement without fetching or loading an ONNX model.
+
+Ruling: the public source preview uses the same host defaults as operational
+file resolution. The portable migration proposal uses one explicit defaults
+context for both sides of its equivalence check and does not write the host's
+thread count to TOML. The full run exposed the previous one-CPU preview
+mismatch. All 18 migration tests passed after separating the two contexts.

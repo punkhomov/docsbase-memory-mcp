@@ -64,6 +64,7 @@ pub(crate) struct ActiveProjectConfig<'a> {
     pub(crate) global: crate::daemon::launch::ConfigStamp,
     pub(crate) daemon: &'a Config,
     pub(crate) overrides: &'a crate::daemon::settings::DaemonPatch,
+    pub(crate) defaults: crate::config::bootstrap::DefaultsContext,
     pub(crate) ann: AnnObservation,
 }
 
@@ -341,10 +342,15 @@ fn resolve_plan_sources(
     let captured = active
         .filter(|active| !global_changed(&active.global, &global.observation.state))
         .map(|active| active.daemon);
+    let defaults = active.map_or_else(
+        crate::config::bootstrap::DefaultsContext::for_host,
+        |active| active.defaults,
+    );
     let global = crate::config::resolve::resolve_observed_global_v2(
         global.layer.as_ref(),
         overrides,
         captured,
+        &defaults,
     )?;
     Ok(global.map(|global| {
         let settings =

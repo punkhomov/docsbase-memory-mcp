@@ -118,6 +118,7 @@ pub struct Shared {
     /// Fingerprint of the global config file at daemon start (OQ-6).
     global_config_stamp: ConfigStamp,
     global_config_overrides: crate::daemon::settings::DaemonPatch,
+    global_config_defaults: crate::config::bootstrap::DefaultsContext,
     global_config_path: Option<PathBuf>,
     invalidation: crate::config::policy::PolicyContext,
     /// Per-project config/stage slots; the map lock only protects lookup.
@@ -620,7 +621,6 @@ impl Shared {
             &launch,
         )?;
         let global_config = launch.config.into_settings();
-        let readers = Arc::new(readers);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
             eprintln!("warning: {orphans} interrupted sync job(s) marked as error");
@@ -654,7 +654,7 @@ impl Shared {
             cache: cache.to_path_buf(),
             db: Mutex::new(db),
             db_settings: settings.clone(),
-            readers,
+            readers: Arc::new(readers),
             payload_budget,
             workers,
             #[cfg(feature = "hybrid-remote")]
@@ -673,6 +673,7 @@ impl Shared {
             global_config_error: launch.error,
             global_config_stamp: launch.stamp,
             global_config_overrides: launch.overrides,
+            global_config_defaults: launch.defaults,
             global_config_path: launch.path,
             invalidation: launch.invalidation,
             project_states: Mutex::new(project_states),
@@ -2149,6 +2150,7 @@ impl Shared {
                 &self.global_config_stamp,
                 &self.global_config,
                 &self.global_config_overrides,
+                self.global_config_defaults,
             );
         }
         crate::daemon::launch::restart_notice(

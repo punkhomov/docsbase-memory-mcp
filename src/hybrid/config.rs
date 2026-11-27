@@ -16,6 +16,7 @@ use crate::hybrid::provider::Provider;
 use crate::vector_cache::{CacheLimits, Embedder};
 
 use super::Reranker;
+use super::local_settings::{InferencePatch, InferenceSettings, InvalidCount};
 
 /// The only provider accepted in iteration 1 (FR-3).
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
@@ -464,13 +465,43 @@ impl ProviderRecord {
 /// `[providers.<name>]`. Project files have no `providers` field
 /// (structural), so machine capabilities are never committed to repositories.
 ///
-/// Generic on purpose: a new provider needs no change here (FR-4, ADR-18).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Presence of a provisioning record is independent of machine inference defaults.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProvidersCfg {
     entries: std::collections::BTreeMap<String, ProviderRecord>,
+    fastembed: Arc<ResolvedFastembedInference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedFastembedInference {
+    defaults: InferenceSettings,
+    settings: std::result::Result<InferenceSettings, InvalidCount>,
+}
+
+impl Default for ProvidersCfg {
+    fn default() -> Self {
+        Self::with_cpu_count(
+            crate::config::bootstrap::DefaultsContext::for_host().available_parallelism,
+        )
+    }
 }
 
 impl ProvidersCfg {
+    pub(crate) fn with_cpu_count(cpu_count: std::num::NonZeroUsize) -> Self {
+        let defaults = InferenceSettings::defaults(cpu_count);
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            fastembed: Arc::new(ResolvedFastembedInference {
+                defaults,
+                settings: Ok(defaults),
+            }),
+        }
+    }
+
+    pub(crate) fn fastembed_inference(&self) -> Result<InferenceSettings> {
+        self.fastembed.settings.map_err(Error::from)
+    }
+
     /// The record of `name`, when the global config has one.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&ProviderRecord> {
@@ -485,7 +516,13 @@ impl ProvidersCfg {
     /// Inserts (or replaces) a record; used by the config loader, the CLI
     /// writers and tests.
     pub fn insert(&mut self, name: impl Into<String>, record: ProviderRecord) {
-        self.entries.insert(name.into(), record);
+        let name = name.into();
+        if name == PROVIDER_FASTEMBED {
+            let inference = Arc::make_mut(&mut self.fastembed);
+            inference.settings =
+                InferencePatch::from_record(&record).map(|patch| patch.resolve(inference.defaults));
+        }
+        self.entries.insert(name, record);
     }
 
     /// Builder form of [`insert`](Self::insert).
@@ -496,7 +533,7 @@ impl ProvidersCfg {
     }
 }
 
-/// Typed view of `[providers.fastembed]` (ADR-17).
+/// Provisioning fields of `[providers.fastembed]` (ADR-17).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FastembedProvider {
     /// Provider prepared on this machine.

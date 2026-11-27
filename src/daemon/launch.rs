@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::bootstrap::DefaultsContext;
 use crate::config::capture::{ReadFailure, path_is_absent, read_prefix};
 use crate::config::resolve::{LaunchFailure, LaunchUse, has_version_header};
 use crate::config::schema::Resolved;
@@ -29,6 +30,7 @@ enum CapturedBytes {
 pub struct LaunchSnapshot {
     path: Option<PathBuf>,
     bytes: CapturedBytes,
+    defaults: DefaultsContext,
 }
 
 /// Complete immutable launch data passed to resource consumers.
@@ -37,6 +39,7 @@ pub(crate) struct LaunchConfig {
     pub path: Option<PathBuf>,
     pub stamp: ConfigStamp,
     pub overrides: DaemonPatch,
+    pub defaults: DefaultsContext,
     pub error: Option<String>,
     pub invalidation: crate::config::policy::PolicyContext,
     pub startup: Option<preflight::StartupExpectations>,
@@ -217,6 +220,7 @@ impl LaunchSnapshot {
         Self {
             path: Some(path),
             bytes,
+            defaults: DefaultsContext::for_host(),
         }
     }
 
@@ -227,6 +231,7 @@ impl LaunchSnapshot {
             Ok(path) => Self::capture_from(&path),
             Err(error) => Self {
                 path: None,
+                defaults: DefaultsContext::for_host(),
                 bytes: CapturedBytes::Unavailable {
                     reason: error.to_string(),
                     versioned: false,
@@ -265,7 +270,7 @@ impl LaunchSnapshot {
         let path = self.path.as_deref().ok_or_else(|| {
             LaunchFailure::Legacy(Error::internal("global config path unavailable"))
         })?;
-        crate::config::resolve::launch_resolution(path, bytes, launch_use)
+        crate::config::resolve::launch_resolution(path, bytes, launch_use, &self.defaults)
     }
 
     pub(crate) fn strict(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
@@ -274,6 +279,7 @@ impl LaunchSnapshot {
             path: self.path.clone(),
             stamp: self.stamp(),
             overrides: patch,
+            defaults: self.defaults,
             error: None,
             invalidation: crate::config::policy::PolicyContext::Legacy,
             startup: None,
@@ -285,11 +291,12 @@ impl LaunchSnapshot {
     pub(crate) fn library_compatibility(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
         if matches!(self.bytes, CapturedBytes::Missing) {
             Ok(LaunchConfig {
-                config: crate::config::resolve::LaunchResolution::legacy_defaults()
+                config: crate::config::resolve::LaunchResolution::legacy_defaults(&self.defaults)
                     .finish(patch.clone())?,
                 path: self.path.clone(),
                 stamp: self.stamp(),
                 overrides: patch,
+                defaults: self.defaults,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -312,6 +319,7 @@ impl LaunchSnapshot {
                 path: self.path.clone(),
                 stamp: self.stamp(),
                 overrides: patch,
+                defaults: self.defaults,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -330,13 +338,15 @@ impl LaunchSnapshot {
                     return Err(error);
                 }
                 eprintln!("warning: global config unavailable: {error}");
-                let config = crate::config::resolve::LaunchResolution::legacy_defaults()
-                    .finish(patch.clone())?;
+                let config =
+                    crate::config::resolve::LaunchResolution::legacy_defaults(&self.defaults)
+                        .finish(patch.clone())?;
                 Ok(LaunchConfig {
                     config,
                     path: self.path.clone(),
                     stamp: self.stamp(),
                     overrides: patch,
+                    defaults: self.defaults,
                     error: Some(error.to_string()),
                     invalidation: crate::config::policy::PolicyContext::Legacy,
                     startup: None,
@@ -402,6 +412,7 @@ pub(crate) fn effective_restart_notice(
     baseline: &ConfigStamp,
     active: &Config,
     overrides: &DaemonPatch,
+    defaults: DefaultsContext,
 ) -> Option<String> {
     let Some(path) = path else {
         return restart_notice(None, baseline);
@@ -409,6 +420,7 @@ pub(crate) fn effective_restart_notice(
     let snapshot = LaunchSnapshot {
         path: Some(path.to_owned()),
         bytes: capture(path),
+        defaults,
     };
     let notice = source_notice(&snapshot.stamp(), baseline)?;
     let unchanged = if matches!(baseline, ConfigStamp::Unavailable(_)) {

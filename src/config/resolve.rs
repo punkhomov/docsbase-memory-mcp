@@ -105,7 +105,7 @@ use super::source::{SourceLayer, invalid};
 use super::{Config, ConfigSpec, read_capped, read_capped_if_exists, read_project};
 
 fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
-    let mut resolution = Resolution::new(&DefaultsContext::standalone());
+    let mut resolution = Resolution::new(&DefaultsContext::for_host());
     let path = config_dir.join("config.toml");
     if let Some(text) = read_capped_if_exists(&path)? {
         let document = super::parse_global_document(&path, &text)?;
@@ -332,11 +332,11 @@ pub(super) fn resolve_observed_global_v2(
     global: Option<&SourceLayer>,
     launch_overrides: crate::daemon::settings::DaemonPatch,
     captured_global: Option<&Config>,
+    context: &DefaultsContext,
 ) -> Result<Option<Resolved<Config>>> {
-    let context = DefaultsContext::standalone();
     let mut resolution = captured_global.map_or_else(
-        || Resolution::<ConfigSpec>::new(&context),
-        |settings| Resolution::<ConfigSpec>::from_provided(&context, settings),
+        || Resolution::<ConfigSpec>::new(context),
+        |settings| Resolution::<ConfigSpec>::from_provided(context, settings),
     );
     if captured_global.is_some() {
         if resolution.settings.vector_store.is_none() {
@@ -409,8 +409,9 @@ pub(crate) fn launch_resolution(
     path: &Path,
     bytes: Option<&[u8]>,
     launch_use: LaunchUse,
+    defaults: &DefaultsContext,
 ) -> std::result::Result<LaunchResolution, LaunchFailure> {
-    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    let mut resolution = Resolution::<ConfigSpec>::new(defaults);
     let mut website = false;
     if let Some(bytes) = bytes {
         let text = std::str::from_utf8(bytes).map_err(|err| {
@@ -551,8 +552,8 @@ impl LaunchFailure {
 // errors, never daemon owner, recognized Website or CLI errors.
 pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
 impl LaunchResolution {
-    pub(crate) fn legacy_defaults() -> Self {
-        Self(Resolution::new(&DefaultsContext::standalone()))
+    pub(crate) fn legacy_defaults(defaults: &DefaultsContext) -> Self {
+        Self(Resolution::new(defaults))
     }
 
     pub(crate) fn finish(
@@ -613,6 +614,14 @@ pub fn preview_sources(
     global: &super::source::SourceLayer,
     project: Option<&super::source::SourceLayer>,
 ) -> Result<super::source::SourcePreview> {
+    preview_sources_with_defaults(global, project, &DefaultsContext::for_host())
+}
+
+pub(super) fn preview_sources_with_defaults(
+    global: &super::source::SourceLayer,
+    project: Option<&super::source::SourceLayer>,
+    defaults: &DefaultsContext,
+) -> Result<super::source::SourcePreview> {
     use super::source::{PreviewConflict, SourcePreview, invalid};
     if !matches!(global.source, SourceId::Global(_))
         || project.is_some_and(|p| !matches!(p.source, SourceId::Project(_)))
@@ -621,7 +630,7 @@ pub fn preview_sources(
             "preview requires a global source followed by a project source",
         ));
     }
-    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    let mut resolution = Resolution::<ConfigSpec>::new(defaults);
     for layer in std::iter::once(global).chain(project) {
         resolution.apply_source(layer)?;
     }

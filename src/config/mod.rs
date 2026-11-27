@@ -10,6 +10,7 @@ use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::dense_settings::{DenseSettings, DenseSpec};
+use crate::hybrid::local_settings;
 use crate::hybrid::provisioning::{ProvisioningSettings, ProvisioningSpec};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
@@ -95,7 +96,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let defaults = ConfigSpec::defaults(&DefaultsContext::standalone());
+        let defaults = ConfigSpec::defaults(&DefaultsContext::for_host());
         ConfigSpec::initial(&defaults)
     }
 }
@@ -174,8 +175,10 @@ impl ProjectFileConfig {
 /// listing the registry, and the keys of a known provider are validated by
 /// that provider. Parsing never consults build features — a file written by a
 /// feature-enabled build must load in every build.
-fn providers_from_raw(raw: HashMap<String, toml::Table>) -> Result<ProvidersCfg> {
-    let mut out = ProvidersCfg::default();
+fn providers_from_raw(
+    raw: HashMap<String, toml::Table>,
+    mut out: ProvidersCfg,
+) -> Result<ProvidersCfg> {
     for (name, table) in raw {
         let provider = crate::hybrid::provider::provider(&name)
             .map_err(|_| crate::hybrid::provider::unknown_provider(&name))?;
@@ -430,6 +433,7 @@ impl SettingsSpec for ConfigSpec {
         let mut fields = Self::FIELDS.to_vec();
         fields.extend_from_slice(WatchSpec::FIELDS);
         fields.extend_from_slice(HybridSpec::FIELDS);
+        fields.extend_from_slice(local_settings::INFERENCE_FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
         fields.extend_from_slice(DbSpec::FIELDS);
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
@@ -473,7 +477,7 @@ impl SettingsSpec for ConfigSpec {
             hybrid_cfg: HybridSpec::initial(&hybrid),
             ann_search: None,
             ann_build: AnnBuildSpec::initial(&AnnBuildSpec::defaults(context)),
-            providers: ProvidersCfg::default(),
+            providers: ProvidersCfg::with_cpu_count(context.available_parallelism),
             vector_store: None,
         };
         ConfigDefaults {
@@ -523,8 +527,9 @@ impl SettingsSpec for ConfigSpec {
             settings.hybrid = settings.hybrid_cfg.enabled;
         }
         if let Some(raw) = patch.providers {
-            settings.providers = providers_from_raw(raw)?;
+            settings.providers = providers_from_raw(raw, defaults.initial.providers.clone())?;
             origins.set("providers", source)?;
+            local_settings::set_origins(&settings.providers, origins, source)?;
         }
         if let Some(patch) = patch.search {
             SearchSpec::overlay(
@@ -603,6 +608,7 @@ impl ConfigSpec {
         ] {
             view.push(key, value, None)?;
         }
+        local_settings::view_fields(&settings.providers, view)?;
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
         if view.has_field(crate::vector_cache::settings::MAX_BYTES_FIELD.key) {
             let policy = settings

@@ -352,6 +352,13 @@ pub trait Provider: Sync {
 /// `fastembed` — local ONNX inference behind `hybrid-local` (ADR-17).
 struct FastembedProvider;
 
+const FASTEMBED_RECORD_KEYS: [&str; 4] = [
+    "runtime",
+    "runtime_path",
+    super::local_settings::INFERENCE_KEYS[0],
+    super::local_settings::INFERENCE_KEYS[1],
+];
+
 impl Provider for FastembedProvider {
     fn name(&self) -> &'static str {
         PROVIDER_FASTEMBED
@@ -366,31 +373,28 @@ impl Provider for FastembedProvider {
     }
 
     fn parse_record(&self, table: &toml::Table) -> Result<ProviderRecord> {
-        reject_unknown_keys(PROVIDER_FASTEMBED, table, &["runtime", "runtime_path"])?;
+        use super::local_settings::InferencePatch;
+        reject_unknown_keys(PROVIDER_FASTEMBED, table, &FASTEMBED_RECORD_KEYS)?;
         let enabled = record_enabled(PROVIDER_FASTEMBED, table)?;
-        // Reuse the typed view's own type checks instead of duplicating them.
-        let mut params = toml::Table::new();
-        for key in ["runtime", "runtime_path"] {
-            if let Some(value) = table.get(key) {
-                if !value.is_str() {
-                    return Err(super::config::type_error(
-                        &format!("providers.{PROVIDER_FASTEMBED}"),
-                        key,
-                        "a string",
-                    ));
-                }
-                params.insert((*key).to_owned(), value.clone());
-            }
-        }
-        Ok(ProviderRecord { enabled, params })
+        let params = FASTEMBED_RECORD_KEYS
+            .into_iter()
+            .filter_map(|key| table.get(key).map(|value| (key.to_owned(), value.clone())))
+            .collect();
+        let record = ProviderRecord { enabled, params };
+        super::config::FastembedProvider::from_record(&record)?;
+        InferencePatch::from_record(&record)?;
+        Ok(record)
     }
 
     fn configuration_view(&self, record: &ProviderRecord) -> Result<serde_json::Value> {
         let typed = super::config::FastembedProvider::from_record(record)?;
         Ok(serde_json::json!({
             "enabled": typed.enabled,
-            "parameters": {"runtime": typed.runtime, "runtime_path": typed.runtime_path},
-            "unexposed_parameters": record.params.keys().any(|key| key != "runtime" && key != "runtime_path"),
+            "parameters": {
+                "runtime": typed.runtime,
+                "runtime_path": typed.runtime_path,
+            },
+            "unexposed_parameters": record.params.keys().any(|key| !FASTEMBED_RECORD_KEYS.contains(&key.as_str())),
         }))
     }
 

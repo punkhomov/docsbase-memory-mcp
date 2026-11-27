@@ -242,6 +242,41 @@ mod tests {
         );
     }
     #[test]
+    fn fastembed_defaults_follow_the_captured_cpu_count_without_a_provider_record() {
+        use std::num::NonZeroUsize;
+
+        let original = DefaultsContext {
+            available_parallelism: NonZeroUsize::new(2).unwrap(),
+            ..DefaultsContext::standalone()
+        };
+        let later = DefaultsContext {
+            available_parallelism: NonZeroUsize::new(16).unwrap(),
+            ..original
+        };
+        let captured = Resolution::<ConfigSpec>::new(&original).finish().unwrap();
+        let cloned = Resolution::<ConfigSpec>::from_resolved(&later, &captured)
+            .finish()
+            .unwrap();
+        let fresh = Resolution::<ConfigSpec>::new(&later).finish().unwrap();
+
+        for (snapshot, expected_threads) in [(&captured, 2), (&cloned, 2), (&fresh, 4)] {
+            assert!(snapshot.settings().providers.get("fastembed").is_none());
+            let view = from_resolved(snapshot).unwrap();
+            let value = |key| {
+                view.fields
+                    .iter()
+                    .find(|field| field.key == key)
+                    .unwrap()
+                    .value
+                    .clone()
+            };
+            assert_eq!(value("providers"), json!([]));
+            assert_eq!(value("providers.fastembed.batch_size"), 64);
+            assert_eq!(value("providers.fastembed.intra_threads"), expected_threads);
+        }
+    }
+
+    #[test]
     fn checked_view_rejects_missing_duplicate_and_undeclared_fields() {
         let snapshot = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone())
             .finish()

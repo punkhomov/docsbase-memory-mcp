@@ -21,6 +21,7 @@ mod flight;
 #[cfg(feature = "hybrid-remote")]
 pub mod generation;
 pub mod jobs;
+pub(crate) mod local_settings;
 pub mod meta;
 pub mod provider;
 pub mod provisioning;

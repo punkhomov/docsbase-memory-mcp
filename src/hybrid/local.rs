@@ -9,41 +9,32 @@
 //! `UserDefinedRerankingModel` + `OnnxSource::Memory` (verified load-time
 //! bytes, round-4 C4).
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-
-use fd_lock::RwLockReadGuard;
 use sha2::Digest;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::error::{Error, Result};
 use crate::hybrid::models::{self, ModelEntry, Pooling, Task};
+use crate::platform::file_lease::SharedFileLease;
 use crate::vector_cache::Embedder;
 
 use super::Reranker;
 use super::config::{EmbeddingCfg, ProvidersCfg, RerankerCfg};
+pub use super::local_settings::DEFAULT_BATCH_SIZE;
+use super::local_settings::InferenceSettings;
 
 /// Default embedding max length (NFR-4).
 pub const DEFAULT_MAX_LENGTH: usize = 512;
 
-/// Batch size passed to fastembed inference (NFR-4).
-pub const DEFAULT_BATCH_SIZE: usize = 64;
-
-/// `intra_threads` cap (NFR-4): `min(4, cores)`.
-fn capped_intra_threads() -> usize {
-    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    cores.min(4)
-}
-
-/// One model instance per cache key (NFR-4/NFR-7): canonical model id +
-/// `max_length` + `intra_threads` + runtime path. The process-wide map
-/// lives in [`load_embedder`].
+/// Identity of a live native model session (NFR-4/NFR-7).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelCacheKey {
     /// Canonical model id (`embedding_model_id`).
     pub model_id: String,
     /// Tokenizer max length.
     pub max_length: usize,
-    /// Capped intra-op threads.
+    /// Resolved intra-op threads.
     pub intra_threads: Option<usize>,
     /// Resolved runtime library path.
     pub runtime: PathBuf,
@@ -77,59 +68,82 @@ pub fn embedder(cfg: &EmbeddingCfg, providers: &ProvidersCfg) -> Result<Arc<dyn 
             ),
         });
     }
-    let key = cache_key(cfg, runtime);
-    load_embedder(entry, &key)
+    let inference = providers.fastembed_inference()?;
+    let key = embedding_key(cfg, runtime, inference);
+    let instance = get_or_load_by_key(key.clone(), embedder_instances(), || {
+        FastEmbedEmbedder::load(entry, &key).map(Arc::new)
+    })?;
+    Ok(Arc::new(FastEmbedEmbedder {
+        entry,
+        model_id: key.model_id,
+        instance,
+        batch_size: inference.batch_size,
+    }))
 }
 
 /// Builds the process-wide cache key for an embedding config — the single
 /// source of truth for the dedup contract (NFR-4/NFR-7): the canonical
 /// `model_id` (provider, model, dims, normalize, revision, prompt version),
-/// the bounded max length, the capped intra-op threads and the resolved
-/// runtime path. A config-only change that must invalidate cached vectors
-/// has to change one of these (round-5 deepseek: this used to be inlined in
-/// `embedder` and was therefore untestable without a real runtime).
+/// the bounded max length, the host's standalone thread default and the
+/// resolved runtime path. The stage factory builds its key from the captured
+/// provider settings. Only the model ID names cached vectors.
 #[must_use]
 pub fn cache_key(cfg: &EmbeddingCfg, runtime: PathBuf) -> ModelCacheKey {
+    embedding_key(
+        cfg,
+        runtime,
+        InferenceSettings::defaults(
+            crate::config::bootstrap::DefaultsContext::for_host().available_parallelism,
+        ),
+    )
+}
+
+fn embedding_key(
+    cfg: &EmbeddingCfg,
+    runtime: PathBuf,
+    inference: InferenceSettings,
+) -> ModelCacheKey {
+    model_key(super::config::embedding_model_id(cfg), runtime, inference)
+}
+
+fn model_key(model_id: String, runtime: PathBuf, inference: InferenceSettings) -> ModelCacheKey {
     ModelCacheKey {
-        model_id: super::config::embedding_model_id(cfg),
+        model_id,
         max_length: DEFAULT_MAX_LENGTH,
-        intra_threads: Some(capped_intra_threads()),
+        intra_threads: Some(inference.intra_threads),
         runtime,
     }
 }
 
-/// Process-wide embedder cache keyed by [`ModelCacheKey`] (one instance per
-/// key; never per config/call, NFR-4/NFR-7). The lock is held only for the
-/// lookup and the final insert — model construction happens outside it so
-/// concurrent loads of the same key serialize on the work, not on the map.
-fn load_embedder(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Arc<dyn Embedder>> {
-    get_or_load_embedder(key.clone(), || {
-        FastEmbedEmbedder::load(entry, key).map(|embedder| Arc::new(embedder) as Arc<dyn Embedder>)
-    })
+struct LoadedModel<T> {
+    model: Mutex<T>,
+    // Drop the native session before releasing the model-directory lease.
+    _lease: SharedFileLease,
 }
+
+type ModelInstances<T> = Mutex<HashMap<ModelCacheKey, Weak<T>>>;
 
 /// Serializes model construction (cold path only, C11): without it, two
 /// cold same-key callers could both run `load()` (two ORT sessions, two
 /// shared-lock attempts) and the re-check would only discard the loser.
-/// The lock is never held while the instance maps are locked, so there is
-/// no lock-order cycle with `embedder_instances`/`reranker_instances`.
+/// Initial lookups release the map lock before waiting for this lock.
 static LOAD_LOCK: Mutex<()> = Mutex::new(());
 
 /// Core process-wide per-key instance cache: returns the existing instance
 /// for `key`, or constructs one with `load` and registers it. The single
-/// generic implementation behind both the embedder and reranker maps (one
-/// instance per key, NFR-4/NFR-7); the map itself is provided per-kind.
+/// generic implementation behind both model maps. Weak entries let the
+/// last stage release the model session and its file lock.
 fn get_or_load_by_key<T: ?Sized>(
     key: ModelCacheKey,
-    instances: &'static Mutex<std::collections::HashMap<ModelCacheKey, Arc<T>>>,
+    instances: &ModelInstances<T>,
     load: impl FnOnce() -> Result<Arc<T>>,
 ) -> Result<Arc<T>> {
     {
         let map = instances
             .lock()
             .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
-        if let Some(existing) = map.get(&key) {
-            return Ok(Arc::clone(existing));
+        if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+            return Ok(existing);
         }
     }
     // Serialize construction; re-check after acquiring so a waiter reuses
@@ -143,46 +157,31 @@ fn get_or_load_by_key<T: ?Sized>(
         let map = instances
             .lock()
             .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
-        if let Some(existing) = map.get(&key) {
-            return Ok(Arc::clone(existing));
+        if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+            return Ok(existing);
         }
     }
     let shared = load()?;
     let mut map = instances
         .lock()
         .map_err(|poison| Error::internal(format!("instance cache lock poisoned: {poison}")))?;
-    map.insert(key, Arc::clone(&shared));
+    map.retain(|_, instance| instance.strong_count() != 0);
+    map.insert(key, Arc::downgrade(&shared));
     Ok(shared)
 }
 
-/// Embedder instance map (process-wide).
-fn embedder_instances()
--> &'static Mutex<std::collections::HashMap<ModelCacheKey, Arc<dyn Embedder>>> {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Embedder>>>> = OnceLock::new();
-    INSTANCES.get_or_init(|| Mutex::new(HashMap::new()))
+fn embedder_instances() -> &'static ModelInstances<LoadedModel<fastembed::TextEmbedding>> {
+    static INSTANCES: OnceLock<ModelInstances<LoadedModel<fastembed::TextEmbedding>>> =
+        OnceLock::new();
+    INSTANCES.get_or_init(Mutex::default)
 }
 
-/// Public test seam for the embedder dedup contract (drives the production
-/// map; see `instant_cache_deduplicates_per_key`).
-pub(crate) fn get_or_load_embedder(
-    key: ModelCacheKey,
-    load: impl FnOnce() -> Result<Arc<dyn Embedder>>,
-) -> Result<Arc<dyn Embedder>> {
-    get_or_load_by_key(key, embedder_instances(), load)
-}
-
-/// Local `fastembed` embedder (T4). Holds the loaded model under a `Mutex`
-/// (fastembed's `embed` takes `&mut self`) and a shared model-cache `.lock`
-/// guard for its lifetime.
+/// Local embedding stage with its own batch size and a shared native session.
 pub struct FastEmbedEmbedder {
-    entry: ModelEntry<'static>,
+    entry: &'static ModelEntry<'static>,
     model_id: String,
-    model: Mutex<fastembed::TextEmbedding>,
-    /// Shared `.lock` guard on `<cache>/<name>/.lock`, held for the
-    /// instance lifetime (FR-7, T9 remove refuses while loaded).
-    _lock_guard: RwLockReadGuard<'static, std::fs::File>,
+    instance: Arc<LoadedModel<fastembed::TextEmbedding>>,
+    batch_size: usize,
 }
 
 impl FastEmbedEmbedder {
@@ -193,7 +192,10 @@ impl FastEmbedEmbedder {
     /// # Errors
     /// Admission before load (runtime/model); `Internal` after a successful
     /// load when the session/tokenizer construction fails.
-    fn load(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Self> {
+    fn load(
+        entry: &'static ModelEntry<'static>,
+        key: &ModelCacheKey,
+    ) -> Result<LoadedModel<fastembed::TextEmbedding>> {
         // The runtime must be initialized before any fastembed constructor
         // (FR-11). `init` is idempotent per process.
         super::runtime::init(&key.runtime)?;
@@ -230,38 +232,33 @@ impl FastEmbedEmbedder {
         model = model.with_quantization(quantization);
         // `output_key` is a plain field (registry rows carry it for exotic
         // intermediate heads); leave the default precedence otherwise. The
-        // enum needs `&'static str` — leak one copy (process-long).
+        // enum needs `&'static str`, which the compiled registry supplies.
         if let Some(output_key) = entry.output_key {
-            let static_key: &'static str = Box::leak(output_key.to_owned().into_boxed_str());
-            model.output_key = Some(fastembed::OutputKey::ByName(static_key));
+            model.output_key = Some(fastembed::OutputKey::ByName(output_key));
         }
 
-        let options = fastembed::InitOptionsUserDefined::new()
-            .with_max_length(key.max_length)
-            .with_intra_threads(key.intra_threads.unwrap_or(1));
+        let model =
+            fastembed::TextEmbedding::try_new_from_user_defined(model, embedding_options(key))
+                .map_err(|err| {
+                    Error::internal(format!("failed to load the fastembed model: {err}"))
+                })?;
 
-        let model = fastembed::TextEmbedding::try_new_from_user_defined(model, options)
-            .map_err(|err| Error::internal(format!("failed to load the fastembed model: {err}")))?;
-
-        let model_id = key.model_id.clone();
-        let entry = clone_entry(entry);
-        Ok(Self {
-            entry,
-            model_id,
+        Ok(LoadedModel {
             model: Mutex::new(model),
-            _lock_guard: lock_guard,
+            _lease: lock_guard,
         })
     }
 
     /// Query embedding with the registry `query_prefix` (FR-10).
     fn embed_text(&self, text: &str, is_query: bool) -> Result<Vec<f32>> {
-        let prefixed = apply_role_prefix(text, &self.entry, is_query);
+        let prefixed = apply_role_prefix(text, self.entry, is_query);
         let mut model = self
+            .instance
             .model
             .lock()
             .map_err(|poison| Error::internal(format!("embedder lock poisoned: {poison}")))?;
         let mut vectors = model
-            .embed([prefixed], Some(DEFAULT_BATCH_SIZE))
+            .embed([prefixed], Some(self.batch_size))
             .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))?;
         vectors
             .pop()
@@ -275,32 +272,21 @@ impl Embedder for FastEmbedEmbedder {
     }
 
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        // Batch (panel C10): one mutex acquisition and one fastembed session
-        // run per `DEFAULT_BATCH_SIZE` chunk instead of one per text.
+        // Hold the session once and pass the resolved batch size to inference.
         let prefixed: Vec<String> = texts
             .iter()
-            .map(|text| apply_role_prefix(text, &self.entry, false))
+            .map(|text| apply_role_prefix(text, self.entry, false))
             .collect();
         let mut model = self
+            .instance
             .model
             .lock()
             .map_err(|poison| Error::internal(format!("embedder lock poisoned: {poison}")))?;
-        let mut out = Vec::with_capacity(prefixed.len());
-        for range in batch_chunks(prefixed.len()) {
-            let chunk = &prefixed[range];
-            let vectors = model
-                .embed(chunk, Some(DEFAULT_BATCH_SIZE))
-                .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))?;
-            if vectors.len() != chunk.len() {
-                return Err(Error::internal(format!(
-                    "fastembed returned {} vectors for {} inputs",
-                    vectors.len(),
-                    chunk.len()
-                )));
-            }
-            out.extend(vectors);
-        }
-        Ok(out)
+        embed_batches(&prefixed, self.batch_size, |chunk, batch_size| {
+            model
+                .embed(chunk, Some(batch_size))
+                .map_err(|err| Error::internal(format!("fastembed inference failed: {err}")))
+        })
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
@@ -339,40 +325,27 @@ pub fn reranker(cfg: &RerankerCfg, providers: &ProvidersCfg) -> Result<Arc<dyn R
     // vector-affecting components (scores are never cached; the revision is
     // build-static, so `@r<rev8>` adds nothing today). Kept as the canonical
     // `model_id` for the dedup contract (NFR-4).
-    let key = ModelCacheKey {
-        model_id: format!("fastembed/{}", cfg.model),
-        max_length: DEFAULT_MAX_LENGTH,
-        intra_threads: Some(capped_intra_threads()),
-        runtime,
-    };
-    get_or_load_reranker(key.clone(), || {
-        FastEmbedReranker::load(entry, &key).map(|reranker| Arc::new(reranker) as Arc<dyn Reranker>)
-    })
+    let inference = providers.fastembed_inference()?;
+    let key = model_key(format!("fastembed/{}", cfg.model), runtime, inference);
+    let instance = get_or_load_by_key(key.clone(), reranker_instances(), || {
+        FastEmbedReranker::load(entry, &key).map(Arc::new)
+    })?;
+    Ok(Arc::new(FastEmbedReranker {
+        instance,
+        batch_size: inference.batch_size,
+    }))
 }
 
-/// Reranker instance map (process-wide).
-fn reranker_instances()
--> &'static Mutex<std::collections::HashMap<ModelCacheKey, Arc<dyn Reranker>>> {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-    static INSTANCES: OnceLock<Mutex<HashMap<ModelCacheKey, Arc<dyn Reranker>>>> = OnceLock::new();
-    INSTANCES.get_or_init(|| Mutex::new(HashMap::new()))
+fn reranker_instances() -> &'static ModelInstances<LoadedModel<fastembed::TextRerank>> {
+    static INSTANCES: OnceLock<ModelInstances<LoadedModel<fastembed::TextRerank>>> =
+        OnceLock::new();
+    INSTANCES.get_or_init(Mutex::default)
 }
 
-/// Public test seam for the reranker dedup contract.
-pub(crate) fn get_or_load_reranker(
-    key: ModelCacheKey,
-    load: impl FnOnce() -> Result<Arc<dyn Reranker>>,
-) -> Result<Arc<dyn Reranker>> {
-    get_or_load_by_key(key, reranker_instances(), load)
-}
-
-/// Local `fastembed` cross-encoder reranker (T5). Uses the BYO path with
-/// `OnnxSource::Memory` (load-time verified bytes, round-4 C4) and holds
-/// the shared model-cache `.lock` guard for its lifetime.
+/// Local `FastEmbed` cross-encoder stage with a shared native session.
 pub struct FastEmbedReranker {
-    model: Mutex<fastembed::TextRerank>,
-    _lock_guard: RwLockReadGuard<'static, std::fs::File>,
+    instance: Arc<LoadedModel<fastembed::TextRerank>>,
+    batch_size: usize,
 }
 
 impl FastEmbedReranker {
@@ -381,7 +354,10 @@ impl FastEmbedReranker {
     /// # Errors
     /// Admission before load (runtime/model); `Internal` after a successful
     /// load when session/tokenizer construction fails.
-    fn load(entry: &ModelEntry<'_>, key: &ModelCacheKey) -> Result<Self> {
+    fn load(
+        entry: &ModelEntry<'_>,
+        key: &ModelCacheKey,
+    ) -> Result<LoadedModel<fastembed::TextRerank>> {
         super::runtime::init(&key.runtime)?;
         let cache_dir = models::cache_dir(entry.name, entry.revision);
         let lock_guard = take_shared_lock(&cache_dir)?;
@@ -404,16 +380,13 @@ impl FastEmbedReranker {
             fastembed::OnnxSource::Memory(onnx),
             tokenizer_files,
         );
-        let options = fastembed::RerankInitOptionsUserDefined::new()
-            .with_max_length(key.max_length)
-            .with_intra_threads(key.intra_threads.unwrap_or(1));
-        let model =
-            fastembed::TextRerank::try_new_from_user_defined(model, options).map_err(|err| {
+        let model = fastembed::TextRerank::try_new_from_user_defined(model, reranking_options(key))
+            .map_err(|err| {
                 Error::internal(format!("failed to load the fastembed reranker: {err}"))
             })?;
-        Ok(Self {
+        Ok(LoadedModel {
             model: Mutex::new(model),
-            _lock_guard: lock_guard,
+            _lease: lock_guard,
         })
     }
 }
@@ -421,12 +394,13 @@ impl FastEmbedReranker {
 impl Reranker for FastEmbedReranker {
     fn rerank(&self, query: &str, docs: &[String], top_n: usize) -> Result<Vec<(usize, f32)>> {
         let mut model = self
+            .instance
             .model
             .lock()
             .map_err(|poison| Error::internal(format!("reranker lock poisoned: {poison}")))?;
         let docs_ref: Vec<&str> = docs.iter().map(String::as_str).collect();
         let results = model
-            .rerank(query, &docs_ref, false, Some(DEFAULT_BATCH_SIZE))
+            .rerank(query, &docs_ref, false, Some(self.batch_size))
             .map_err(|err| Error::internal(format!("fastembed rerank inference failed: {err}")))?;
         Ok(rerank_scores(&results, top_n))
     }
@@ -461,14 +435,36 @@ fn tokenizer_files(cache_dir: &Path, entry: &ModelEntry<'_>) -> Result<fastembed
     })
 }
 
-/// Splits `len` items into `DEFAULT_BATCH_SIZE`-sized index ranges (panel
-/// C10). Pure and unit-tested; `FastEmbedEmbedder::embed` runs one session
-/// call per range.
-fn batch_chunks(len: usize) -> Vec<std::ops::Range<usize>> {
-    (0..len)
-        .step_by(DEFAULT_BATCH_SIZE)
-        .map(|start| start..(start + DEFAULT_BATCH_SIZE).min(len))
-        .collect()
+fn embedding_options(key: &ModelCacheKey) -> fastembed::InitOptionsUserDefined {
+    fastembed::InitOptionsUserDefined::new()
+        .with_max_length(key.max_length)
+        .with_intra_threads(key.intra_threads.unwrap_or(1))
+}
+
+fn reranking_options(key: &ModelCacheKey) -> fastembed::RerankInitOptionsUserDefined {
+    fastembed::RerankInitOptionsUserDefined::new()
+        .with_max_length(key.max_length)
+        .with_intra_threads(key.intra_threads.unwrap_or(1))
+}
+
+fn embed_batches(
+    texts: &[String],
+    batch_size: usize,
+    mut infer: impl FnMut(&[String], usize) -> Result<Vec<Vec<f32>>>,
+) -> Result<Vec<Vec<f32>>> {
+    let mut out = Vec::with_capacity(texts.len());
+    for chunk in texts.chunks(batch_size) {
+        let vectors = infer(chunk, batch_size)?;
+        if vectors.len() != chunk.len() {
+            return Err(Error::internal(format!(
+                "fastembed returned {} vectors for {} inputs",
+                vectors.len(),
+                chunk.len()
+            )));
+        }
+        out.extend(vectors);
+    }
+    Ok(out)
 }
 
 /// Applies the registry role prefix (FR-10): queries get `query_prefix`,
@@ -546,7 +542,7 @@ fn read_cache_file(cache_dir: &Path, path: &Path, entry: &ModelEntry<'_>) -> Res
 /// (and is what `models remove` probes exclusively, FR-7). The lock lives
 /// at the model root, NOT inside the revision dir, so it survives a fetch
 /// promote (round-2 D2).
-pub(crate) fn take_shared_lock(dir: &Path) -> Result<RwLockReadGuard<'static, std::fs::File>> {
+pub(crate) fn take_shared_lock(dir: &Path) -> Result<SharedFileLease> {
     let root = dir
         .parent()
         .ok_or_else(|| Error::internal(format!("cache path has no parent: {}", dir.display())))?;
@@ -579,9 +575,7 @@ pub(crate) fn take_shared_lock(dir: &Path) -> Result<RwLockReadGuard<'static, st
             ));
         }
     };
-    let lock: &'static mut fd_lock::RwLock<std::fs::File> =
-        Box::leak(Box::new(fd_lock::RwLock::new(file)));
-    match lock.try_read() {
+    match SharedFileLease::try_acquire(file) {
         Ok(guard) => Ok(guard),
         Err(_) => {
             // The exclusive holder may be a concurrent `models remove` or an
@@ -597,36 +591,27 @@ pub(crate) fn take_shared_lock(dir: &Path) -> Result<RwLockReadGuard<'static, st
     }
 }
 
-/// Leaks a `'static` copy of a registry row (model instances are process-long
-/// by cache-key design).
-fn clone_entry(entry: &ModelEntry<'_>) -> ModelEntry<'static> {
-    let files = Box::leak(entry.files.to_vec().into_boxed_slice());
-    ModelEntry {
-        name: Box::leak(entry.name.to_owned().into_boxed_str()),
-        task: entry.task,
-        repo: Box::leak(entry.repo.to_owned().into_boxed_str()),
-        revision: Box::leak(entry.revision.to_owned().into_boxed_str()),
-        dim: entry.dim,
-        pooling: entry.pooling,
-        quantization: entry
-            .quantization
-            .map(|q| -> &'static str { Box::leak(q.to_owned().into_boxed_str()) }),
-        output_key: entry
-            .output_key
-            .map(|k| -> &'static str { Box::leak(k.to_owned().into_boxed_str()) }),
-        license: Box::leak(entry.license.to_owned().into_boxed_str()),
-        query_prefix: Box::leak(entry.query_prefix.to_owned().into_boxed_str()),
-        passage_prefix: Box::leak(entry.passage_prefix.to_owned().into_boxed_str()),
-        prompt_version: entry.prompt_version,
-        files,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::config::PROVIDER_FASTEMBED;
     use super::*;
     use crate::hybrid::models::test_support::{FakeSource, fake_cache_dir, fake_entry};
+
+    fn get_or_load_embedder(
+        key: ModelCacheKey,
+        load: impl FnOnce() -> Result<Arc<dyn Embedder>>,
+    ) -> Result<Arc<dyn Embedder>> {
+        static INSTANCES: OnceLock<ModelInstances<dyn Embedder>> = OnceLock::new();
+        get_or_load_by_key(key, INSTANCES.get_or_init(Mutex::default), load)
+    }
+
+    fn get_or_load_reranker(
+        key: ModelCacheKey,
+        load: impl FnOnce() -> Result<Arc<dyn Reranker>>,
+    ) -> Result<Arc<dyn Reranker>> {
+        static INSTANCES: OnceLock<ModelInstances<dyn Reranker>> = OnceLock::new();
+        get_or_load_by_key(key, INSTANCES.get_or_init(Mutex::default), load)
+    }
 
     #[test]
     fn read_cache_file_accepts_verified_bytes() {
@@ -680,7 +665,12 @@ mod tests {
         assert_eq!(key.max_length, DEFAULT_MAX_LENGTH, "bounded max length");
         assert_eq!(
             key.intra_threads,
-            Some(capped_intra_threads()),
+            Some(
+                InferenceSettings::defaults(
+                    crate::config::bootstrap::DefaultsContext::for_host().available_parallelism
+                )
+                .intra_threads
+            ),
             "capped threads"
         );
         assert!(key.intra_threads.unwrap_or(0) <= 4, "never above the cap");
@@ -699,26 +689,18 @@ mod tests {
     }
 
     #[test]
-    fn batch_chunks_covers_exact_and_partial_tails() {
-        assert_eq!(batch_chunks(0), Vec::<std::ops::Range<usize>>::new());
-        let one = batch_chunks(1);
-        assert_eq!(one, vec![0..1]);
-        let full = batch_chunks(DEFAULT_BATCH_SIZE);
-        assert_eq!(full, vec![0..DEFAULT_BATCH_SIZE]);
-        let mixed = batch_chunks(DEFAULT_BATCH_SIZE + 7);
-        assert_eq!(
-            mixed,
-            vec![
-                0..DEFAULT_BATCH_SIZE,
-                DEFAULT_BATCH_SIZE..DEFAULT_BATCH_SIZE + 7
-            ]
-        );
-        // Coverage: concatenated ranges cover [0, len) exactly once.
-        let len = 3 * DEFAULT_BATCH_SIZE + 3;
-        let ranges = batch_chunks(len);
-        let covered: usize = ranges.iter().map(std::iter::ExactSizeIterator::len).sum();
-        assert_eq!(covered, len);
-        assert!(ranges.iter().all(|range| range.len() <= DEFAULT_BATCH_SIZE));
+    fn embed_batches_pass_the_resolved_size_and_cover_every_input() {
+        let texts: Vec<_> = (0..8).map(|item| item.to_string()).collect();
+        let mut chunks = Vec::new();
+        let vectors = embed_batches(&texts, 3, |chunk, batch_size| {
+            assert_eq!(batch_size, 3);
+            chunks.push(chunk.to_vec());
+            Ok(vec![vec![1.0_f32]; chunk.len()])
+        })
+        .unwrap();
+        assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), [3, 3, 2]);
+        assert_eq!(chunks.into_iter().flatten().collect::<Vec<_>>(), texts);
+        assert_eq!(vectors.len(), texts.len());
     }
 
     #[test]
@@ -867,9 +849,97 @@ mod tests {
     }
 
     #[test]
+    fn last_model_handle_releases_the_shared_file_lock() {
+        struct LockedModel<T> {
+            _lease: T,
+        }
+        impl<T: Send + Sync> Embedder for LockedModel<T> {
+            fn model_id(&self) -> &'static str {
+                "fastembed/retained-model"
+            }
+            fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>> {
+                Err(Error::internal("not used"))
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let key = ModelCacheKey {
+            model_id: "fastembed/retained-model".to_owned(),
+            max_length: DEFAULT_MAX_LENGTH,
+            intra_threads: Some(1),
+            runtime: root.path().join("runtime"),
+        };
+        let load = || {
+            let model: Arc<dyn Embedder> = Arc::new(LockedModel {
+                _lease: take_shared_lock(&root.path().join("rev"))?,
+            });
+            Ok(model)
+        };
+        let first = get_or_load_embedder(key.clone(), load).unwrap();
+        let retained =
+            get_or_load_embedder(key.clone(), || panic!("the same model is still live")).unwrap();
+        let mut exclusive = fd_lock::RwLock::new(
+            std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(root.path().join(".lock"))
+                .unwrap(),
+        );
+        drop(first);
+        assert!(exclusive.try_write().is_err());
+        drop(retained);
+        assert!(exclusive.try_write().is_ok());
+        assert!(get_or_load_embedder(key, load).is_ok());
+    }
+
+    #[test]
+    fn fastembed_inference_settings_accept_positive_provider_overrides() {
+        let source = "config_version=2\n[providers.fastembed]\nenabled = true\nbatch_size = 3\nintra_threads = 2\n";
+        let config = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("config.toml"), source).unwrap();
+        let parsed =
+            crate::config::Config::global_from(config.path()).expect("provider inference settings");
+        let inference = parsed.providers.fastembed_inference().unwrap();
+        assert_eq!(inference.batch_size, 3);
+        let cfg = EmbeddingCfg {
+            provider: PROVIDER_FASTEMBED.to_owned(),
+            model: "multilingual-e5-small".to_owned(),
+            dimensions: 384,
+            normalize: true,
+        };
+        let runtime = PathBuf::from("local-ort");
+        let baseline = cache_key(&cfg, runtime.clone());
+        let key = embedding_key(&cfg, runtime.clone(), inference);
+        assert_eq!(key.model_id, baseline.model_id);
+        assert_eq!(embedding_options(&key).max_length, DEFAULT_MAX_LENGTH);
+        assert_eq!(embedding_options(&key).intra_threads, Some(2));
+        assert_eq!(reranking_options(&key).intra_threads, Some(2));
+        let other_batch = InferenceSettings {
+            batch_size: 13,
+            ..inference
+        };
+        assert_eq!(embedding_key(&cfg, runtime, other_batch), key);
+    }
+
+    #[test]
+    fn fastembed_inference_settings_reject_invalid_counts() {
+        let owner = crate::hybrid::provider(PROVIDER_FASTEMBED).unwrap();
+        for (key, value) in [
+            ("batch_size", "0"),
+            ("batch_size", "-1"),
+            ("intra_threads", "0"),
+            ("intra_threads", "2147483648"),
+            ("intra_threads", "1.5"),
+        ] {
+            let raw: toml::Table = format!("{key} = {value}").parse().unwrap();
+            let error = owner.parse_record(&raw).unwrap_err();
+            assert!(error.inner_message().contains(key), "{error}");
+        }
+    }
+
+    #[test]
     fn instant_cache_deduplicates_per_key() {
-        // Drive the production map (`get_or_load_embedder` + `INSTANCES`)
-        // with fake embedders — no real weights needed (NFR-4/NFR-7).
+        // Use the production instance registry algorithm with fake embedders.
         let key_a = ModelCacheKey {
             model_id: "fastembed/x@d384@l2@raaaaaaaa@p1".to_owned(),
             max_length: 512,
