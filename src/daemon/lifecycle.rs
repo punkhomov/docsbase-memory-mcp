@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
+use crate::config::capture::{ReadFailure, read_file};
 use crate::daemon::launch::{AdmittedLaunch, LaunchConfig, LaunchSnapshot};
 use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
@@ -71,7 +72,12 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
     if is_running(cache) {
         return Ok(());
     }
-    let launch = crate::daemon::launch::require_shared_without_daemon(
+    let bootstrap = BootstrapContext::capture_host(EntrypointFacts {
+        mode: crate::config::bootstrap::Entrypoint::Autostart,
+        is_tty: false,
+    })?;
+    let launch = crate::daemon::launch::require_shared_snapshot(
+        &LaunchSnapshot::capture_with_bootstrap(&bootstrap),
         crate::config::resolve::LaunchUse::Runtime,
     )?;
     let settings = &launch.config.settings().daemon;
@@ -99,7 +105,7 @@ pub fn ensure_daemon_with(cache: &Path, exe: Option<&Path>) -> Result<()> {
         return wait_for_daemon(cache, settings);
     }
     cleanup_stale(cache)?;
-    spawn_detached(cache, exe)?;
+    spawn_detached(cache, exe, &bootstrap, settings.log_rotate_bytes)?;
     wait_for_daemon(cache, settings)
 }
 
@@ -271,25 +277,19 @@ pub fn run_daemon_with_launch_and_bootstrap(
 }
 
 // The existing CLI retains its documented warning/default startup adapter.
-pub(crate) fn run_daemon_from_launch(cache: &Path, launch: LaunchConfig) -> Result<()> {
+pub(crate) fn run_daemon_from_launch(
+    cache: &Path,
+    launch: LaunchConfig,
+    bootstrap: &BootstrapContext,
+) -> Result<()> {
     let settings = crate::store::settings::db_from_config(&launch.config)?;
     let pool = crate::store::settings::pool_from_config(&launch.config)?;
     let dense = launch.config.settings().dense.clone();
-    run_with_launch(
-        cache,
-        &settings,
-        &pool,
-        &dense,
-        launch,
-        &runtime_bootstrap()?,
-    )
+    run_with_launch(cache, &settings, &pool, &dense, launch, bootstrap)
 }
 
 fn runtime_bootstrap() -> Result<BootstrapContext> {
-    let cores = std::thread::available_parallelism().map_err(|error| {
-        Error::internal_with_source("capture daemon runtime parallelism", error)
-    })?;
-    BootstrapContext::capture_with(cores.get(), EntrypointFacts::standalone(), std::env::var_os)
+    BootstrapContext::capture_host(EntrypointFacts::standalone())
 }
 
 fn run_with_launch(
@@ -301,6 +301,22 @@ fn run_with_launch(
     bootstrap: &BootstrapContext,
 ) -> Result<()> {
     use crate::config::schema::SettingsSpec;
+    let mut launch = launch;
+    let cpu_pool = Arc::new(crate::hybrid::cpu::CpuPool::new(
+        bootstrap.rayon_threads.value,
+    ));
+    #[cfg(feature = "hybrid-local")]
+    {
+        let mut settings = launch.config.settings().clone();
+        settings
+            .providers
+            .bind_runtime_bootstrap(bootstrap, cache, Arc::clone(&cpu_pool));
+        launch.config =
+            crate::config::schema::Resolved::new(settings, launch.config.provenance().clone());
+    }
+    launch.cpu_pool = Some(cpu_pool);
+    launch.ipc_debug = bootstrap.ipc_debug.value;
+    launch.watch_debug = bootstrap.watch_debug.value;
     launch.config.settings().validate()?;
     crate::hybrid::dense_settings::DenseSpec::validate(
         dense_settings,
@@ -333,7 +349,8 @@ fn run_with_launch(
         .ok_or_else(|| Error::internal("native daemon physical capacity overflow"))?;
     let transport_policy =
         crate::ipc::transport::policy(native_handles, &launch.config.settings().daemon)?;
-    let launch = launch.admit(cache, settings)?;
+    let config_lock_dir = crate::config::paths::config_lock_dir_from(bootstrap).ok();
+    let launch = launch.admit_with_config_lock_dir(cache, settings, config_lock_dir)?;
     run_with_admission(
         cache,
         &transport_policy,
@@ -542,8 +559,9 @@ async fn serve(
         &policy.remote,
     )?);
     let (activity, events) = super::request::ActivitySource::channel(policy.daemon.max_events);
-    let watchers = Arc::new(crate::watch::Watchers::with_enabled(
-        launch.website.is_none(),
+    let watchers = Arc::new(crate::watch::Watchers::with_diagnostics(
+        policy.watchers_enabled(),
+        launch.launch.watch_debug,
     ));
     jobs.retain_watchers(watchers.clone(), activity.clone())?;
     let permit = workers.control().await?;
@@ -873,8 +891,16 @@ fn cleanup_stale(cache: &Path) -> Result<()> {
     Ok(())
 }
 
-fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
-    let mut command = Command::new(exe.map_or_else(daemon_exe, Path::to_path_buf));
+fn spawn_detached(
+    cache: &Path,
+    exe: Option<&Path>,
+    bootstrap: &BootstrapContext,
+    log_rotate_bytes: u64,
+) -> Result<()> {
+    let mut command = Command::new(exe.map_or_else(
+        || crate::config::paths::daemon_exe_from(bootstrap.daemon_exe.as_ref()).value,
+        Path::to_path_buf,
+    ));
     platform::process::detach(&mut command);
     command
         .arg("serve")
@@ -883,15 +909,15 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
         .stdin(Stdio::null());
     // NFR-8: the detached daemon's diagnostics belong in logs/daemon.log
     // (0600), not /dev/null; a missing log file is a setup error.
-    let log = open_daemon_log(cache)?;
+    let log = open_daemon_log(cache, log_rotate_bytes)?;
     let log_err = log
         .try_clone()
         .map_err(|err| Error::internal_with_source("clone daemon log", err))?;
     command
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    if let Some(config_dir) = std::env::var_os("DOCSBASE_CONFIG_DIR") {
-        command.env("DOCSBASE_CONFIG_DIR", config_dir);
+    if let Some(config_dir) = &bootstrap.config_dir {
+        command.env("DOCSBASE_CONFIG_DIR", &config_dir.value);
     }
     command
         .spawn()
@@ -900,27 +926,20 @@ fn spawn_detached(cache: &Path, exe: Option<&Path>) -> Result<()> {
 }
 
 /// Opens (creating if needed) `logs/daemon.log` with owner-only permissions.
-fn open_daemon_log(cache: &Path) -> Result<File> {
+fn open_daemon_log(cache: &Path, log_rotate_bytes: u64) -> Result<File> {
     let dir = cache.join("logs");
     platform::fs::secure_dir(&dir)
         .map_err(|err| Error::internal_with_source("create logs dir", err))?;
     let path = dir.join("daemon.log");
     // The daemon holds this file as stdout/stderr for its whole life, so it
     // can only be rotated between processes — here, before spawning (T48).
-    match crate::limits::rotate_log(&path) {
+    match crate::limits::rotate_log_after(&path, log_rotate_bytes) {
         Ok(true) => eprintln!("rotated {}", path.display()),
         Ok(false) => {}
         Err(err) => eprintln!("warning: cannot rotate {}: {err}", path.display()),
     }
     platform::fs::open_private_log(&path)
         .map_err(|err| Error::internal_with_source(format!("open {}", path.display()), err))
-}
-
-fn daemon_exe() -> PathBuf {
-    std::env::var_os("DOCSBASE_DAEMON_EXE").map_or_else(
-        || std::env::current_exe().unwrap_or_else(|_| PathBuf::from("docsbase")),
-        PathBuf::from,
-    )
 }
 
 fn wait_for_daemon(cache: &Path, settings: &DaemonSettings) -> Result<()> {
@@ -970,24 +989,16 @@ fn write_state(cache: &Path, schema_version: u32) -> Result<()> {
 
 pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
     let path = state_file(cache);
-    // Bound the read: an oversized state file is corrupt input, not something
-    // to load into memory (T48).
-    match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
+    let limit = crate::limits::MAX_STATE_BYTES;
+    let bytes = match read_file(&path, limit) {
+        Ok(bytes) => bytes,
+        Err(ReadFailure::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(ReadFailure::LimitExceeded) => {
             return Err(Error::internal(format!(
-                "daemon state {} is {} bytes, over the {} byte limit",
-                path.display(),
-                metadata.len(),
-                crate::limits::MAX_STATE_BYTES
+                "daemon state {} is over the {limit} byte limit",
+                path.display()
             )));
         }
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(Error::internal_with_source("stat daemon state", err)),
-    }
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(Error::internal_with_source("read daemon state", err)),
     };
     let state = serde_json::from_slice(&bytes)

@@ -4,7 +4,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use super::Config;
-use super::resolve::preview_sources;
+use super::bootstrap::DefaultsContext;
+use super::resolve::preview_sources_with_defaults;
 use super::schema::SourceId;
 use super::source::{ConfigVersion, PreviewConflict, SourceLayer, SourcePreview, invalid};
 use crate::error::Result;
@@ -160,7 +161,10 @@ pub fn draft_migration(
             return Err(invalid("duplicate project observation"));
         }
     }
-    let global_preview = preview_sources(global, None)?;
+    // The source proposal is portable. Use the same explicit defaults
+    // when comparing each original and proposed source pair.
+    let defaults = DefaultsContext::standalone();
+    let global_preview = preview_sources_with_defaults(global, None, &defaults)?;
     let mut draft = MigrationDraft {
         draft_version: 1,
         budgets: vec![BudgetObservation {
@@ -194,7 +198,7 @@ pub fn draft_migration(
                 .push(MigrationBlocker::UninspectedProject(path));
             continue;
         };
-        let preview = preview_sources(global, observation.layer())?;
+        let preview = preview_sources_with_defaults(global, observation.layer(), &defaults)?;
         let source = SourceId::Project(path);
         // A strict v2 global already owns the capacity. Only an explicit v1
         // project override contributes a conflicting legacy value to the survey;
@@ -262,7 +266,7 @@ pub fn draft_migration(
         Some(cap),
         &mut draft,
     )?;
-    let after_global = preview_sources(&proposed_global, None)?;
+    let after_global = preview_sources_with_defaults(&proposed_global, None, &defaults)?;
     verify_equivalent(
         global_preview.effective.settings(),
         after_global.effective.settings(),
@@ -280,7 +284,7 @@ pub fn draft_migration(
                 )
             })
             .transpose()?;
-        let after = preview_sources(&proposed_global, proposed.as_ref())?;
+        let after = preview_sources_with_defaults(&proposed_global, proposed.as_ref(), &defaults)?;
         if !after.conflicts.is_empty() {
             return Err(invalid(
                 "proposed migration retains a legacy vector scope conflict",
@@ -309,6 +313,11 @@ pub fn draft_migration(
 fn verify_equivalent(before: &Config, after: &Config, cap: u64) -> Result<()> {
     let mut expected = before.clone();
     expected.hybrid_cfg.cache.max_bytes = cap;
+    // v2 resolves the legacy traversal explicitly. Its fetch policy is the
+    // same as an omitted v1 traversal.
+    expected
+        .ann_search
+        .get_or_insert_with(crate::hybrid::ann_settings::AnnSearchSettings::legacy_defaults);
     expected
         .vector_store
         .get_or_insert_with(crate::vector_cache::settings::VectorStoreSettings::owner_defaults)

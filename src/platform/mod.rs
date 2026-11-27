@@ -11,6 +11,8 @@
 
 pub(crate) mod basic_attributes;
 pub(crate) mod file_lease;
+#[cfg(feature = "hybrid-local")]
+pub(crate) mod loaded_module;
 pub mod paths;
 pub mod transport;
 

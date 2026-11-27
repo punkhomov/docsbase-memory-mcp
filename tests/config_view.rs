@@ -78,6 +78,63 @@ fn effective_view_matches_real_v1_resolution_and_field_origins() {
 }
 
 #[test]
+fn client_timeouts_report_defaults_overrides_and_native_enforcement() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("config.toml");
+    fs::write(
+        &source,
+        "config_version=2\n[client]\nipc_io_timeout_ms=1234\nmcp_long_timeout_ms=5678\n",
+    )
+    .unwrap();
+
+    let output = serde_json::to_value(view::load_from(directory.path(), None).unwrap()).unwrap();
+    let ipc = row(&output, "client.ipc_io_timeout_ms");
+    assert_eq!(ipc["value"], 1234);
+    assert_eq!(ipc["scope"], "machine");
+    assert_eq!(ipc["unit"], "milliseconds");
+    assert_eq!(ipc["source"], json!({"kind":"global","value":source}));
+    let quick = row(&output, "client.mcp_quick_timeout_ms");
+    assert_eq!(quick["value"], 30_000);
+    assert_eq!(quick["source"], json!({"kind":"defaults"}));
+    assert_eq!(row(&output, "client.mcp_long_timeout_ms")["value"], 5678);
+    assert_eq!(
+        output["blocking_ipc_timeout_capability"],
+        if cfg!(windows) {
+            "windows_named_pipe_io_and_busy_connect"
+        } else {
+            "unix_socket_io"
+        }
+    );
+}
+
+#[test]
+fn client_timeouts_reject_invalid_values_and_project_overrides() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("config.toml");
+    for field in [
+        "ipc_io_timeout_ms",
+        "mcp_quick_timeout_ms",
+        "mcp_long_timeout_ms",
+    ] {
+        for bad in [0_i64, -1, 4_294_967_295] {
+            fs::write(&source, format!("[client]\n{field}={bad}\n")).unwrap();
+            assert!(Config::global_from(directory.path()).is_err());
+        }
+    }
+
+    fs::write(&source, "config_version=2\n").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    for header in ["", "config_version=2\n"] {
+        fs::write(
+            project.path().join(".docsbase.toml"),
+            format!("{header}[client]\nipc_io_timeout_ms=10\n"),
+        )
+        .unwrap();
+        assert!(Config::load_from(directory.path(), Some(project.path())).is_err());
+    }
+}
+
+#[test]
 fn view_defaults_and_v2_budget_do_not_invent_provenance() {
     let missing = tempfile::tempdir().unwrap();
     let output = serde_json::to_value(view::load_from(missing.path(), None).unwrap()).unwrap();
@@ -105,6 +162,71 @@ fn view_defaults_and_v2_budget_do_not_invent_provenance() {
             .iter()
             .any(|f| f["key"] == "hybrid.cache.max_bytes")
     );
+}
+
+#[test]
+fn effective_fastembed_embedding_limit_is_validated_and_global() {
+    let global = tempfile::tempdir().unwrap();
+    let path = global.path().join("config.toml");
+    for invalid in ["2", "513", "\"128\""] {
+        fs::write(
+            &path,
+            format!("config_version=2\n[providers.fastembed]\nembedding_max_length={invalid}\n"),
+        )
+        .unwrap();
+        assert!(resolve::global_from(global.path()).is_err(), "{invalid}");
+    }
+    fs::write(
+        &path,
+        "config_version=2\n[providers.fastembed]\nembedding_max_length=128\n",
+    )
+    .unwrap();
+    let view = serde_json::to_value(view::load_from(global.path(), None).unwrap()).unwrap();
+    let limit = row(&view, "providers.fastembed.embedding_max_length");
+    assert_eq!(limit["value"], 128);
+    assert_eq!(limit["source"], json!({"kind":"global","value":path}));
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join(".docsbase.toml"),
+        "config_version=2\n[providers.fastembed]\nembedding_max_length=64\n",
+    )
+    .unwrap();
+    assert!(resolve::load_from(global.path(), Some(project.path())).is_err());
+}
+
+#[test]
+fn watcher_effective_view_attributes_website_override_to_cli_profile() {
+    use docsbase_memory::daemon::launch::LaunchSnapshot;
+    use docsbase_memory::daemon::settings::{DaemonPatch, DaemonProfile};
+
+    let global = tempfile::tempdir().unwrap();
+    let config = global.path().join("config.toml");
+    fs::write(&config, "config_version = 2\n[watch]\nenabled = true\n").unwrap();
+    let snapshot = LaunchSnapshot::capture_from(global.path());
+    let view = |profile| {
+        let resolved = snapshot
+            .resolve(DaemonPatch {
+                profile: Some(profile),
+                ..DaemonPatch::default()
+            })
+            .unwrap();
+        serde_json::to_value(view::from_resolved(&resolved).unwrap()).unwrap()
+    };
+    let website = view(DaemonProfile::Website {
+        project_root: global.path().to_owned(),
+    });
+    let watcher = row(&website, "watch.enabled");
+    assert_eq!(watcher["value"], false);
+    assert_eq!(watcher["source"], json!({"kind":"global","value":config}));
+    assert_eq!(
+        watcher["derived_from"],
+        json!({"key":"daemon.profile","source":{"kind":"cli"}})
+    );
+
+    let shared = view(DaemonProfile::Shared);
+    let watcher = row(&shared, "watch.enabled");
+    assert_eq!(watcher["value"], true);
+    assert!(watcher.get("derived_from").is_none());
 }
 
 #[test]
@@ -243,6 +365,107 @@ fn effective_cli_is_readonly_and_bare_config_stays_compatible() {
         .assert()
         .failure();
     assert_eq!(snapshot(root.path()), before);
+}
+
+#[test]
+fn effective_cli_reports_captured_bootstrap_values_and_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let before = snapshot(root.path());
+    let output = command(root.path())
+        .args(["config", "effective", "--format=json"])
+        .env("TOKIO_WORKER_THREADS", "2")
+        .env("RAYON_NUM_THREADS", "3")
+        .env("TOKENIZERS_PARALLELISM", "off")
+        .env("DOCSBASE_IPC_DEBUG", "1")
+        .env("DOCSBASE_WATCH_DEBUG", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let view: Value = serde_json::from_slice(&output).unwrap();
+    let bootstrap = &view["bootstrap"];
+    for (key, variable, value) in [
+        (
+            "cache_dir",
+            "DOCSBASE_CACHE_DIR",
+            json!(root.path().join("cache")),
+        ),
+        (
+            "config_dir",
+            "DOCSBASE_CONFIG_DIR",
+            json!(root.path().join("config")),
+        ),
+        (
+            "data_dir",
+            "DOCSBASE_DATA_DIR",
+            json!(root.path().join("data")),
+        ),
+        (
+            "daemon_exe",
+            "DOCSBASE_DAEMON_EXE",
+            json!(root.path().join("must-not-start")),
+        ),
+        (
+            "ort_dylib_path",
+            "ORT_DYLIB_PATH",
+            json!(root.path().join("must-not-load")),
+        ),
+        ("tokio_workers", "TOKIO_WORKER_THREADS", json!(2)),
+        ("rayon_threads", "RAYON_NUM_THREADS", json!(3)),
+        (
+            "tokenizers_parallelism",
+            "TOKENIZERS_PARALLELISM",
+            json!(false),
+        ),
+        ("ipc_debug", "DOCSBASE_IPC_DEBUG", json!(true)),
+        ("watch_debug", "DOCSBASE_WATCH_DEBUG", json!(true)),
+    ] {
+        assert_eq!(
+            bootstrap[key],
+            json!({
+                "value": value,
+                "source": {"kind": "environment", "value": variable},
+            }),
+            "{key}"
+        );
+    }
+    assert!(
+        !String::from_utf8(output)
+            .unwrap()
+            .contains("credential-sentinel")
+    );
+    assert_eq!(snapshot(root.path()), before);
+
+    fs::create_dir(root.path().join("config")).unwrap();
+    let global = root.path().join("config").join("config.toml");
+    fs::write(
+        &global,
+        "config_version=2\n[providers.fastembed]\nenabled=true\nruntime_path='not-loaded-by-the-view'\n",
+    ).unwrap();
+    let output = command(root.path())
+        .args(["config", "effective", "--format=json"])
+        .env_remove("ORT_DYLIB_PATH")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let from_file: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        from_file["bootstrap"]["ort_dylib_path"],
+        json!({
+            "value": "not-loaded-by-the-view",
+            "source": { "kind": "global", "value": global },
+        })
+    );
+    assert_eq!(from_file["provisioning_checked"], false);
+
+    command(root.path())
+        .env("TOKIO_WORKER_THREADS", "invalid")
+        .arg("--help")
+        .assert()
+        .success();
 }
 
 #[test]

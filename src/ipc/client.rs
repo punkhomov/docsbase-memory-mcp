@@ -8,11 +8,9 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
+use crate::ipc::settings::{ClientSettings, ClientSpec};
 use crate::platform;
 use crate::platform::transport::{BlockingStream, Transport};
-
-/// Timeout for a single request/response exchange.
-pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Connected daemon client.
 pub struct Client {
@@ -35,11 +33,25 @@ impl Client {
     /// # Errors
     /// Returns transport errors from configuring an already connected stream.
     pub fn try_connect(transport: &Transport, cache: &Path) -> Result<Option<Self>> {
+        Self::try_connect_with_settings(transport, cache, ClientSpec::DEFAULTS)
+    }
+
+    /// Connects and applies the resolved caller's blocking I/O policy.
+    ///
+    /// # Errors
+    /// Returns transport errors from configuring an already connected stream.
+    pub fn try_connect_with_settings(
+        transport: &Transport,
+        cache: &Path,
+        settings: ClientSettings,
+    ) -> Result<Option<Self>> {
+        let timeout = settings.ipc_io_timeout();
         Self::connect_with_setup(
             transport,
             cache,
-            |stream| stream.set_read_timeout(Some(IO_TIMEOUT)),
-            |stream| stream.set_write_timeout(Some(IO_TIMEOUT)),
+            timeout,
+            |stream| stream.set_read_timeout(Some(timeout)),
+            |stream| stream.set_write_timeout(Some(timeout)),
         )
     }
 
@@ -47,6 +59,7 @@ impl Client {
     pub(crate) fn connect_with_setup(
         transport: &Transport,
         cache: &Path,
+        timeout: Duration,
         read_timeout: impl FnOnce(&BlockingStream) -> std::io::Result<()>,
         write_timeout: impl FnOnce(&BlockingStream) -> std::io::Result<()>,
     ) -> Result<Option<Self>> {
@@ -54,9 +67,12 @@ impl Client {
         let endpoint = platform::daemon_endpoint(cache);
         #[cfg(windows)]
         let connected =
-            transport.connect_blocking_until(&endpoint, std::time::Instant::now() + IO_TIMEOUT);
+            transport.connect_blocking_until(&endpoint, std::time::Instant::now() + timeout);
         #[cfg(unix)]
-        let connected = transport.connect_blocking(&endpoint);
+        let connected = {
+            let _ = timeout;
+            transport.connect_blocking(&endpoint)
+        };
         let Ok(stream) = connected else {
             return Ok(None);
         };
@@ -72,7 +88,7 @@ impl Client {
     /// Adjusts the read timeout for one exchange (long tools need longer).
     ///
     /// # Errors
-    /// Returns [`Error::Internal`] when the socket refuses the option.
+    /// Returns [`Error::Transport`] when the stream refuses the option.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<()> {
         self.stream
             .get_mut()

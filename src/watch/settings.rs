@@ -1,4 +1,4 @@
-//! Watcher queue, timing, and directory expansion policy.
+//! Watcher activation, queues, timing, and directory expansion policy.
 
 use std::time::{Duration, Instant};
 
@@ -26,9 +26,10 @@ pub const DEBOUNCE: Duration = Duration::from_millis(DEFAULT_DEBOUNCE_MS);
 /// Default and maximum batching window from the first event.
 pub const MAX_DEBOUNCE: Duration = Duration::from_millis(MAX_DEBOUNCE_MS);
 
-/// Validated watcher capacities and batch timing.
+/// Validated watcher settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchSettings {
+    enabled: bool,
     debounce_ms: u64,
     max_debounce_ms: u64,
     pub(super) native_queue_capacity: usize,
@@ -41,6 +42,12 @@ pub struct WatchSettings {
 }
 
 impl WatchSettings {
+    /// Whether Shared daemons start filesystem watchers.
+    #[must_use]
+    pub(crate) const fn enabled(self) -> bool {
+        self.enabled
+    }
+
     /// Time to wait after the most recent event.
     #[must_use]
     pub const fn debounce(self) -> Duration {
@@ -70,6 +77,7 @@ impl WatchSettings {
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WatchPatch {
+    enabled: Option<bool>,
     debounce_ms: Option<u64>,
     max_debounce_ms: Option<u64>,
     native_queue_capacity: Option<usize>,
@@ -85,6 +93,7 @@ pub(crate) struct WatchSpec;
 
 impl WatchSpec {
     pub(super) const DEFAULTS: WatchSettings = WatchSettings {
+        enabled: true,
         debounce_ms: DEFAULT_DEBOUNCE_MS,
         max_debounce_ms: MAX_DEBOUNCE_MS,
         native_queue_capacity: MAX_QUEUE_CAPACITY,
@@ -96,8 +105,13 @@ impl WatchSpec {
         max_expand_depth: MAX_EXPAND_DEPTH,
     };
 
-    pub(crate) fn view_fields(settings: WatchSettings, view: &mut ViewBuilder<'_>) -> Result<()> {
+    pub(crate) fn view_fields(
+        settings: WatchSettings,
+        enabled: bool,
+        view: &mut ViewBuilder<'_>,
+    ) -> Result<()> {
         for (key, value) in [
+            ("watch.enabled", enabled.into()),
             ("watch.debounce_ms", settings.debounce_ms.into()),
             ("watch.max_debounce_ms", settings.max_debounce_ms.into()),
             (
@@ -129,6 +143,7 @@ impl SettingsSpec for WatchSpec {
     type Defaults = WatchSettings;
     const SCOPE: Scope = Scope::Project;
     const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::new("watch.enabled", Scope::Daemon, Unit::Boolean),
         FieldSpec::new("watch.debounce_ms", Scope::Project, Unit::Milliseconds),
         FieldSpec::new("watch.max_debounce_ms", Scope::Project, Unit::Milliseconds),
         FieldSpec::new("watch.native_queue_capacity", Scope::Daemon, Unit::Count),
@@ -177,6 +192,7 @@ impl SettingsSpec for WatchSpec {
             };
         }
         apply!(
+            enabled,
             debounce_ms,
             max_debounce_ms,
             native_queue_capacity,

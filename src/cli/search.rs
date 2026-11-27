@@ -38,27 +38,38 @@ pub struct Options {
     pub tags: Vec<String>,
 }
 
+/// One argument object for direct CLI and daemon search.
+#[derive(serde::Serialize)]
+pub(crate) struct Arguments<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) query_mode: QueryMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) limit: Option<usize>,
+    pub(crate) explain: bool,
+    pub(crate) snippet: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dedupe: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) n_per_doc: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path_prefix: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub(crate) tags: &'a [String],
+}
+
 impl Options {
-    /// The MCP argument object, so both seams send exactly the same request.
-    fn args(&self, query: &str, mode: QueryMode) -> serde_json::Value {
-        let mut args = serde_json::json!({
-            "query": query,
-            "query_mode": mode,
-            "limit": self.limit,
-            "explain": self.explain,
-            "snippet": self.snippet,
-            "dedupe": self.dedupe,
-        });
-        if let Some(n) = self.n_per_doc {
-            args["n_per_doc"] = serde_json::json!(n);
+    fn args<'a>(&'a self, query: &'a str, query_mode: QueryMode) -> Arguments<'a> {
+        Arguments {
+            query,
+            query_mode,
+            limit: Some(self.limit),
+            explain: self.explain,
+            snippet: self.snippet,
+            dedupe: Some(&self.dedupe),
+            n_per_doc: self.n_per_doc,
+            path_prefix: self.path_prefix.as_deref(),
+            tags: &self.tags,
         }
-        if let Some(prefix) = &self.path_prefix {
-            args["path_prefix"] = serde_json::json!(prefix);
-        }
-        if !self.tags.is_empty() {
-            args["tags"] = serde_json::json!(self.tags);
-        }
-        args
     }
 }
 
@@ -79,29 +90,25 @@ pub fn run(query: &str, options: &Options) -> anyhow::Result<()> {
 /// # Errors
 /// As [`run`], including refusal when a connected daemon lacks literal support.
 pub fn run_with_mode(query: &str, options: &Options, mode: QueryMode) -> anyhow::Result<()> {
-    run_started(query, options, None, mode, std::time::Instant::now())
+    run_started(options.args(query, mode), None, std::time::Instant::now())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hybrid-remote"))]
 pub(crate) fn run_with_settings(
     query: &str,
     options: &Options,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
     run_started(
-        query,
-        options,
+        options.args(query, QueryMode::Syntax),
         Some(settings),
-        QueryMode::Syntax,
         std::time::Instant::now(),
     )
 }
 
 pub(crate) fn run_started(
-    query: &str,
-    options: &Options,
+    args: Arguments<'_>,
     supplied_db: Option<&crate::config::schema::Resolved<crate::store::settings::DbSettings>>,
-    mode: QueryMode,
     started: std::time::Instant,
 ) -> anyhow::Result<()> {
     use crate::store::settings;
@@ -114,7 +121,7 @@ pub(crate) fn run_started(
         ),
     };
     let global = config.into_settings();
-    let args = options.args(query, mode);
+    let args = serde_json::to_value(args)?;
     let value = super::command::run(global, move |context| {
         run_in(context, args, settings, pool, started)
     })?;
@@ -168,7 +175,7 @@ async fn run_in(
                 std::sync::Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
             if db.has_generation_catalog()
                 && config.hybrid_cfg.ranking == crate::hybrid::config::Ranking::Rrf
-                && let Some(model) = config.hybrid_cfg.embedding_model_key()
+                && let Some(model) = config.embedding_model_key()?
             {
                 use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
                 with_catalog_pair(&db, &project, |_, local, _| {

@@ -142,9 +142,16 @@ impl SettingsSpec for AnnBuildSpec {
 /// Raising this domain requires separate resource qualification.
 pub const QUALIFIED_EF_MAX: usize = 4096;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnSearchMode {
+    Legacy,
+    Bounded,
+}
+
 /// Immutable checked search policy, borrowed per call without shared mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnnSearchSettings {
+    mode: AnnSearchMode,
     ef_base: usize,
     ef_max: usize,
     fetch_multiplier: usize,
@@ -156,6 +163,7 @@ impl AnnSearchSettings {
     /// Zero fields, base above max, or max above the qualified beam domain.
     pub fn new(ef_base: usize, ef_max: usize, fetch_multiplier: usize) -> Result<Self> {
         let settings = Self {
+            mode: AnnSearchMode::Bounded,
             ef_base,
             ef_max,
             fetch_multiplier,
@@ -180,16 +188,31 @@ impl AnnSearchSettings {
         self.fetch_multiplier
     }
 
+    pub(crate) const fn admits_fetch(self, fetch: usize) -> bool {
+        match self.mode {
+            AnnSearchMode::Legacy => true,
+            AnnSearchMode::Bounded => fetch <= self.ef_max,
+        }
+    }
+
+    pub(crate) const fn mode_name(self) -> &'static str {
+        match self.mode {
+            AnnSearchMode::Legacy => "legacy",
+            AnnSearchMode::Bounded => "bounded",
+        }
+    }
+
     /// Compute an admitted beam without wrapping or calling HNSW.
     ///
     /// `hnsw_rs` promotes ef to fetch internally. Rejecting fetch above max
     /// prevents that promotion from bypassing this policy's beam ceiling.
+    /// Legacy mode caps the supplied ef while retaining historical fetch admission.
     /// The dependency's visited/candidate storage is not a total RSS bound.
     ///
     /// # Errors
     /// Fetch exceeds this policy's maximum beam.
     pub fn beam_for(self, fetch: usize) -> Result<usize> {
-        if fetch > self.ef_max {
+        if !self.admits_fetch(fetch) {
             return Err(Error::Admission {
                 message: format!(
                     "ANN fetch {fetch} exceeds search policy maximum {}",
@@ -208,8 +231,16 @@ impl AnnSearchSettings {
             .min(self.ef_max)
     }
 
+    pub(crate) const fn legacy_defaults() -> Self {
+        Self {
+            mode: AnnSearchMode::Legacy,
+            ..Self::owner_defaults()
+        }
+    }
+
     pub(crate) const fn owner_defaults() -> Self {
         Self {
+            mode: AnnSearchMode::Bounded,
             ef_base: 64,
             ef_max: QUALIFIED_EF_MAX,
             fetch_multiplier: 4,
@@ -284,6 +315,7 @@ impl SettingsSpec for AnnSearchSpec {
     type Defaults = AnnSearchSettings;
     const SCOPE: Scope = Scope::Project;
     const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::new("ann.search.mode", Scope::Project, Unit::Name),
         FieldSpec::new("ann.search.ef_base", Scope::Project, Unit::Count),
         FieldSpec::new("ann.search.ef_max", Scope::Project, Unit::Count),
         FieldSpec::new("ann.search.fetch_multiplier", Scope::Project, Unit::Count),
@@ -305,6 +337,8 @@ impl SettingsSpec for AnnSearchSpec {
         // when a caller bypasses Resolution and invokes overlay directly.
         let mut candidate = *settings;
         let mut candidate_origins = origins.clone();
+        candidate.mode = AnnSearchMode::Bounded;
+        candidate_origins.set("ann.search.mode", source)?;
         if let Some(value) = patch.ef_base {
             candidate.ef_base = value;
             candidate_origins.set("ann.search.ef_base", source)?;

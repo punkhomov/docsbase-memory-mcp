@@ -144,6 +144,82 @@ fn spawn_fake_daemon_with_reply(
     })
 }
 
+#[test]
+fn connected_status_uses_bootstrap_policy_for_unsupported_config_versions() {
+    let env = Env::new(&[]);
+    write_file(
+        env.cache.path(),
+        "config/config.toml",
+        b"config_version=3\n[client]\nipc_io_timeout_ms=0\n",
+    );
+    let _peer = spawn_fake_daemon(env.cache.path());
+
+    env.cmd()
+        .arg("status")
+        .assert()
+        .success()
+        .stdout("{\n  \"routed_tool\": \"status\"\n}\n");
+}
+
+#[test]
+fn cli_status_applies_the_configured_blocking_io_timeout() {
+    use tokio::io::AsyncBufReadExt as _;
+
+    let env = Env::new(&[]);
+    write_file(
+        env.cache.path(),
+        "config/config.toml",
+        b"[client]\nipc_io_timeout_ms = 50\n",
+    );
+    fs::create_dir_all(env.cache.path().join("state")).unwrap();
+    let endpoint = platform::daemon_endpoint(env.cache.path());
+    let runtime = sync_runtime();
+    let listener = {
+        let _entry = runtime.enter();
+        platform::bind(&env.transport, &endpoint).unwrap()
+    };
+    let peer = thread::spawn(move || {
+        runtime.block_on(async {
+            let stream = tokio::time::timeout(SYNC_PEER_WATCHDOG, listener.accept())
+                .await
+                .expect("client should connect")
+                .unwrap();
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut hello = String::new();
+            tokio::time::timeout(SYNC_PEER_WATCHDOG, reader.read_line(&mut hello))
+                .await
+                .expect("client should send Hello")
+                .unwrap();
+            assert!(matches!(
+                serde_json::from_str::<Request>(&hello).unwrap(),
+                Request::Hello { .. }
+            ));
+            // Withhold the reply while waiting for the timed-out caller to close.
+            tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut String::new()))
+                .await
+                .expect("the configured caller should close before the default timeout")
+        })
+    });
+
+    let output = env
+        .cmd()
+        .arg("status")
+        .timeout(SYNC_PEER_WATCHDOG)
+        .output()
+        .unwrap();
+    let closed = peer.join().unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("timed out waiting for the daemon"),
+        "{output:?}"
+    );
+    assert!(
+        matches!(&closed, Ok(0))
+            || matches!(&closed, Err(error) if matches!(error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset)),
+        "{closed:?}"
+    );
+}
+
 const DOC: &str = "---\ntitle: Guide\n---\n\n# Install\n\ninstaller prose about widgets.\n";
 
 #[test]

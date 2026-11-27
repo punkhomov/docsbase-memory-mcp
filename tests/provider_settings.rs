@@ -114,3 +114,35 @@ fn remote_policy_change_requests_runtime_restart_without_artifact_effects() {
         Effect::InitializeRuntime
     );
 }
+
+#[test]
+fn fastembed_policy_view_has_captured_defaults_and_global_override_provenance() {
+    use docsbase_memory::config::schema::{Scope, SourceId, Unit};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "config_version = 2\n[providers.fastembed]\nbatch_size = 7\n",
+    )
+    .unwrap();
+    let snapshot = resolve::global_from(directory.path()).unwrap();
+    let output = view::from_resolved(&snapshot).unwrap();
+    let field = |key| output.fields.iter().find(|field| field.key == key).unwrap();
+    let batch = field("providers.fastembed.batch_size");
+    assert_eq!(batch.value, 7);
+    assert_eq!(batch.origin.source, SourceId::Global(path));
+    assert_eq!(batch.origin.scope, Scope::Machine);
+    assert_eq!(batch.origin.unit, Unit::Count);
+    assert_eq!(
+        batch.capability.as_ref().unwrap().compiled,
+        cfg!(feature = "hybrid-local")
+    );
+    let threads = field("providers.fastembed.intra_threads");
+    assert_eq!(threads.origin.source, SourceId::Defaults);
+    assert_eq!(
+        serde_json::to_value(threads).unwrap()["formula"],
+        "min(available_parallelism, 4)"
+    );
+    assert!((1..=4).contains(&threads.value.as_u64().unwrap()));
+}

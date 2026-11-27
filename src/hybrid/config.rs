@@ -16,6 +16,7 @@ use crate::hybrid::provider::Provider;
 use crate::vector_cache::{CacheLimits, Embedder};
 
 use super::Reranker;
+use super::local_settings::{InferencePatch, InferenceSettings, InvalidCount};
 
 /// The only provider accepted in iteration 1 (FR-3).
 pub const PROVIDER_OPENROUTER: &str = "openrouter";
@@ -88,13 +89,6 @@ impl HybridCfg {
                 .into_iter()
                 .flatten()
                 .all(|name| crate::hybrid::provider::provider(name).is_ok_and(Provider::enabled))
-    }
-
-    pub(crate) fn embedding_model_key(&self) -> Option<String> {
-        self.embedding
-            .as_ref()
-            .filter(|_| self.enabled)
-            .map(embedding_model_id)
     }
 
     /// Both stages with defaults; the `hybrid = true` shorthand (FR-13).
@@ -464,13 +458,88 @@ impl ProviderRecord {
 /// `[providers.<name>]`. Project files have no `providers` field
 /// (structural), so machine capabilities are never committed to repositories.
 ///
-/// Generic on purpose: a new provider needs no change here (FR-4, ADR-18).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Presence of a provisioning record is independent of machine inference defaults.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProvidersCfg {
     entries: std::collections::BTreeMap<String, ProviderRecord>,
+    fastembed: Arc<ResolvedFastembedInference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedFastembedInference {
+    defaults: InferenceSettings,
+    settings: std::result::Result<InferenceSettings, InvalidCount>,
+    #[cfg(feature = "hybrid-local")]
+    runtime_bootstrap: Option<Arc<super::runtime::RuntimeBootstrap>>,
+}
+
+impl Default for ProvidersCfg {
+    fn default() -> Self {
+        Self::with_cpu_count(
+            crate::config::bootstrap::DefaultsContext::for_host().available_parallelism,
+        )
+    }
 }
 
 impl ProvidersCfg {
+    pub(crate) fn with_cpu_count(cpu_count: std::num::NonZeroUsize) -> Self {
+        let defaults = InferenceSettings::defaults(cpu_count);
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            fastembed: Arc::new(ResolvedFastembedInference {
+                defaults,
+                settings: Ok(defaults),
+                #[cfg(feature = "hybrid-local")]
+                runtime_bootstrap: None,
+            }),
+        }
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(crate) fn bind_runtime_bootstrap(
+        &mut self,
+        bootstrap: &crate::config::bootstrap::BootstrapContext,
+        cache: &std::path::Path,
+        cpu_pool: Arc<super::cpu::CpuPool>,
+    ) {
+        Arc::make_mut(&mut self.fastembed).runtime_bootstrap = Some(Arc::new(
+            super::runtime::RuntimeBootstrap::new(bootstrap, cache, cpu_pool),
+        ));
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(super) fn cpu_pool(&self) -> Option<Arc<super::cpu::CpuPool>> {
+        self.runtime_bootstrap()
+            .and_then(|runtime| runtime.cpu_pool.clone())
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(super) fn runtime_bootstrap(&self) -> Option<&super::runtime::RuntimeBootstrap> {
+        self.fastembed.runtime_bootstrap.as_deref()
+    }
+
+    #[cfg(feature = "hybrid-local")]
+    pub(crate) fn inherit_runtime_bootstrap(&mut self, active: &Self) {
+        Arc::make_mut(&mut self.fastembed)
+            .runtime_bootstrap
+            .clone_from(&active.fastembed.runtime_bootstrap);
+    }
+
+    pub(crate) fn fastembed_inference(&self) -> Result<InferenceSettings> {
+        self.fastembed.settings.map_err(Error::from)
+    }
+
+    pub(crate) fn embedding_model_id(&self, embedding: &EmbeddingCfg) -> Result<String> {
+        if embedding.provider == PROVIDER_FASTEMBED {
+            let inference = self.fastembed_inference()?;
+            return Ok(fastembed_embedding_model_id(
+                embedding,
+                inference.embedding_max_length,
+            ));
+        }
+        Ok(embedding_model_id(embedding))
+    }
+
     /// The record of `name`, when the global config has one.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&ProviderRecord> {
@@ -485,7 +554,13 @@ impl ProvidersCfg {
     /// Inserts (or replaces) a record; used by the config loader, the CLI
     /// writers and tests.
     pub fn insert(&mut self, name: impl Into<String>, record: ProviderRecord) {
-        self.entries.insert(name.into(), record);
+        let name = name.into();
+        if name == PROVIDER_FASTEMBED {
+            let inference = Arc::make_mut(&mut self.fastembed);
+            inference.settings =
+                InferencePatch::from_record(&record).map(|patch| patch.resolve(inference.defaults));
+        }
+        self.entries.insert(name, record);
     }
 
     /// Builder form of [`insert`](Self::insert).
@@ -496,7 +571,7 @@ impl ProvidersCfg {
     }
 }
 
-/// Typed view of `[providers.fastembed]` (ADR-17).
+/// Provisioning fields of `[providers.fastembed]` (ADR-17).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FastembedProvider {
     /// Provider prepared on this machine.
@@ -741,6 +816,16 @@ pub fn embedding_model_id(cfg: &EmbeddingCfg) -> String {
         .ok()
         .and_then(|provider| provider.cache_model_id(cfg))
         .unwrap_or_else(|| legacy_cache_model_id(cfg))
+}
+
+pub(super) fn fastembed_embedding_model_id(cfg: &EmbeddingCfg, max_length: usize) -> String {
+    use std::fmt::Write as _;
+    let mut key = embedding_model_id(cfg);
+    // Preserve all existing cache, seal and ANN identities for the default.
+    if max_length != super::local_settings::DEFAULT_MAX_LENGTH {
+        let _ = write!(key, "@t{max_length}");
+    }
+    key
 }
 
 /// Concrete stages handed to the index and search paths.

@@ -196,6 +196,7 @@ max_projects = 8
 min_vectors = 4096
 build_backoff = 30000
 max_ann_disk_bytes = 4294967296
+max_ann_read_file_bytes = 2147483648
 ann_keep_generations = 2
 query_cache_max_entries = 256
 query_cache_max_bytes = 4194304
@@ -219,6 +220,11 @@ resident projects, and `min_vectors` controls eligibility for ANN. A zero
 resident capacity permits exact streaming without retaining those rows.
 `min_vectors = 0` permits ANN for any nonempty corpus that fits the other caps.
 `build_backoff = 0` permits retry on the next eligible lookup.
+
+`max_ann_read_file_bytes` caps each persisted HNSW file read. It accepts 1 byte
+through 2 GiB. A compatible dump above the configured cap remains on disk.
+Queries can use exact search while a graph is unavailable. The cap affects
+read admission and leaves vector and graph recipes unchanged.
 
 `ann_keep_generations` must be positive. Retention cleanup keeps the newest
 generations for each project and model, including their different ANN recipes.
@@ -436,10 +442,23 @@ docsbase config   # effective values for the current directory (JSON)
 - Provisioning changes need a daemon restart: `docsbase connect fastembed`
   (runtime library) and `docsbase models fetch fastembed/<name>` (a revision that
   actually landed on disk) both print a restart note, because a running
-  daemon keeps the ORT library and its loaded model instances until it is
-  restarted.
-- Local inference memory: the embedder holds one ORT session per cache key
-  (~model size, int8 rows are the small case referred to by NFR-4). The
+  daemon keeps the ORT library until it is restarted.
+- Local inference uses machine-wide settings in `[providers.fastembed]`.
+  `batch_size` defaults to 64 and controls embedding and reranking batch sizes.
+  `intra_threads` defaults to the smaller of 4 and the available CPU count,
+  with a fallback of 1. Both accept positive integers. The thread count
+  configures the ONNX Runtime session. OpenMP builds of ONNX Runtime use
+  their OpenMP thread policy. `docsbase config effective` reports the resolved
+  counts even when the provider has no record. Daemon workers pick up settings
+  and CPU availability when the daemon starts.
+- `embedding_max_length` is the input limit for the pinned FastEmbed embedding
+  models. It accepts 16–512 tokens, including special tokens and any query or
+  passage prefix. The default 512 preserves existing vector keys. A different
+  limit changes the document and query vector recipe, so review the new plan
+  and publish a matching project index. The reranker has its own input limit.
+- Local inference stages share one ORT session per cache key while they
+  hold it (~model size, int8 rows are the small case referred to by NFR-4).
+  The last stage releases the session and its shared model lock. The
   reranker additionally holds the ONNX bytes in RAM while its session is
   built (`OnnxSource::Memory`, which is what makes load-time sha256
   verification possible), so a 1.1 GiB fp32 reranker such as
@@ -528,7 +547,36 @@ independent of persisted index formats. With the Shared daemon stopped,
 `status` and `list` use their standalone SQLite policy even if `[store]`
 or `[read_pool]` is invalid. The Website profile still requires the daemon.
 
+### Daemon job history and log rotation
+
+```toml
+[daemon]
+max_sync_jobs = 50
+log_rotate_bytes = 8388608
+```
+
+Both settings are global. After enqueueing a Sync job, the daemon keeps the
+newest `max_sync_jobs` receipts per project. An active job takes a slot and
+is always preserved. The minimum is 2 so enqueueing a new job preserves the
+previous receipt. The limit applies after daemon restart and leaves indexed
+data intact. Each newer job can displace a receipt outside the retained count.
+
+The autostart launcher rotates `logs/daemon.log` to `daemon.log.old` before
+spawning a daemon when the file exceeds `log_rotate_bytes`. It keeps one
+rotated copy. The separate conflict log keeps its fixed 8 MiB threshold.
+
 ### Watcher debounce
+
+Shared starts watchers for indexed projects by default. To disable them for
+the installation, set `enabled = false` under `[watch]` in the global v2 file
+and restart the daemon. The running owner follows its launch policy until
+shutdown. Live configuration plans report the restart when the effective
+policy changes. Website keeps watching disabled. The effective view attributes
+that derived value to `daemon.profile`.
+
+Explicit `docsbase sync` and automatic first indexing remain available with
+watching disabled. Other watcher settings are still validated, and the toggle
+leaves the stored index recipe intact.
 
 Set these fields in a v2 global or project file. Each project field can
 override its global value independently.
@@ -616,6 +664,37 @@ and the widening multiplier must be at least 2.
 Reopen the project to apply project settings in a running daemon. These
 settings apply to queries on the existing indexes and vector cache.
 
+### Retrieval defaults and document-cap search
+
+The v2 global and project configurations accept these settings.
+
+```toml
+[retrieval]
+default_limit = 10
+default_dedupe = "none"
+default_n_per_doc = 2
+rrf_candidate_window = 50
+post_filter_overscan = 4
+```
+
+These defaults apply when a CLI or tool request omits the corresponding option.
+The limit accepts 0–1000, the dedupe mode accepts `"none"` or `"path"`, and the
+per-document cap accepts 1–10. Select `"path"` to apply the cap.
+
+With a document cap, lexical search starts at the requested limit times
+`post_filter_overscan`, up to 1000 candidates. The hybrid base window is the
+larger of the requested limit and the configured reranker window, up to 1000.
+RRF without a reranker uses `rrf_candidate_window` (1–1000) as its base minimum.
+If too few candidates fit under the document cap, refill grows the window
+by the overscan multiplier up to the effective `search.dedupe_max_candidates`
+ceiling. A multiplier of 1 starts lexical search at the requested limit and
+refills by doubling.
+
+Path-prefix and tag restrictions apply before retrieval. The lexical collector
+has its own window policy under `[lexical]`. Reopen the project to apply its
+overrides and restart the daemon to pick up a changed global value. Searches
+use the existing index and vector cache.
+
 ### Reciprocal rank fusion
 
 Projects using `ranking = "rrf"` under `[hybrid]` can tune fusion with
@@ -674,6 +753,30 @@ output omits file text; explicit before/after views should be treated as source
 files. The draft has no side effects. Automatic application and recovery are
 later #78 milestones.
 
+## Client deadlines
+
+The global `[client]` table works in both supported source formats.
+
+```toml
+[client]
+ipc_io_timeout_ms = 2000
+mcp_quick_timeout_ms = 30000
+mcp_long_timeout_ms = 600000
+```
+
+Each value accepts 1–4,294,967,294 milliseconds. Blocking IPC applies its
+timeout to each native read and write and to busy-pipe connection admission
+on Windows. Live CLI plan/apply also use it for their setup exchanges.
+Daemon inspection uses the smaller of the IPC timeout and its control budget.
+The effective view reports each setting's origin and the platform's
+`blocking_ipc_timeout_capability`.
+
+An MCP frontend captures its policy at startup. The quick budget governs
+setup and ordinary tool exchanges. The long budget governs the indexing
+exchange. Search and Ask keep their operation deadlines. New CLI invocations
+use the new client settings. Restart the daemon to change its live inspection
+budget. These settings leave persistent recipes intact.
+
 ## Effective values with origins
 
 ```sh
@@ -683,9 +786,17 @@ docsbase config effective --format=json
 This versioned view resolves the current global/project files and shows each
 file setting's typed value, unit, scope and source. It does not contact the daemon:
 a running process can still hold its earlier configuration. The output therefore
-identifies its basis as `source_resolution`, sets `live_runtime_observed` to
-`false`, and limits coverage to `file_settings`. Bare `docsbase config` keeps its
-existing JSON format.
+identifies its basis as `source_resolution` and sets `live_runtime_observed` to
+`false`. The CLI reports `file_settings_and_bootstrap` coverage. The `bootstrap`
+object shows the current invocation's cache, configuration and data paths,
+selected executable and ONNX Runtime path, dependency thread settings and
+diagnostic flags with their origins. Missing paths are reported as null.
+The ONNX path follows `ORT_DYLIB_PATH`, the configured provider path, then the
+installation slot derived from the data directory. It is a path selection,
+with no check of what a running daemon loaded. The daemon captures its startup
+policy once, shares a lazy Rayon pool between ANN builds and local inference,
+and requires a restart to load a different ONNX Runtime library.
+Bare `docsbase config` keeps its existing JSON format.
 
 `view_version` is `1`. Fields appear in key order; for example:
 
@@ -735,7 +846,13 @@ The JSON report includes the bounded action graph and a `plan_id` bound to
 the observed sources, installation and generation. A document-vector action
 prepares any missing entries using the new recipe. Existing entries with
 compatible keys remain reusable. The `remote` grant marks possible provider
-usage at application time. The preview reads existing files without starting
+usage at application time. New hybrid generations record a document-input
+recipe independently from the lexical tokenizer. When only the lexical
+recipe changes and the sealed vector recipe matches, apply verifies and reuses
+cached vectors. Missing vectors stop that reviewed replacement before
+publication. Run an explicit `docsbase index` to prepare the missing vectors.
+Generations with an older seal use the conservative plan until their next
+replacement. The preview reads existing files without starting
 the daemon, loading models, or contacting providers. For an unavailable registry
 it reports `observation_failure`, and an existing legacy pair without recipe
 evidence produces an `unsupported_identity` blocker. Invalid effective settings,
@@ -781,8 +898,12 @@ docsbase config plan ./project --live --check
 
 This mode reads a registered v5 project's active settings and selected
 generation through the running daemon. It leaves project registration and
-runtime unchanged. `restart_required` compares the current global file with
-the daemon's startup source. A query-only policy edit can change
+runtime unchanged. `restart_required` compares the global settings resolved
+with the same startup overrides against the active daemon. Comments and
+file values masked by an explicit CLI override still change the reviewed
+source identity. They do not change the daemon policy or require a restart.
+The report can show a required profile restart even when that profile excludes
+the requested project. A query-only policy edit can change
 `project_runtime` without replacing the index. A changed construction recipe
 can require replacing a confirmed ANN graph while reusing vectors.
 If a source edit also requires a new index, the plan orders its replacement
@@ -806,7 +927,10 @@ docsbase config apply ./project --live --plan-id <id> --allow-remote
 ```
 
 The daemon checks the reviewed sources, active runtime and published index
-revision before applying project settings. Lexical scoring and ANN traversal
+revision before applying project settings. A reviewed index replacement can
+also target a project that has not been opened since the daemon started, for
+example with watchers disabled. A concurrent open that initializes the
+project invalidates that observation and requires reviewing a fresh plan. Lexical scoring and ANN traversal
 changes keep the selected index and compatible graph. Chunking and embedding
 recipe changes use a bounded background Index job. The CLI waits for its
 terminal result. Connected clients can use the selected generation during
@@ -872,9 +996,26 @@ startup when no policy flag is passed.
 The global `[daemon]` settings `start_timeout_ms` (10,000) and
 `stop_timeout_ms` (15,000) bound the launcher wait and Stop operation. Unix
 also uses `no_listener_timeout_ms` (2,000) for continuous socket absence during
-Stop. On Windows, Stop checks process exit and `config effective` displays
+Stop. Subsequent launcher and Stop invocations read these settings from the file. On Windows, Stop checks process exit and `config effective` displays
 `null` for the Unix-only value. Stop uses standalone timing if loading the
 configuration fails, so a config error still permits cleanup.
+
+### Configuration lock retries
+
+Global v2 configuration can set the retry policy for configuration editors
+and index publication.
+
+```toml
+[config_lock]
+attempts = 50
+retry_delay_ms = 20
+```
+
+Use 1 to 1000 attempts and a nonnegative delay. Their product must be at most
+1000 ms per lock file. A publication can acquire locks for both source files
+and their canonical paths. Editors read the policy before acquisition and
+reread the edited source under the lock. When the global configuration cannot
+be loaded, editors acquire the lock with the default policy.
 
 ## Observed migration plan (CF4c2)
 
@@ -967,7 +1108,8 @@ With an explicit table, the ANN traversal uses the larger of `ef_base` and
 `1 <= ef_base <= ef_max <= 4096` with a positive multiplier. Candidate windows
 above `ef_max` use exact streaming without loading or building a graph for that request. Changing
 these values keeps the existing graph and vectors. A project without an
-explicit or inherited table retains the existing ANN behavior.
+explicit or inherited table resolves to `legacy` and retains the historical
+traversal behavior.
 
 ### ANN construction
 

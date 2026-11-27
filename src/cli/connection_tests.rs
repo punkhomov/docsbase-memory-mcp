@@ -36,6 +36,7 @@ fn injected_setup(
     Client::connect_with_setup(
         transport,
         cache,
+        crate::ipc::settings::ClientSpec::DEFAULTS.ipc_io_timeout(),
         |_| {
             if fail_read {
                 Err(std::io::Error::new(
@@ -143,6 +144,7 @@ fn absent_connect_never_runs_setup_or_creates_state() {
     let result = Client::connect_with_setup(
         &transport,
         cache.path(),
+        crate::ipc::settings::ClientSpec::DEFAULTS.ipc_io_timeout(),
         |_| panic!("read setup without a connection"),
         |_| panic!("write setup without a connection"),
     );
@@ -165,6 +167,7 @@ fn successful_native_setup_keeps_read_before_write_order() {
     let result = Client::connect_with_setup(
         &peer.transport,
         peer.cache.path(),
+        crate::ipc::settings::ClientSpec::DEFAULTS.ipc_io_timeout(),
         |_| {
             assert_eq!(stage.replace(1), 0);
             Ok(())

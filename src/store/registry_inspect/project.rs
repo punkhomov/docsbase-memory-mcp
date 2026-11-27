@@ -72,6 +72,7 @@ pub(crate) struct SelectedIndexEvidence {
 
 pub(crate) struct IndexRecipeEvidence {
     pub(crate) lexical: String,
+    pub(crate) vector_inputs: Option<[u8; 32]>,
     pub(crate) embedding: Option<crate::vector_cache::EmbeddingRecipe>,
     pub(crate) full_survey: bool,
 }
@@ -492,6 +493,7 @@ fn observe_local<T>(
                         })
                         .map(|outcome| IndexRecipeEvidence {
                             lexical: seal.index_recipe,
+                            vector_inputs: seal.vector_inputs,
                             embedding: seal.embedding_recipe,
                             full_survey: outcome.is_complete(),
                         })

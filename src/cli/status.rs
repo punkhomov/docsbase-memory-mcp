@@ -1,9 +1,10 @@
 //! `docsbase list` / `docsbase status` — read-only registry snapshots
 //! (FR-25, FR-26, FR-30).
 
-use crate::config::paths;
+use crate::config::{paths, resolve::diagnostic_client_settings};
 use crate::daemon::registry;
 use crate::error::{Error, Result};
+use crate::ipc::settings::ClientSettings;
 use crate::store::models::Project;
 use crate::store::{DB_FILE, Db};
 
@@ -41,16 +42,23 @@ pub fn status() -> anyhow::Result<()> {
 pub(crate) fn status_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    super::with_transport(|transport| status_with_settings_in(&transport, settings))
+    let client = diagnostic_client_settings()?;
+    super::with_transport(|transport| status_with_settings_in(&transport, client, settings))
 }
 
 pub(crate) fn status_with_settings_in(
     transport: &crate::platform::transport::Transport,
+    client: ClientSettings,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    if let Some(value) =
-        crate::cli::try_daemon(transport, "status", serde_json::json!({}), false, settings)?
-    {
+    if let Some(value) = crate::cli::try_daemon(
+        transport,
+        "status",
+        serde_json::json!({}),
+        false,
+        client,
+        settings,
+    )? {
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
@@ -95,12 +103,16 @@ pub(crate) fn project_status_with_settings(
     root: &std::path::Path,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    super::with_transport(|transport| project_status_with_settings_in(&transport, root, settings))
+    let client = diagnostic_client_settings()?;
+    super::with_transport(|transport| {
+        project_status_with_settings_in(&transport, root, client, settings)
+    })
 }
 
 pub(crate) fn project_status_with_settings_in(
     transport: &crate::platform::transport::Transport,
     root: &std::path::Path,
+    client: ClientSettings,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
     if !root.is_absolute() {
@@ -110,8 +122,9 @@ pub(crate) fn project_status_with_settings_in(
         .into());
     }
     let cache = paths::cache_dir()?;
-    let mut client = crate::ipc::client::Client::try_connect(transport, &cache)?
-        .ok_or_else(crate::daemon::launch::website_unavailable)?;
+    let mut client =
+        crate::ipc::client::Client::try_connect_with_settings(transport, &cache, client)?
+            .ok_or_else(crate::daemon::launch::website_unavailable)?;
     client.handshake_registry()?;
     if !client.active_website() {
         return Err(Error::Admission {
@@ -156,11 +169,13 @@ pub fn list() -> anyhow::Result<()> {
 pub(crate) fn list_with_settings(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
-    super::with_transport(|transport| list_with_settings_in(&transport, settings))
+    let client = diagnostic_client_settings()?;
+    super::with_transport(|transport| list_with_settings_in(&transport, client, settings))
 }
 
 pub(crate) fn list_with_settings_in(
     transport: &crate::platform::transport::Transport,
+    client: ClientSettings,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<()> {
     const PAGE: usize = 500;
@@ -174,7 +189,7 @@ pub(crate) fn list_with_settings_in(
             None => serde_json::json!({ "limit": PAGE }),
         };
         let daemon_value =
-            crate::cli::try_daemon(transport, "list_docs", args.clone(), true, settings)?;
+            crate::cli::try_daemon(transport, "list_docs", args.clone(), true, client, settings)?;
         let value = if let Some(value) = daemon_value {
             value
         } else {

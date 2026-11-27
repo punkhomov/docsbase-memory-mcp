@@ -476,6 +476,7 @@ pub(super) fn verify_and_seal(
             .to_string(),
         index_recipe: outcome.recipe_id,
         embedding_recipe,
+        vector_inputs: embedding_recipe.map(|_| outcome::vector_inputs_id(config)),
         files,
     };
     let encoded = serde_json::to_vec(&seal)

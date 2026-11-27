@@ -725,6 +725,14 @@ fn reused_catalog_reconciles_only_a_committed_sync_receipt() {
             call_tool(&shared, None, "index_project", args.clone())
                 .await
                 .unwrap();
+            // The completed reply can precede retirement of the native owner.
+            // This fixture needs the subsequent Index to reach its commit fault.
+            shared
+                .activity
+                .drain(Duration::from_millis(
+                    shared.daemon_settings().drain_poll_ms,
+                ))
+                .await;
             let project = registry::list_projects(&shared.db()).unwrap().remove(0);
             let slot = shared.project_slot(project.id);
             let previous = shared.project_config(&project).unwrap();
@@ -821,7 +829,7 @@ fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
         {
             // Emulate the in-memory boundary after SQLite committed and its
             // first independent verification failed. The actual seal is intact.
-            let publication = slot.catalog_publication(&committed).unwrap();
+            let publication = slot.catalog_publication(Some(&committed)).unwrap();
             publication.install(previous.clone(), previous_stages.clone());
             let transition = slot.begin_watch_config_transition(committed.clone());
             publication.retain_unverified(
@@ -1198,6 +1206,7 @@ fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
 
 #[test]
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)] // One fixture observes both vector pin and commit boundaries.
 fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1267,8 +1276,12 @@ fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
         };
         let before = catalog_diagnostics(&shared, session).await;
         std::fs::write(&guide, "newcapacitywatchwidget").unwrap();
-        assert_failed_watch_keeps_over_budget_cache(cache.path(), &provider, watch(guide.clone()))
-            .await;
+        Box::pin(assert_failed_watch_keeps_over_budget_cache(
+            cache.path(),
+            &provider,
+            watch(guide.clone()),
+        ))
+        .await;
         let error = watch(guide.clone()).await.unwrap_err();
         assert!(
             error.to_string().contains("active and prepared vectors"),
@@ -4088,6 +4101,119 @@ async fn assert_reviewed_remote_catalog_apply(
         catalog_search_hits(shared, session, "reviewedremotewidget").await,
         1
     );
+    assert_reviewed_cached_vector_replacement(shared, root, project_id, wire).await;
+}
+
+async fn assert_reviewed_cached_vector_replacement(
+    shared: &Arc<Shared>,
+    root: &Path,
+    project_id: i64,
+    wire: &FactoryWire,
+) {
+    let selected = || {
+        shared
+            .db()
+            .connection()
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id=?1",
+                [project_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    for missing in [false, true] {
+        let original = selected();
+        mark_fixture_as_previous_tokenizer(shared, project_id, original);
+        if missing {
+            std::fs::write(root.join("arrival.md"), "new text without a cached vector").unwrap();
+        }
+        let operation = live_config::inspection_operation(shared).unwrap();
+        let report = live_config::report(shared, root, &operation).unwrap();
+        let plan = &report["plan"];
+        let actions = plan["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1, "{plan}");
+        assert_eq!(
+            actions[0]["resource"]["value"]["component"],
+            "project_index"
+        );
+        assert_eq!(plan["required_grants"], json!([]));
+        let scope = scoped::Scope {
+            activity: shared.activity.track(),
+            operation: None,
+        };
+        let reply = live_config::apply(
+            shared,
+            &scope,
+            root.to_owned(),
+            plan["plan_id"].as_str().unwrap().to_owned(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply["apply_status"], 0, "{reply}");
+        drop(scope);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            shared.activity.drain(Duration::from_millis(
+                shared.daemon_settings().drain_poll_ms,
+            )),
+        )
+        .await
+        .expect("reviewed lexical-only replacement retired");
+        let receipt = reviewed_remote_job_status(shared, reply["job"]["job_id"].clone()).await;
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+        if missing {
+            assert_eq!(receipt["state"], "error", "{receipt}");
+            assert!(
+                receipt["stats"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("can only reuse vectors")
+            );
+            assert_eq!(selected(), original);
+        } else {
+            assert_eq!(receipt["state"], "done", "{receipt}");
+            assert_ne!(selected(), original);
+        }
+    }
+}
+
+/// Simulate an earlier tokenizer in a real coherent v5 pair. The document
+/// input fingerprint and cached vectors still belong to the same source.
+fn mark_fixture_as_previous_tokenizer(shared: &Shared, project_id: i64, generation: i64) {
+    let dir = shared
+        .cache
+        .join("projects")
+        .join(project_id.to_string())
+        .join("generations")
+        .join(generation.to_string());
+    let seal_path = dir.join("seal.json");
+    let mut seal: Value = serde_json::from_slice(&std::fs::read(&seal_path).unwrap()).unwrap();
+    assert_eq!(seal["vector_inputs"].as_array().unwrap().len(), 32);
+    let recipe = seal["index_recipe"].as_str().unwrap();
+    let digit = if recipe.ends_with('0') { '1' } else { '0' };
+    let previous = format!("{}{digit}", &recipe[..recipe.len() - 1]);
+
+    let db = rusqlite::Connection::open(dir.join("metadata.db")).unwrap();
+    db.execute(
+        "UPDATE projects SET index_outcome_json = json_set(index_outcome_json, '$.recipe_id', ?1)
+         WHERE id = ?2",
+        rusqlite::params![previous, project_id],
+    )
+    .unwrap();
+    db.close().unwrap();
+    seal["index_recipe"] = json!(previous);
+    let bytes = serde_json::to_vec(&seal).unwrap();
+    std::fs::write(seal_path, &bytes).unwrap();
+    shared
+        .db()
+        .connection()
+        .execute(
+            "UPDATE project_generations SET seal_digest = ?1 WHERE id = ?2",
+            rusqlite::params![blake3::hash(&bytes).as_bytes().as_slice(), generation],
+        )
+        .unwrap();
 }
 
 async fn reviewed_remote_job_status(shared: &Arc<Shared>, job_id: Value) -> Value {

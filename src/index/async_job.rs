@@ -217,7 +217,11 @@ impl IndexState {
                 return Err(crate::store::repo::db_error(error));
             }
             self.owns_sync = true;
-            if let Err(error) = repo::prune_sync_jobs(db.connection(), context.project.id) {
+            if let Err(error) = repo::prune_sync_jobs_to(
+                db.connection(),
+                context.project.id,
+                context.config.daemon.max_sync_jobs,
+            ) {
                 eprintln!("warning: cannot prune sync jobs: {error}");
             }
         }
@@ -629,7 +633,11 @@ fn embedding_dimension(
     config: &Config,
     embedder: &dyn crate::vector_cache::Embedder,
 ) -> Result<usize> {
-    crate::hybrid::dense::model_dim(embedder.model_id())
+    embedding_dimension_for_model(config, embedder.model_id())
+}
+
+fn embedding_dimension_for_model(config: &Config, model: &str) -> Result<usize> {
+    crate::hybrid::dense::model_dim(model)
         .or_else(|| {
             config
                 .hybrid_cfg

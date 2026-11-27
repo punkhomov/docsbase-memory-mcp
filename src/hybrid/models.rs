@@ -335,6 +335,10 @@ pub fn entry(name: &str) -> Result<&'static ModelEntry<'static>> {
 pub fn cache_dir(name: &str, revision: &str) -> PathBuf {
     let root = crate::config::paths::cache_dir()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    cache_dir_under(&root, name, revision)
+}
+
+pub(super) fn cache_dir_under(root: &Path, name: &str, revision: &str) -> PathBuf {
     root.join("models").join(name).join(revision)
 }
 

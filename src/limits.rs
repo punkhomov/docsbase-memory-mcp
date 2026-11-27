@@ -17,10 +17,14 @@ pub const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 /// # Errors
 /// Returns IO errors from `remove_file`/`rename`.
 pub fn rotate_log(path: &Path) -> std::io::Result<bool> {
+    rotate_log_after(path, MAX_LOG_BYTES)
+}
+
+pub(crate) fn rotate_log_after(path: &Path, max_bytes: u64) -> std::io::Result<bool> {
     let Ok(metadata) = std::fs::metadata(path) else {
         return Ok(false);
     };
-    if metadata.len() <= MAX_LOG_BYTES {
+    if metadata.len() <= max_bytes {
         return Ok(false);
     }
     let mut old = path.as_os_str().to_owned();

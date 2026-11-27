@@ -11,6 +11,7 @@ use crate::hybrid::provisioning::ProvisioningSpec;
 use crate::hybrid::rrf::settings::RrfSpec;
 use crate::index::lexical_settings::LexicalSpec;
 use crate::index::writer_settings::WriterSpec;
+use crate::search::retrieval::RetrievalSpec;
 use crate::store::settings::{DbSpec, ReadPoolSpec};
 use crate::watch::settings::WatchSpec;
 
@@ -104,8 +105,11 @@ pub fn resolve_component<S: SettingsSpec>(
 use super::source::{SourceLayer, invalid};
 use super::{Config, ConfigSpec, read_capped, read_capped_if_exists, read_project};
 
-fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
-    let mut resolution = Resolution::new(&DefaultsContext::standalone());
+fn global_resolution(
+    config_dir: &Path,
+    defaults: &DefaultsContext,
+) -> Result<Resolution<ConfigSpec>> {
+    let mut resolution = Resolution::new(defaults);
     let path = config_dir.join("config.toml");
     if let Some(text) = read_capped_if_exists(&path)? {
         let document = super::parse_global_document(&path, &text)?;
@@ -121,6 +125,26 @@ fn global_resolution(config_dir: &Path) -> Result<Resolution<ConfigSpec>> {
     // An invalid global is rejected even if a later project could replace it.
     resolution.validate()?;
     Ok(resolution)
+}
+
+// Connected diagnostics historically work with unavailable or broken non-client settings.
+pub(crate) fn diagnostic_client_settings() -> Result<crate::ipc::settings::ClientSettings> {
+    use crate::ipc::settings::ClientSpec;
+
+    let layer = super::paths::config_dir().ok().and_then(|directory| {
+        let path = directory.join("config.toml");
+        let text = read_capped_if_exists(&path).ok().flatten()?;
+        let mut document = super::parse_global_document(&path, &text).ok()?;
+        if document.contains_key("config_version") && !is_v2(&document) {
+            return None;
+        }
+        Some((SourceId::Global(path), document.remove("client")?))
+    });
+    let mut resolution = Resolution::<ClientSpec>::new(&DefaultsContext::standalone());
+    if let Some((source, policy)) = layer {
+        resolution.apply(&source, ClientSpec::decode_patch(policy)?)?;
+    }
+    resolution.finish().map(Resolved::into_settings)
 }
 
 fn is_v2(document: &toml::Table) -> bool {
@@ -188,6 +212,24 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
         }
+        if let Some(patch) = layer.config_lock {
+            super::paths::ConfigLockSpec::overlay(
+                &mut self.settings.config_lock,
+                patch,
+                &self.defaults.initial.config_lock,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
+        if let Some(patch) = layer.retrieval {
+            RetrievalSpec::overlay(
+                &mut self.settings.retrieval,
+                patch,
+                &self.defaults.initial.retrieval,
+                &layer.source,
+                &mut self.origins,
+            )?;
+        }
         if let Some(patch) = layer.provisioning {
             ProvisioningSpec::overlay(
                 &mut self.settings.provisioning,
@@ -197,6 +239,12 @@ impl Resolution<ConfigSpec> {
                 &mut self.origins,
             )?;
         }
+        self.apply_storage_source(layer)?;
+        self.validate()
+            .map_err(|_| invalid("invalid effective settings in versioned source"))
+    }
+
+    fn apply_storage_source(&mut self, layer: &SourceLayer) -> Result<()> {
         if let Some(patch) = &layer.store {
             DbSpec::overlay(
                 &mut self.settings.store,
@@ -237,8 +285,7 @@ impl Resolution<ConfigSpec> {
             )?;
             WriterSpec::validate(&self.settings.index_writer, &self.capabilities)?;
         }
-        self.validate()
-            .map_err(|_| invalid("invalid effective settings in versioned source"))
+        Ok(())
     }
 
     fn apply_v2_global(&mut self, layer: &SourceLayer) -> Result<()> {
@@ -270,6 +317,9 @@ impl Resolution<ConfigSpec> {
         }
         self.settings.hybrid_cfg.cache.max_bytes = policy.settings().max_bytes;
         self.settings.vector_store = Some(policy.settings().clone());
+        self.settings
+            .ann_search
+            .get_or_insert(crate::hybrid::ann_settings::AnnSearchSettings::legacy_defaults());
         Ok(())
     }
 
@@ -328,16 +378,15 @@ pub(crate) fn resolve_v2_edit(layer: &SourceLayer, global: Option<&Config>) -> R
     resolution.finish().map(Resolved::into_settings)
 }
 
-pub(super) fn resolve_observed_v2(
+pub(super) fn resolve_observed_global_v2(
     global: Option<&SourceLayer>,
-    project: Option<&SourceLayer>,
-    profile: Option<&crate::daemon::settings::DaemonProfile>,
+    launch_overrides: crate::daemon::settings::DaemonPatch,
     captured_global: Option<&Config>,
-) -> Result<Option<(Resolved<Config>, Config)>> {
-    let context = DefaultsContext::standalone();
+    context: &DefaultsContext,
+) -> Result<Option<Resolved<Config>>> {
     let mut resolution = captured_global.map_or_else(
-        || Resolution::<ConfigSpec>::new(&context),
-        |settings| Resolution::<ConfigSpec>::from_provided(&context, settings),
+        || Resolution::<ConfigSpec>::new(context),
+        |settings| Resolution::<ConfigSpec>::from_provided(context, settings),
     );
     if captured_global.is_some() {
         if resolution.settings.vector_store.is_none() {
@@ -351,42 +400,23 @@ pub(super) fn resolve_observed_v2(
     } else {
         resolution.bind_vector_policy(&crate::vector_cache::settings::standalone()?)?;
     }
-    if let Some(profile) = profile {
+    if captured_global.is_none() {
         resolution.apply(
             &SourceId::Cli,
             super::GlobalFileConfig {
-                daemon: Some(crate::daemon::settings::DaemonPatch {
-                    profile: Some(profile.clone()),
-                    ..crate::daemon::settings::DaemonPatch::default()
-                }),
+                daemon: Some(launch_overrides),
                 ..super::GlobalFileConfig::default()
             },
         )?;
     }
     resolution.validate()?;
-    let website = matches!(
+    if matches!(
         resolution.settings.daemon.profile,
         crate::daemon::settings::DaemonProfile::Website { .. }
-    );
-    if website {
+    ) {
         crate::daemon::launch::lexical_only(&resolution.settings)?;
     }
-    let global = Resolved::new(resolution.settings.clone(), resolution.origins.clone());
-    if let Some(layer) = project {
-        let max_bytes = resolution
-            .settings
-            .vector_store
-            .as_ref()
-            .ok_or_else(|| invalid("v2 planning requires the global vector policy"))?
-            .max_bytes;
-        resolution.apply_v2_project(layer, max_bytes)?;
-    }
-    if website {
-        crate::daemon::launch::lexical_only(&resolution.settings)?;
-    }
-    resolution
-        .finish()
-        .map(|value| Some((global, value.into_settings())))
+    resolution.finish().map(Some)
 }
 
 /// Loads versioned files while retaining each source’s provenance.
@@ -394,7 +424,15 @@ pub(super) fn resolve_observed_v2(
 /// # Errors
 /// File errors, invalid settings or project provider records.
 pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Resolved<Config>> {
-    let mut resolution = global_resolution(config_dir)?;
+    load_from_with_defaults(config_dir, project_root, &DefaultsContext::for_host())
+}
+
+pub(crate) fn load_from_with_defaults(
+    config_dir: &Path,
+    project_root: Option<&Path>,
+    defaults: &DefaultsContext,
+) -> Result<Resolved<Config>> {
+    let mut resolution = global_resolution(config_dir, defaults)?;
     if let Some(root) = project_root {
         resolution.apply_project(root)?;
     }
@@ -405,7 +443,7 @@ pub fn load_from(config_dir: &Path, project_root: Option<&Path>) -> Result<Resol
 /// # Errors
 /// File errors or invalid settings.
 pub fn global_from(config_dir: &Path) -> Result<Resolved<Config>> {
-    global_resolution(config_dir)?.finish()
+    global_resolution(config_dir, &DefaultsContext::for_host())?.finish()
 }
 
 #[derive(Clone, Copy)]
@@ -424,36 +462,40 @@ impl LaunchUse {
     }
 }
 
+fn parse_launch_document<'source>(
+    path: &Path,
+    bytes: &'source [u8],
+) -> std::result::Result<(&'source str, toml::Table), LaunchFailure> {
+    let text = std::str::from_utf8(bytes).map_err(|err| {
+        if has_version_header(bytes) {
+            return LaunchFailure::Versioned(invalid("invalid UTF-8 in versioned configuration"));
+        }
+        LaunchFailure::Legacy(Error::internal_with_source(
+            format!("read {}: {err}", path.display()),
+            err,
+        ))
+    })?;
+    let document = super::parse_global_document(path, text).map_err(|error| {
+        if has_version_header(bytes) {
+            LaunchFailure::Versioned(invalid("invalid versioned configuration TOML"))
+        } else {
+            LaunchFailure::Legacy(error)
+        }
+    })?;
+    Ok((text, document))
+}
+
 /// Resolve already captured launch bytes without filesystem access.
 pub(crate) fn launch_resolution(
     path: &Path,
     bytes: Option<&[u8]>,
     launch_use: LaunchUse,
+    defaults: &DefaultsContext,
 ) -> std::result::Result<LaunchResolution, LaunchFailure> {
-    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    let mut resolution = Resolution::<ConfigSpec>::new(defaults);
     let mut website = false;
     if let Some(bytes) = bytes {
-        let text = std::str::from_utf8(bytes).map_err(|err| {
-            if has_version_header(bytes) {
-                return LaunchFailure::Versioned(invalid(
-                    "invalid UTF-8 in versioned configuration",
-                ));
-            }
-            LaunchFailure::Legacy(Error::internal_with_source(
-                format!("read {}: {err}", path.display()),
-                err,
-            ))
-        })?;
-        // Parse the canonical document once. Decode/validate the owner section
-        // first so neither its errors nor a recognized Website selector can be
-        // erased by the legacy Shared source-error adapter.
-        let mut document = super::parse_global_document(path, text).map_err(|error| {
-            if has_version_header(bytes) {
-                LaunchFailure::Versioned(invalid("invalid versioned configuration TOML"))
-            } else {
-                LaunchFailure::Legacy(error)
-            }
-        })?;
+        let (text, mut document) = parse_launch_document(path, bytes)?;
         let source = SourceId::Global(path.to_owned());
         if is_v2(&document) {
             launch_use.keep_consumed_v2_fields(&mut document);
@@ -516,6 +558,19 @@ pub(crate) fn launch_resolution(
                 crate::daemon::settings::DaemonProfile::Website { .. }
             );
         }
+        if let Some(client) = document.remove("client") {
+            let owner_patch = crate::ipc::settings::ClientSpec::decode_patch(client)
+                .map_err(LaunchFailure::Client)?;
+            resolution
+                .apply(
+                    &source,
+                    super::GlobalFileConfig {
+                        client: Some(owner_patch),
+                        ..super::GlobalFileConfig::default()
+                    },
+                )
+                .map_err(LaunchFailure::Client)?;
+        }
         resolution
             .apply(
                 &source,
@@ -545,6 +600,8 @@ pub(crate) enum LaunchFailure {
     Daemon(Error),
     // A recognized remote policy is never a legacy Shared source fallback.
     Remote(Error),
+    // A recognized client timeout policy must validate before startup.
+    Client(Error),
     // Versioned sources never use the legacy fallback after version recognition.
     Versioned(Error),
 }
@@ -561,6 +618,7 @@ impl LaunchFailure {
             Self::Legacy(error)
             | Self::Daemon(error)
             | Self::Remote(error)
+            | Self::Client(error)
             | Self::Versioned(error) => error,
         }
     }
@@ -571,8 +629,8 @@ impl LaunchFailure {
 // errors, never daemon owner, recognized Website or CLI errors.
 pub(crate) struct LaunchResolution(Resolution<ConfigSpec>);
 impl LaunchResolution {
-    pub(crate) fn legacy_defaults() -> Self {
-        Self(Resolution::new(&DefaultsContext::standalone()))
+    pub(crate) fn legacy_defaults(defaults: &DefaultsContext) -> Self {
+        Self(Resolution::new(defaults))
     }
 
     pub(crate) fn finish(
@@ -633,6 +691,14 @@ pub fn preview_sources(
     global: &super::source::SourceLayer,
     project: Option<&super::source::SourceLayer>,
 ) -> Result<super::source::SourcePreview> {
+    preview_sources_with_defaults(global, project, &DefaultsContext::for_host())
+}
+
+pub(super) fn preview_sources_with_defaults(
+    global: &super::source::SourceLayer,
+    project: Option<&super::source::SourceLayer>,
+    defaults: &DefaultsContext,
+) -> Result<super::source::SourcePreview> {
     use super::source::{PreviewConflict, SourcePreview, invalid};
     if !matches!(global.source, SourceId::Global(_))
         || project.is_some_and(|p| !matches!(p.source, SourceId::Project(_)))
@@ -641,7 +707,7 @@ pub fn preview_sources(
             "preview requires a global source followed by a project source",
         ));
     }
-    let mut resolution = Resolution::<ConfigSpec>::new(&DefaultsContext::standalone());
+    let mut resolution = Resolution::<ConfigSpec>::new(defaults);
     for layer in std::iter::once(global).chain(project) {
         resolution.apply_source(layer)?;
     }

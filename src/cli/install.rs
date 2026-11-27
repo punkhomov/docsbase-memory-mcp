@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
+use crate::config::capture::{ReadFailure, read_file};
 use crate::config::paths;
 use crate::daemon::admission::Lease;
 use crate::daemon::{lifecycle, registry};
@@ -388,18 +389,16 @@ fn read_manifest(data: &Path) -> anyhow::Result<Option<Manifest>> {
     if !path.exists() {
         return Ok(None);
     }
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
+    let limit = crate::limits::MAX_STATE_BYTES;
+    let bytes = match read_file(&path, limit) {
+        Err(ReadFailure::LimitExceeded) => {
             anyhow::bail!(
-                "manifest {} is {} bytes, over the {} byte limit (corrupt?)",
-                path.display(),
-                metadata.len(),
-                crate::limits::MAX_STATE_BYTES
+                "manifest {} is over the {limit} byte limit (corrupt?)",
+                path.display()
             );
         }
-        _ => {}
-    }
-    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        result => result.with_context(|| format!("read {}", path.display()))?,
+    };
     serde_json::from_slice(&bytes)
         .map(Some)
         .with_context(|| format!("parse {}", path.display()))

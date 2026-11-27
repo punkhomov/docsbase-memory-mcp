@@ -4,6 +4,7 @@ pub mod async_client;
 pub mod client;
 pub(crate) mod framing;
 pub mod protocol;
+pub mod settings;
 
 #[cfg(test)]
 mod async_client_tests;

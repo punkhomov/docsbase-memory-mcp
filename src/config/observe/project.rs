@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use crate::config::Config;
 use crate::config::change::{
-    self, Action, Assessment, Blocker, BlockerCode, ChangePlan, Effect, ExpectedState, Grant,
-    Observation, PlanLimits, Reason, ResourceId, Target,
+    self, Action, Assessment, Blocker, BlockerCode, ChangePlan, Effect, ExpectedState, Observation,
+    PlanLimits, Reason, ResourceId, Target,
 };
 use crate::config::schema::{ArtifactId, Resolved, SourceId};
 use crate::daemon::settings::DaemonProfile;
@@ -17,7 +17,10 @@ use crate::store::{
     generation_build::CatalogHead, registry_inspect, registry_inspect::ObservedProjectIndex,
     settings::DbSettings,
 };
-use crate::vector_cache::EmbeddingRecipe;
+use crate::vector_cache::{
+    EmbeddingRecipe,
+    inputs::{self, DocumentVectorInputs},
+};
 
 use super::{PlanningLimits, source};
 
@@ -63,11 +66,13 @@ pub(crate) struct ActiveProjectConfig<'a> {
     pub(crate) config: Option<Arc<Config>>,
     pub(crate) global: crate::daemon::launch::ConfigStamp,
     pub(crate) daemon: &'a Config,
+    pub(crate) overrides: &'a crate::daemon::settings::DaemonPatch,
+    pub(crate) defaults: crate::config::bootstrap::DefaultsContext,
     pub(crate) ann: AnnObservation,
 }
 
 pub(crate) struct LiveProjectChange {
-    pub(crate) active: Arc<Config>,
+    pub(crate) active: Option<Arc<Config>>,
     pub(crate) config: Arc<Config>,
     pub(crate) reviewed: ReviewedReplacement,
 }
@@ -122,6 +127,7 @@ pub(crate) struct ProjectReplacement {
 pub(crate) struct ReviewedReplacement {
     pub(crate) base: ObservedProjectIndex,
     pub(crate) head: CatalogHead,
+    pub(crate) reuse_vectors_only: bool,
     sources: [source::SourceObservation; 2],
 }
 
@@ -217,48 +223,41 @@ fn project_plan_using(
     profile: Option<&DaemonProfile>,
     inspect: impl FnOnce() -> Result<Inspected>,
 ) -> Result<ProjectConfigPlan> {
-    let (global, project, mut assessment) =
+    let (global, project, source_assessment) =
         capture_plan_sources(config_dir, cache, root, limits, profile)?;
+    let mut assessment = Assessment::default();
+    let mut vectors = Assessment::default();
 
     let mut replacement = None;
     let mut live_change = None;
-    let restart_required = active
-        .as_ref()
-        .map(|active| global_changed(&active.global, &global.observation.state));
-    let (full_survey, observation_failure) = if assessment.blockers.is_empty() {
-        match crate::config::resolve::resolve_observed_v2(
-            global.layer.as_ref(),
-            project.layer.as_ref(),
-            profile,
-            active
-                .as_ref()
-                .filter(|_| restart_required == Some(false))
-                .map(|active| active.daemon),
-        ) {
-            Ok(Some((global_config, config))) if permits_project(&config, root) => {
+    let mut restart_required = None;
+    let (full_survey, observation_failure) = if source_assessment.blockers.is_empty() {
+        match resolve_plan_sources(&global, &project, active.as_ref(), profile) {
+            Ok(Some((global_config, Ok(config)))) if permits_project(&config, root) => {
                 match inspect()? {
                     Ok(inspection) => {
-                        let survey = assess_project(&inspection, &config, &mut assessment)?;
+                        let survey =
+                            assess_project(&inspection, &config, &mut assessment, &mut vectors)?;
                         if let Some(active) = &active {
-                            assess_runtime(
+                            restart_required = assess_runtime(
                                 active,
-                                &global.observation.state,
+                                global_config.settings(),
                                 &config,
                                 &inspection,
                                 &mut assessment,
                             )?;
                             if restart_required == Some(false)
-                                && let Some(old) = &active.config
                                 && let Some(selected) = inspection.selected.as_ref()
                                 && selected.seal.is_some()
                                 && !assessment.actions.is_empty()
                             {
                                 live_change = Some(LiveProjectChange {
-                                    active: Arc::clone(old),
+                                    active: active.config.clone(),
                                     config: Arc::new(config),
                                     reviewed: reviewed_replacement(
                                         selected,
                                         [global.observation, project.observation],
+                                        vectors.actions.is_empty(),
                                     )?,
                                 });
                             }
@@ -270,6 +269,7 @@ fn project_plan_using(
                                 config,
                                 selected,
                                 [global.observation, project.observation],
+                                vectors.actions.is_empty(),
                             )?);
                         }
                         (survey, None)
@@ -288,11 +288,13 @@ fn project_plan_using(
                 );
                 (None, None)
             }
-            Ok(Some(_)) | Err(_) => {
-                assessment.blockers.push(Blocker {
-                    resource: None,
-                    code: BlockerCode::InvalidSettings,
-                });
+            Ok(Some((global, _))) => {
+                restart_required =
+                    blocked_project(active.as_ref(), Some(&global), &mut assessment)?;
+                (None, None)
+            }
+            Err(_) => {
+                blocked_project(None, None, &mut assessment)?;
                 (None, None)
             }
         }
@@ -300,7 +302,7 @@ fn project_plan_using(
         (None, None)
     };
     let plan = compile_project_plan(
-        assessment,
+        &[source_assessment, assessment, vectors],
         limits,
         replacement.as_ref(),
         live_change.as_ref(),
@@ -315,6 +317,72 @@ fn project_plan_using(
         replacement,
         live_change,
     })
+}
+
+fn blocked_project(
+    active: Option<&ActiveProjectConfig<'_>>,
+    global: Option<&Resolved<Config>>,
+    assessment: &mut Assessment,
+) -> Result<Option<bool>> {
+    assessment.blockers.push(Blocker {
+        resource: None,
+        code: BlockerCode::InvalidSettings,
+    });
+    match active.zip(global) {
+        Some((active, global)) => assess_daemon_global(active, global.settings(), None, assessment),
+        None => Ok(None),
+    }
+}
+
+fn resolve_plan_sources(
+    global: &source::Captured,
+    project: &source::Captured,
+    active: Option<&ActiveProjectConfig<'_>>,
+    profile: Option<&DaemonProfile>,
+) -> Result<Option<(Resolved<Config>, Result<Config>)>> {
+    let overrides = active.map_or_else(
+        || crate::daemon::settings::DaemonPatch {
+            profile: profile.cloned(),
+            ..crate::daemon::settings::DaemonPatch::default()
+        },
+        |active| active.overrides.clone(),
+    );
+    let captured = active
+        .filter(|active| !global_changed(&active.global, &global.observation.state))
+        .map(|active| active.daemon);
+    let defaults = active.map_or_else(
+        crate::config::bootstrap::DefaultsContext::for_host,
+        |active| active.defaults,
+    );
+    let global = crate::config::resolve::resolve_observed_global_v2(
+        global.layer.as_ref(),
+        overrides,
+        captured,
+        &defaults,
+    )?;
+    Ok(global.map(|global| {
+        #[cfg(feature = "hybrid-local")]
+        let global = if let Some(active) = active {
+            let origins = global.provenance().clone();
+            let mut settings = global.into_settings();
+            settings
+                .providers
+                .inherit_runtime_bootstrap(&active.daemon.providers);
+            Resolved::new(settings, origins)
+        } else {
+            global
+        };
+        let settings =
+            crate::config::resolve::for_observed_project(&global, project.layer.as_ref()).and_then(
+                |config| {
+                    if matches!(config.daemon.profile, DaemonProfile::Website { .. }) {
+                        crate::daemon::launch::lexical_only(&config)?;
+                    }
+                    Ok(config)
+                },
+            );
+        (global, settings)
+    }))
 }
 
 fn capture_plan_sources(
@@ -348,13 +416,13 @@ fn capture_plan_sources(
 }
 
 fn compile_project_plan(
-    assessment: Assessment,
+    assessments: &[Assessment],
     limits: PlanningLimits,
     replacement: Option<&ProjectReplacement>,
     live_change: Option<&LiveProjectChange>,
 ) -> Result<ChangePlan> {
     change::compile_for(
-        &[assessment],
+        assessments,
         PlanLimits {
             max_actions: 5,
             max_dependencies: 5,
@@ -372,21 +440,24 @@ fn replacement_for(
     config: Config,
     selected: &registry_inspect::SelectedIndexEvidence,
     sources: [source::SourceObservation; 2],
+    reuse_vectors_only: bool,
 ) -> Result<ProjectReplacement> {
     Ok(ProjectReplacement {
         global,
         config,
-        reviewed: reviewed_replacement(selected, sources)?,
+        reviewed: reviewed_replacement(selected, sources, reuse_vectors_only)?,
     })
 }
 
 fn reviewed_replacement(
     selected: &registry_inspect::SelectedIndexEvidence,
     sources: [source::SourceObservation; 2],
+    reuse_vectors_only: bool,
 ) -> Result<ReviewedReplacement> {
     Ok(ReviewedReplacement {
         base: selected.index,
         head: CatalogHead::from_observed_seal(selected.index, selected.seal)?,
+        reuse_vectors_only,
         sources,
     })
 }
@@ -421,51 +492,44 @@ fn global_changed(
 }
 
 fn assess_daemon_global(
-    stamp: &crate::daemon::launch::ConfigStamp,
-    source: &source::SourceState,
+    active: &ActiveProjectConfig<'_>,
+    desired: &Config,
     index_dependency: Option<ResourceId>,
     assessment: &mut Assessment,
-) -> Result<()> {
+) -> Result<Option<bool>> {
     use crate::config::schema::ComponentImpact;
-    use crate::daemon::launch::ConfigStamp;
-    let previous = match stamp {
-        ConfigStamp::Missing => Some("missing".to_owned()),
-        ConfigStamp::Loaded(hash) => Some(format!("source-bytes-v1:{}", hash.to_hex())),
-        ConfigStamp::Unavailable(_) => None,
-    };
-    let desired = match source {
-        source::SourceState::Missing => Some("missing"),
-        source::SourceState::Loaded { revision, .. } => Some(revision.as_str()),
-        source::SourceState::Unavailable(_) => None,
-    };
-    let Some((previous, desired)) = previous.as_deref().zip(desired) else {
+    if matches!(
+        active.global,
+        crate::daemon::launch::ConfigStamp::Unavailable(_)
+    ) {
         let resource = ResourceId::Runtime("daemon_global".into());
         assessment.expected.push(Observation {
             resource: resource.clone(),
             state: ExpectedState::Unknown,
         });
         block(assessment, &resource, BlockerCode::ObservationUnavailable);
-        return Ok(());
-    };
-    let previous = change::policy_identity("daemon-source-revision-v1", &previous)?;
-    let desired = change::policy_identity("daemon-source-revision-v1", &desired)?;
+        return Ok(None);
+    }
+    let previous = crate::config::view::launch_identity(active.daemon)?;
+    let desired = crate::config::view::launch_identity(desired)?;
     let impact = ComponentImpact::between(Some(&previous), &desired);
     let mut daemon = change::runtime_assessment("daemon_global", Some(previous), desired, impact);
+    let restart = !daemon.actions.is_empty();
     if let Some(action) = daemon.actions.first_mut() {
         action.dependencies.extend(index_dependency);
     }
     assessment.expected.extend(daemon.expected);
     assessment.actions.extend(daemon.actions);
-    Ok(())
+    Ok(Some(restart))
 }
 
 fn assess_runtime(
     active: &ActiveProjectConfig,
-    global: &source::SourceState,
+    global: &Config,
     config: &Config,
     inspection: &registry_inspect::ProjectRecipeInspection,
     assessment: &mut Assessment,
-) -> Result<()> {
+) -> Result<Option<bool>> {
     use crate::config::schema::ComponentImpact;
     let index = artifact("project_index", inspection.project_id);
     let index_dependency = assessment
@@ -473,7 +537,7 @@ fn assess_runtime(
         .iter()
         .any(|action| action.resource == index)
         .then_some(index);
-    assess_daemon_global(&active.global, global, index_dependency.clone(), assessment)?;
+    let restart = assess_daemon_global(active, global, index_dependency.clone(), assessment)?;
     let old = active.config.as_deref();
     if let Some(old) = old {
         let previous = crate::config::view::runtime_identity(old)?;
@@ -500,7 +564,8 @@ fn assess_runtime(
             state: ExpectedState::Missing,
         });
     }
-    assess_ann(active, config, inspection, assessment)
+    assess_ann(active, config, inspection, assessment)?;
+    Ok(restart)
 }
 
 fn assess_ann(
@@ -509,6 +574,8 @@ fn assess_ann(
     inspection: &registry_inspect::ProjectRecipeInspection,
     assessment: &mut Assessment,
 ) -> Result<()> {
+    use crate::config::schema::{ArtifactFacts, ComponentImpact, SettingsSpec};
+    use crate::hybrid::ann_settings::AnnBuildSpec;
     let resource = artifact("ann_graph", inspection.project_id);
     let ann_format = (
         crate::hybrid::ann_store::ANN_FORMAT_VERSION,
@@ -556,7 +623,12 @@ fn assess_ann(
             .actions
             .iter()
             .find(|action| action.resource == index);
-        if rebuild_index.is_some() || old.ann_build != config.ann_build {
+        let impact = AnnBuildSpec::impact(
+            Some(&old.ann_build),
+            &config.ann_build,
+            &ArtifactFacts::default(),
+        );
+        if rebuild_index.is_some() || impact != ComponentImpact::Unchanged {
             let generation = rebuild_index.is_none().then_some((
                 selected.index.epoch,
                 selected.index.generation_id,
@@ -564,8 +636,7 @@ fn assess_ann(
                 selected.seal,
             ));
             let embedding = config
-                .hybrid_cfg
-                .embedding_model_key()
+                .embedding_model_key()?
                 .as_deref()
                 .map(EmbeddingRecipe::for_model);
             assessment.actions.push(Action {
@@ -626,6 +697,7 @@ fn assess_project(
     inspection: &registry_inspect::ProjectRecipeInspection,
     config: &Config,
     assessment: &mut Assessment,
+    vectors: &mut Assessment,
 ) -> Result<Option<bool>> {
     let registry = inspection
         .schema_version
@@ -641,7 +713,7 @@ fn assess_project(
         state: registry.map_or(ExpectedState::Missing, ExpectedState::KnownIdentity),
     });
     if let Some(selected) = &inspection.selected {
-        return assess_selected(selected, config, assessment);
+        return assess_selected(selected, config, assessment, vectors);
     }
     assessment.expected.push(Observation {
         resource: artifact("project_index", inspection.project_id),
@@ -654,6 +726,7 @@ fn assess_selected(
     selected: &registry_inspect::SelectedIndexEvidence,
     config: &Config,
     assessment: &mut Assessment,
+    vectors: &mut Assessment,
 ) -> Result<Option<bool>> {
     let identity = selected.index;
     let project = Some(identity.project_id);
@@ -678,12 +751,36 @@ fn assess_selected(
     };
     let lexical = crate::index::outcome::recipe_id(config);
     let embedding = config
-        .hybrid_cfg
-        .embedding_model_key()
+        .embedding_model_key()?
         .as_deref()
         .map(EmbeddingRecipe::for_model);
     if recipes.lexical != lexical || recipes.embedding != embedding {
-        push_replacement(assessment, identity.project_id, &lexical, embedding, config)?;
+        let previous = recipes
+            .vector_inputs
+            .zip(recipes.embedding)
+            .map(|(chunks, embedding)| DocumentVectorInputs { chunks, embedding });
+        let desired = embedding.map(|embedding| DocumentVectorInputs {
+            chunks: crate::index::outcome::vector_inputs_id(config),
+            embedding,
+        });
+        *vectors = desired
+            .map(|desired| {
+                inputs::assess_replacement(
+                    identity.project_id,
+                    previous,
+                    desired,
+                    has_remote_embedding(config),
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+        push_replacement(
+            assessment,
+            identity.project_id,
+            &lexical,
+            embedding,
+            vectors,
+        )?;
     }
     Ok(Some(recipes.full_survey))
 }
@@ -693,39 +790,13 @@ fn push_replacement(
     project_id: i64,
     lexical: &str,
     embedding: Option<EmbeddingRecipe>,
-    config: &Config,
+    vectors: &Assessment,
 ) -> Result<()> {
-    let mut dependencies = Vec::new();
-    if let Some(recipe) = embedding {
-        let vectors = artifact("document_vectors", Some(project_id));
-        // The seal identifies the model recipe. It does not count vectors
-        // present in the separately owned, live cache.
-        assessment.expected.push(Observation {
-            resource: vectors.clone(),
-            state: ExpectedState::Unknown,
-        });
-        let remote = config
-            .hybrid_cfg
-            .embedding
-            .as_ref()
-            .is_some_and(|stage| stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER);
-        assessment.actions.push(Action {
-            resource: vectors.clone(),
-            effect: Effect::Rebuild,
-            target: Some(Target::Identity(change::policy_identity(
-                "document-vector-inputs-v1",
-                &(lexical, recipe),
-            )?)),
-            reasons: vec![Reason::SettingsChanged],
-            dependencies: Vec::new(),
-            required_grants: if remote {
-                vec![Grant::Remote]
-            } else {
-                Vec::new()
-            },
-        });
-        dependencies.push(vectors);
-    }
+    let dependencies = vectors
+        .actions
+        .iter()
+        .map(|action| action.resource.clone())
+        .collect();
     assessment.actions.push(Action {
         resource: artifact("project_index", Some(project_id)),
         effect: Effect::Rebuild,
@@ -740,6 +811,14 @@ fn push_replacement(
     Ok(())
 }
 
+fn has_remote_embedding(config: &Config) -> bool {
+    config
+        .hybrid_cfg
+        .embedding
+        .as_ref()
+        .is_some_and(|stage| stage.provider == crate::hybrid::config::PROVIDER_OPENROUTER)
+}
+
 fn artifact(component: &str, project_id: Option<i64>) -> ResourceId {
     ResourceId::Artifact(ArtifactId {
         component: component.into(),
@@ -752,4 +831,78 @@ fn block(assessment: &mut Assessment, resource: &ResourceId, code: BlockerCode) 
         resource: Some(resource.clone()),
         code,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::change::Grant;
+
+    #[test]
+    fn lexical_only_replacement_leaves_compatible_vector_inputs_unchanged() {
+        use crate::store::registry_inspect::{
+            IndexRecipeEvidence, ObservedProjectIndex, ProjectIndexLayout,
+        };
+
+        let mut config = Config {
+            hybrid_cfg: crate::hybrid::config::HybridCfg::enabled_with_defaults(),
+            ..Config::default()
+        };
+        let model = config.embedding_model_key().unwrap().unwrap();
+        let mut selected = registry_inspect::SelectedIndexEvidence {
+            index: ObservedProjectIndex {
+                project_id: 1,
+                epoch: Some([1; 16]),
+                generation_id: Some(1),
+                content_revision: 1,
+                layout: ProjectIndexLayout::Local,
+            },
+            seal: Some([1; 32]),
+            recipes: Some(IndexRecipeEvidence {
+                lexical: "previous-tokenizer-recipe".into(),
+                vector_inputs: Some(crate::index::outcome::vector_inputs_id(&config)),
+                embedding: Some(EmbeddingRecipe::for_model(&model)),
+                full_survey: true,
+            }),
+        };
+        let assess = |selected: &registry_inspect::SelectedIndexEvidence, config: &Config| {
+            let mut project = Assessment::default();
+            let mut vectors = Assessment::default();
+            assert_eq!(
+                assess_selected(selected, config, &mut project, &mut vectors).unwrap(),
+                Some(true)
+            );
+            compile_project_plan(&[project, vectors], PlanningLimits::standard(), None, None)
+                .unwrap()
+                .body
+        };
+        let compatible = assess(&selected, &config);
+        assert_eq!(compatible.actions.len(), 1);
+        assert_eq!(
+            compatible.actions[0].resource,
+            artifact("project_index", Some(1))
+        );
+        assert_eq!(compatible.actions[0].dependencies, [] as [ResourceId; 0]);
+        assert_eq!(compatible.required_grants, [] as [Grant; 0]);
+
+        selected.recipes.as_mut().unwrap().vector_inputs = None;
+        let unknown = assess(&selected, &config);
+        assert_eq!(unknown.actions.len(), 2);
+        assert_eq!(unknown.required_grants, vec![Grant::Remote]);
+
+        config.max_file_size += 1;
+        selected.recipes.as_mut().unwrap().vector_inputs =
+            Some(crate::index::outcome::vector_inputs_id(&Config::default()));
+        let changed = assess(&selected, &config);
+        assert_eq!(changed.actions.len(), 2);
+        assert_eq!(
+            changed.actions[0].resource,
+            artifact("document_vectors", Some(1))
+        );
+        assert_eq!(changed.required_grants, vec![Grant::Remote]);
+        assert_eq!(
+            changed.actions[1].dependencies,
+            vec![changed.actions[0].resource.clone()]
+        );
+    }
 }

@@ -241,6 +241,7 @@ pub(crate) fn catalog_chunk_set(
 pub struct AnnStore {
     root: PathBuf,
     keep_generations: usize,
+    read_file_limit: u64,
     slot_pins: Arc<Mutex<HashMap<PathBuf, SlotUse>>>,
 }
 
@@ -289,15 +290,28 @@ impl AnnStore {
     /// Store rooted at `root` (typically the cache root).
     #[must_use]
     pub fn new(root: PathBuf) -> Self {
-        Self::with_retention(root, super::dense_settings::DEFAULT_ANN_KEEP_GENERATIONS)
+        Self::with_policy(
+            root,
+            super::dense_settings::DEFAULT_ANN_KEEP_GENERATIONS,
+            MAX_ANN_FILE_BYTES,
+        )
     }
 
-    pub(crate) fn with_retention(root: PathBuf, keep_generations: usize) -> Self {
+    pub(super) fn with_policy(
+        root: PathBuf,
+        keep_generations: usize,
+        read_file_limit: u64,
+    ) -> Self {
         Self {
             root,
             keep_generations,
+            read_file_limit,
             slot_pins: Arc::default(),
         }
+    }
+
+    pub(super) const fn read_file_limit(&self) -> u64 {
+        self.read_file_limit
     }
 
     /// Directory containing all ANN indexes of a project.
@@ -502,8 +516,8 @@ impl AnnStore {
     /// basename; anything other than [`DUMP_BASENAME`] fails the publish.
     ///
     /// # Errors
-    /// Dump write failure, wrong basename, or filesystem failure during
-    /// metadata/`READY` writing or rename.
+    /// Dump write failure, wrong basename, invalid dump file size, or
+    /// filesystem failure during metadata/`READY` writing or rename.
     pub fn persist_dump(
         &self,
         key: &AnnKey,
@@ -563,6 +577,11 @@ impl AnnStore {
             catalog: artifact.catalog,
         };
         let publish = (|| -> Result<AnnSlot> {
+            if dump_file_sizes(&tmp).is_none() {
+                return Err(Error::internal(
+                    "ANN dump files missing, empty or oversized",
+                ));
+            }
             let meta_json = serde_json::to_string_pretty(&stored)
                 .map_err(|err| Error::internal_with_source("serialize ann meta", err))?;
             fs::write(tmp.join("meta.json"), meta_json)
@@ -821,15 +840,25 @@ fn ordinary_size(path: &Path) -> Option<u64> {
 
 /// Combined size of the required ordinary dump files.
 fn dump_file_bytes(dir: &Path) -> Option<u64> {
-    [
-        format!("{DUMP_BASENAME}.hnsw.graph"),
-        format!("{DUMP_BASENAME}.hnsw.data"),
-    ]
-    .into_iter()
-    .map(|name| {
-        ordinary_size(&dir.join(name)).filter(|size| (1..=MAX_ANN_FILE_BYTES).contains(size))
-    })
-    .sum()
+    Some(dump_file_sizes(dir)?.into_iter().sum())
+}
+
+fn dump_file_sizes(dir: &Path) -> Option<[u64; 2]> {
+    let sizes = [
+        ordinary_size(&dir.join(format!("{DUMP_BASENAME}.hnsw.graph")))?,
+        ordinary_size(&dir.join(format!("{DUMP_BASENAME}.hnsw.data")))?,
+    ];
+    sizes
+        .iter()
+        .all(|size| (1..=MAX_ANN_FILE_BYTES).contains(size))
+        .then_some(sizes)
+}
+
+/// The disk format is validated independently of current working admission.
+pub(super) fn dump_within_read_budget(dir: &Path, read_file_limit: u64) -> Result<bool> {
+    let sizes = dump_file_sizes(dir)
+        .ok_or_else(|| Error::internal("ANN dump files missing, empty or oversized"))?;
+    Ok(sizes.into_iter().all(|size| size <= read_file_limit))
 }
 
 /// `sync_all` on the dump files before the `READY` marker is written
@@ -954,7 +983,7 @@ mod tests {
     #[test]
     fn catalog_retention_orders_by_head_before_local_revision() {
         let root = tempfile::tempdir().unwrap();
-        let store = AnnStore::with_retention(root.path().to_path_buf(), 2);
+        let store = AnnStore::with_policy(root.path().to_path_buf(), 2, MAX_ANN_FILE_BYTES);
         let graph = graph();
         let old_key = graph_key(99);
         let old = catalog_artifact(&old_key, 7, 1);

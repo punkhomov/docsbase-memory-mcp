@@ -4,12 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-use super::{Dedupe, SEARCH_UX_OVERSCAN, SearchArgs};
+use super::{Dedupe, SearchArgs};
 use crate::error::{Error, Result};
 use crate::index::tantivy_index::chunk_id_parts;
+use crate::search::RetrievalSettings;
 
 pub(super) struct Refill {
     ceiling: usize,
+    settings: RetrievalSettings,
     base: HashSet<u64>,
     rounds: usize,
     candidates: usize,
@@ -24,9 +26,11 @@ impl Refill {
         base: usize,
         configured: usize,
         rrf: bool,
+        settings: RetrievalSettings,
     ) -> Option<Self> {
         (args.dedupe == Dedupe::Path).then(|| Self {
             ceiling: base.max(configured),
+            settings,
             base: HashSet::new(),
             rounds: 0,
             candidates: 0,
@@ -96,7 +100,7 @@ impl Refill {
         } else if fetch >= self.ceiling {
             "candidate-budget"
         } else {
-            return Some(fetch.saturating_mul(SEARCH_UX_OVERSCAN).min(self.ceiling));
+            return Some(self.settings.widen_cap_window(fetch, self.ceiling));
         };
         None
     }
@@ -126,11 +130,13 @@ mod tests {
 
     #[test]
     fn clamped_rrf_widening_preserves_base_chunks_that_plain_top_k_displaces() {
-        let args = super::super::parse_search_args(&json!({
-            "query":"widgets", "limit":3, "dedupe":"path"
-        }))
+        let settings = crate::search::retrieval::standalone().expect("retrieval policy");
+        let args = super::super::parse_search_args(
+            &json!({"query":"widgets", "limit":3, "dedupe":"path"}),
+            settings,
+        )
         .expect("args");
-        let mut refill = Refill::new(&args, 10, 12, true).expect("refill");
+        let mut refill = Refill::new(&args, 10, 12, true, settings).expect("refill");
         let mut lexical: Vec<_> = (0..10).map(|i| (chunk_id(1, i), 20.0)).collect();
         let mut dense: Vec<_> = (10..20).map(|i| (chunk_id(1, i), 1.0)).collect();
         let mut base = rrf_merge(&lexical, &dense);

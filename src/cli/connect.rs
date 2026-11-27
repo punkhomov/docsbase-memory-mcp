@@ -459,7 +459,17 @@ fn write_global_provider_locked(
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
         .ok_or_else(|| Error::internal("providers is not a table"))?;
-    providers.insert(name.to_owned(), toml::Value::Table(record.clone()));
+    let mut updated = record.clone();
+    if name == PROVIDER_FASTEMBED
+        && let Some(previous) = providers.get(name).and_then(toml::Value::as_table)
+    {
+        for key in crate::hybrid::local_settings::INFERENCE_KEYS {
+            if let Some(value) = previous.get(key) {
+                updated.entry(key).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    providers.insert(name.to_owned(), toml::Value::Table(updated));
 
     let rendered = render_edit_document(&root)?;
     let tmp = path.with_extension("toml.tmp");
@@ -474,6 +484,24 @@ fn write_global_provider_locked(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fastembed_connect_preserves_inference_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, "config_version = 2\n[providers.fastembed]\nenabled = false\nbatch_size = 7\nintra_threads = 2\n").unwrap();
+        let record = toml::Table::from_iter([
+            ("enabled".into(), true.into()),
+            ("runtime".into(), "installed".into()),
+        ]);
+        super::write_global_provider_locked("fastembed", &record, &path).unwrap();
+        let config = crate::config::Config::global_from(root.path()).unwrap();
+        let provider = config.providers.get("fastembed").unwrap();
+        assert!(provider.enabled);
+        assert_eq!(provider.params["runtime"].as_str(), Some("installed"));
+        assert_eq!(provider.params["batch_size"].as_integer(), Some(7));
+        assert_eq!(provider.params["intra_threads"].as_integer(), Some(2));
+    }
+
     #[test]
     fn provider_write_bounds_existing_and_rendered_sources() {
         let root = tempfile::tempdir().unwrap();

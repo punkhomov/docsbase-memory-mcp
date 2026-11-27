@@ -507,6 +507,109 @@ fn sync_jobs_retention_via_enqueue() {
     env.stop();
 }
 
+#[test]
+fn configured_sync_history_retains_the_newest_receipts_on_both_registries() {
+    for version in [1, 2] {
+        let env = Env::new();
+        let project = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        let header = if version == 2 {
+            "config_version = 2\n"
+        } else {
+            ""
+        };
+        fs::write(
+            config.path().join("config.toml"),
+            format!("{header}[daemon]\nmax_sync_jobs = 2\n"),
+        )
+        .unwrap();
+        fs::write(project.path().join("guide.md"), "# Sync history\n").unwrap();
+
+        let command = || {
+            let mut command = env.cli();
+            command
+                .env("DOCSBASE_CONFIG_DIR", config.path())
+                .env("DOCSBASE_DATA_DIR", config.path().join("data"));
+            command
+        };
+        let indexed = command().arg("index").arg(project.path()).output().unwrap();
+        assert!(indexed.status.success(), "version {version}: {indexed:?}");
+        let mut daemon = command()
+            .args(["serve", "--detached", "--grace-ms", "10000"])
+            .spawn()
+            .unwrap();
+        assert!(wait_until(Duration::from_secs(10), || env.endpoint_up()));
+        let mut client = Client::connect(&env.transport, env.cache()).unwrap();
+        client.handshake(project.path()).unwrap();
+        let db = rusqlite::Connection::open_with_flags(
+            env.cache().join(DB_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let has_catalog: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'project_generation_head')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_catalog, version == 2);
+        let mut receipts = db.prepare("SELECT id FROM sync_jobs ORDER BY id").unwrap();
+        let mut jobs = Vec::new();
+        for _ in 0..4 {
+            let mut id = None;
+            assert!(wait_until(Duration::from_secs(5), || {
+                match client.call_tool("sync_start", serde_json::json!({})) {
+                    Ok(reply) => {
+                        let candidate = reply["job_id"].as_i64().unwrap();
+                        if jobs.last() == Some(&candidate) {
+                            // V5 can return the terminal receipt while its native
+                            // owner still holds the admission permit.
+                            assert_eq!(reply["state"], "done");
+                        } else {
+                            assert!(jobs.last().is_none_or(|previous| candidate > *previous));
+                            id = Some(candidate);
+                        }
+                        id.is_some()
+                    }
+                    Err(error) => {
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("project sync is starting or retiring"),
+                            "{error}"
+                        );
+                        false
+                    }
+                }
+            }));
+            let id = id.unwrap();
+            jobs.push(id);
+            assert!(wait_until(Duration::from_secs(5), || {
+                let reply = client
+                    .call_tool("sync_status", serde_json::json!({"job_id": id}))
+                    .unwrap();
+                assert_ne!(reply["state"], "error");
+                reply["state"] == "done"
+            }));
+            let kept = receipts
+                .query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(
+                kept,
+                jobs[jobs.len().saturating_sub(2)..],
+                "version {version} must retain the two newest receipts"
+            );
+        }
+
+        drop(client);
+        env.stop();
+        assert!(daemon.wait().unwrap().success());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn stop_escalates_with_sigterm_when_wedged() {
@@ -629,6 +732,47 @@ fn daemon_log_rotates_at_spawn() {
         current.len()
     );
     env.stop();
+}
+
+#[test]
+fn configured_daemon_log_rotates_only_above_the_owned_threshold() {
+    const CHILD: &str = "DOCSBASE_TEST_OWNED_LOG_THRESHOLD";
+    if std::env::var_os(CHILD).is_none() {
+        let config = TempDir::new().unwrap();
+        fs::write(
+            config.path().join("config.toml"),
+            "config_version = 2\n[daemon]\nlog_rotate_bytes = 32\n",
+        )
+        .unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "configured_daemon_log_rotates_only_above_the_owned_threshold",
+            ])
+            .env(CHILD, "1")
+            .env("DOCSBASE_CONFIG_DIR", config.path())
+            .env("DOCSBASE_DATA_DIR", config.path().join("data"))
+            .status()
+            .unwrap();
+        assert!(child.success());
+        return;
+    }
+
+    let env = Env::new();
+    let logs = env.cache().join("logs");
+    fs::create_dir_all(&logs).unwrap();
+    let log = logs.join("daemon.log");
+    let old = logs.join("daemon.log.old");
+
+    fs::File::create(&log).unwrap().set_len(32).unwrap();
+    env.start();
+    env.stop();
+    assert!(!old.exists());
+
+    fs::File::create(&log).unwrap().set_len(33).unwrap();
+    env.start();
+    env.stop();
+    assert_eq!(fs::metadata(old).unwrap().len(), 33);
 }
 
 #[test]

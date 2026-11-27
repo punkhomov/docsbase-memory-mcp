@@ -481,7 +481,9 @@ fn admitted_project_policy_is_forwarded_once_and_reload_remains_pure() {
     let launch = LaunchSnapshot::capture_from(f.global.path())
         .strict(DaemonPatch::default())
         .unwrap();
-    let admitted = launch.admit(f.cache.path(), &db).unwrap();
+    let admitted = launch
+        .admit_with_config_lock_dir(f.cache.path(), &db, None)
+        .unwrap();
     std::fs::write(f.root.path().join(".docsbase.toml"), "hybrid=true").unwrap();
     let shared = Shared::open_with_admitted_launch(
         f.cache.path(),
@@ -493,6 +495,10 @@ fn admitted_project_policy_is_forwarded_once_and_reload_remains_pure() {
         admitted,
     )
     .unwrap();
+    assert!(
+        shared.config_lock_dir().is_err(),
+        "Website startup accepts an unavailable source-lock directory"
+    );
     assert!(
         !shared
             .project_config(&f.project)

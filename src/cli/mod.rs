@@ -52,6 +52,7 @@ use clap::{Parser, Subcommand};
 use crate::config::{Config, paths};
 use crate::error::Error;
 use crate::ipc::client::Client;
+use crate::ipc::settings::ClientSettings;
 
 /// `docsbase` command-line interface.
 #[derive(Debug, Parser)]
@@ -91,19 +92,19 @@ pub enum Command {
         /// Interpret query syntax or literal natural-language text (syntax|literal).
         #[arg(long, default_value_t = crate::index::QueryMode::default())]
         query_mode: crate::index::QueryMode,
-        /// Maximum number of hits.
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
+        /// Maximum number of hits (uses the project default if omitted).
+        #[arg(long)]
+        limit: Option<usize>,
         /// Attach telemetry: `{hits, meta}` instead of a bare array.
         #[arg(long)]
         explain: bool,
         /// Attach a text fragment to each hit.
         #[arg(long)]
         snippet: bool,
-        /// Post-filter: `none` (default) or `path` (cap chunks per document).
-        #[arg(long, default_value = "none")]
-        dedupe: String,
-        /// Chunks kept per document when `--dedupe path` (default 2, max 10).
+        /// Post-filter: `none` or `path` (cap chunks per document).
+        #[arg(long)]
+        dedupe: Option<String>,
+        /// Chunks kept per document with path dedupe (uses the project default if omitted).
         #[arg(long)]
         n_per_doc: Option<u64>,
         /// Only documents whose project-relative path starts with this prefix.
@@ -223,6 +224,11 @@ pub enum DaemonCommand {
 #[allow(clippy::too_many_lines)] // Exhaustive CLI dispatcher; runtime owners remain explicit per command.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    #[cfg(feature = "hybrid-local")]
+    if !matches!(&cli.command, Command::Serve { .. }) {
+        let parallelism = crate::config::bootstrap::tokenizer_parallelism(std::env::var_os);
+        tokenizers::utils::parallelism::set_parallelism(parallelism.value);
+    }
     let db_settings = crate::store::settings::standalone()?;
     match cli.command {
         #[cfg(feature = "web")]
@@ -241,18 +247,18 @@ pub fn run() -> anyhow::Result<()> {
         } => {
             let started = std::time::Instant::now();
             search::run_started(
-                &query,
-                &search::Options {
+                search::Arguments {
+                    query: &query,
+                    query_mode,
                     limit,
                     explain,
                     snippet,
-                    dedupe,
+                    dedupe: dedupe.as_deref(),
                     n_per_doc,
-                    path_prefix,
-                    tags,
+                    path_prefix: path_prefix.as_deref(),
+                    tags: &tags,
                 },
                 None,
-                query_mode,
                 started,
             )
         }
@@ -333,6 +339,21 @@ pub fn error_exit_code(error: &anyhow::Error) -> u8 {
         .map_or(1, config::CheckStatus::exit_code)
 }
 
+fn capture_bootstrap(
+    detached: bool,
+) -> crate::error::Result<crate::config::bootstrap::BootstrapContext> {
+    use crate::config::bootstrap::{BootstrapContext, Entrypoint, EntrypointFacts};
+    use std::io::IsTerminal;
+    BootstrapContext::capture_host(EntrypointFacts {
+        mode: if detached {
+            Entrypoint::Autostart
+        } else {
+            Entrypoint::Cli
+        },
+        is_tty: !detached && std::io::stdin().is_terminal(),
+    })
+}
+
 fn serve(
     detached: bool,
     grace_ms: Option<u64>,
@@ -346,14 +367,16 @@ fn serve(
         (None | Some(ServeProfile::Website), Some(project_root)) => Some(crate::daemon::settings::DaemonProfile::Website { project_root }),
         _ => return Err(Error::Admission { message: "serve --profile website requires its own --project ABS; --profile shared cannot have --project".to_owned() }.into()),
     };
-    let cache = paths::cache_dir()?;
-    let mut launch = crate::daemon::launch::LaunchSnapshot::capture().legacy(
-        crate::daemon::settings::DaemonPatch {
+    let bootstrap = capture_bootstrap(detached)?;
+    #[cfg(feature = "hybrid-local")]
+    tokenizers::utils::parallelism::set_parallelism(bootstrap.tokenizers_parallelism.value);
+    let cache = paths::cache_dir_from(&bootstrap)?.value;
+    let mut launch = crate::daemon::launch::LaunchSnapshot::capture_with_bootstrap(&bootstrap)
+        .legacy(crate::daemon::settings::DaemonPatch {
             profile: selected_profile,
             idle_grace_ms: grace_ms,
             ..crate::daemon::settings::DaemonPatch::default()
-        },
-    )?;
+        })?;
     if detached
         && matches!(
             launch.config.settings().daemon.profile,
@@ -363,7 +386,7 @@ fn serve(
         return Err(Error::Admission { message: "website profile requires explicit foreground `docsbase serve`; --detached is inapplicable".to_owned() }.into());
     }
     config::startup::prepare(&cache, &mut launch, detached, startup)?;
-    crate::daemon::lifecycle::run_daemon_from_launch(&cache, launch)?;
+    crate::daemon::lifecycle::run_daemon_from_launch(&cache, launch, &bootstrap)?;
     Ok(())
 }
 
@@ -418,15 +441,7 @@ fn daemon_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Routes `tool` through the live daemon; `Ok(None)` means no daemon is
-/// reachable and the caller should fall back to direct mode (FR-30).
-///
-/// `bind_session` registers the cwd-bound session first (I6); registry-wide
-/// tools such as `status` skip it so they work from any directory.
-///
-/// # Errors
-/// One read/control command scope, including all list pages. Bootstrap policy
-/// is independent of a malformed user config so stop/status remain usable.
+// A native transport scope covers one read/control command, including list pagination.
 fn with_transport<T: Send>(
     work: impl FnOnce(crate::platform::transport::Transport) -> anyhow::Result<T> + Send,
 ) -> anyhow::Result<T> {
@@ -436,16 +451,19 @@ fn with_transport<T: Send>(
     crate::platform::transport::run(&policy, |transport| Ok(work(transport)))?
 }
 
-/// Surfaces handshake/tool errors from a daemon that did answer.
+/// Routes `tool` through the daemon. `Ok(None)` permits direct mode (FR-30).
+/// Registry-wide tools can skip project session binding.
 pub(crate) fn try_daemon(
     transport: &crate::platform::transport::Transport,
     tool: &str,
     args: serde_json::Value,
     bind_session: bool,
+    client_settings: ClientSettings,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let cache = paths::cache_dir()?;
-    let Some(mut client) = Client::try_connect(transport, &cache)? else {
+    let Some(mut client) = Client::try_connect_with_settings(transport, &cache, client_settings)?
+    else {
         crate::daemon::launch::require_shared_without_daemon(
             crate::config::resolve::LaunchUse::StandaloneDiagnostic,
         )?;

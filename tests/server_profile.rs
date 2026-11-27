@@ -276,7 +276,7 @@ fn shared_v5_indexes_new_projects_and_syncs_an_existing_project() {
 }
 
 #[test]
-fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
+fn indexed_global_website_profile_masks_shared_watcher_setting() {
     let cache = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
@@ -295,14 +295,14 @@ fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
         "{}",
         String::from_utf8_lossy(&indexed.stderr)
     );
-    std::fs::write(
-        config.path().join("config.toml"),
+    let global_file = config.path().join("config.toml");
+    let source = |enabled| {
         format!(
-            "config_version = 2\n[daemon]\nprofile={{mode='website',project_root={}}}\n",
+            "config_version = 2\n[daemon]\nprofile={{mode='website',project_root={}}}\n[watch]\nenabled = {enabled}\n",
             toml::Value::String(root.path().to_string_lossy().into_owned())
-        ),
-    )
-    .unwrap();
+        )
+    };
+    std::fs::write(&global_file, source(true)).unwrap();
     let mut daemon = Daemon(
         cli(cache.path(), config.path())
             .arg("serve")
@@ -318,6 +318,43 @@ fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
     client.handshake_registry().unwrap();
     let status = client.call_tool("status", serde_json::json!({})).unwrap();
     assert_eq!(status["watchers"], 0);
+    let effective = cli(cache.path(), config.path())
+        .current_dir(root.path())
+        .args(["config", "effective"])
+        .output()
+        .unwrap();
+    assert!(effective.status.success(), "{effective:?}");
+    let effective: serde_json::Value = serde_json::from_slice(&effective.stdout).unwrap();
+    let enabled = effective["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["key"] == "watch.enabled")
+        .unwrap();
+    assert_eq!(enabled["value"], false);
+    assert_eq!(enabled["source"]["kind"], "global");
+    assert_eq!(
+        enabled["derived_from"],
+        serde_json::json!({
+            "key": "daemon.profile",
+            "source": {"kind": "global", "value": global_file},
+        })
+    );
+
+    std::fs::write(&global_file, source(false)).unwrap();
+    let status = client.call_tool("status", serde_json::json!({})).unwrap();
+    assert_eq!(status["watchers"], 0);
+    assert_eq!(status["restart_required"], false);
+    let plan = cli(cache.path(), config.path())
+        .current_dir(root.path())
+        .args(["config", "plan", "--live", "--check"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success(), "{plan:?}");
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan["basis"], "live");
+    assert_eq!(plan["restart_required"], false);
+    assert_eq!(plan["actions"], serde_json::json!([]));
     client.call(Request::StopDaemon).unwrap();
     drop(client);
     assert!(daemon.0.wait().unwrap().success());

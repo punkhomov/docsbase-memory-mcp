@@ -10,16 +10,21 @@ use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
 use crate::hybrid::config::{HybridCfg, HybridDefaults, HybridPatch, HybridSpec, ProvidersCfg};
 use crate::hybrid::dense_settings::{DenseSettings, DenseSpec};
+use crate::hybrid::local_settings;
 use crate::hybrid::provisioning::{ProvisioningSettings, ProvisioningSpec};
 use crate::hybrid::remote_settings::{RemotePatch, RemoteSettings, RemoteSpec};
 use crate::hybrid::rrf::{RrfSettings, settings::RrfSpec};
 use crate::index::settings::{ChunkSettings, ChunkSpec, IndexFilePatch};
 use crate::index::writer_settings::{IndexWriterSettings, WriterSpec};
 use crate::index::{LexicalSettings, lexical_settings::LexicalSpec};
+use crate::ipc::settings::{ClientPatch, ClientSettings, ClientSpec};
+use crate::search::RetrievalSettings;
+use crate::search::retrieval::RetrievalSpec;
 use crate::search::settings::{SearchPatch, SearchSettings, SearchSpec};
 use crate::store::settings::{DbSettings, DbSpec, ReadPoolSettings, ReadPoolSpec};
 use crate::watch::{WatchSettings, settings::WatchSpec};
 use bootstrap::DefaultsContext;
+use paths::{ConfigLockSettings, ConfigLockSpec};
 use schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Scope, SettingsSpec,
     SourceId, Unit,
@@ -58,6 +63,12 @@ pub struct Config {
     pub index_writer: IndexWriterSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
+    /// Project search defaults and candidate window policy.
+    pub retrieval: RetrievalSettings,
+    /// Installation-wide timeout policy for local IPC and MCP callers.
+    pub client: ClientSettings,
+    /// Configuration source lock admission policy.
+    pub config_lock: ConfigLockSettings,
     /// Installation-wide SQLite connection policy.
     pub store: DbSettings,
     /// Global prepared metadata reader capacity.
@@ -82,7 +93,8 @@ pub struct Config {
     pub hybrid: bool,
     /// Hybrid stages resolved from the file forms (bool shorthand or table).
     pub hybrid_cfg: HybridCfg,
-    /// Explicit per-query ANN traversal policy. Unconfigured search uses the legacy adapter.
+    /// Per-query ANN traversal. Resolved v2 snapshots always carry the active policy.
+    /// Legacy caller snapshots may omit the policy.
     pub ann_search: Option<AnnSearchSettings>,
     /// Validated ANN construction recipe captured with the project.
     pub ann_build: AnnBuildSettings,
@@ -95,7 +107,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let defaults = ConfigSpec::defaults(&DefaultsContext::standalone());
+        let defaults = ConfigSpec::defaults(&DefaultsContext::for_host());
         ConfigSpec::initial(&defaults)
     }
 }
@@ -116,7 +128,7 @@ pub struct ConfigOverrides {
 }
 
 /// Raw **global** file shape; every key optional so sources can be layered.
-/// Only the global file may carry `[daemon]`, `[search]` or `[providers.*]`: a project file is
+/// Only the global file may carry `[daemon]`, `[search]`, `[client]` or `[providers.*]`: a project file is
 /// parsed by [`ProjectFileConfig`], which has no `providers` field, so a
 /// provider section in a project is a parse error, not a post-merge check.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -128,6 +140,7 @@ struct GlobalFileConfig {
     max_docs_per_project: Option<usize>,
     auto_index: Option<bool>,
     search: Option<SearchPatch>,
+    client: Option<ClientPatch>,
     daemon: Option<DaemonPatch>,
     remote: Option<RemotePatch>,
     hybrid: Option<HybridPatch>,
@@ -161,6 +174,7 @@ impl ProjectFileConfig {
             ann: self.ann,
             providers: None,
             search: None,
+            client: None,
             daemon: None,
             remote: None,
         }
@@ -174,8 +188,10 @@ impl ProjectFileConfig {
 /// listing the registry, and the keys of a known provider are validated by
 /// that provider. Parsing never consults build features — a file written by a
 /// feature-enabled build must load in every build.
-fn providers_from_raw(raw: HashMap<String, toml::Table>) -> Result<ProvidersCfg> {
-    let mut out = ProvidersCfg::default();
+fn providers_from_raw(
+    raw: HashMap<String, toml::Table>,
+    mut out: ProvidersCfg,
+) -> Result<ProvidersCfg> {
     for (name, table) in raw {
         let provider = crate::hybrid::provider::provider(&name)
             .map_err(|_| crate::hybrid::provider::unknown_provider(&name))?;
@@ -228,6 +244,15 @@ impl Config {
         resolve::for_provided_project(global, root).map(schema::Resolved::into_settings)
     }
 
+    pub(crate) fn embedding_model_key(&self) -> Result<Option<String>> {
+        self.hybrid_cfg
+            .embedding
+            .as_ref()
+            .filter(|_| self.hybrid_cfg.enabled)
+            .map(|embedding| self.providers.embedding_model_id(embedding))
+            .transpose()
+    }
+
     /// Same as [`Config::load`] but with an explicit config directory (testable).
     ///
     /// # Errors
@@ -268,23 +293,37 @@ impl Config {
         self
     }
 
+    pub(crate) const fn watchers_enabled(&self) -> bool {
+        matches!(
+            self.daemon.profile,
+            crate::daemon::settings::DaemonProfile::Shared
+        ) && self.watch.enabled()
+    }
+
+    pub(crate) fn search_candidate_window(&self) -> u32 {
+        self.hybrid_cfg
+            .reranker
+            .as_ref()
+            .map_or(self.retrieval.rrf_candidate_window(), |reranker| {
+                reranker.window
+            })
+    }
+
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {
-        if self.ann_search == previous.ann_search
-            && self.watch == previous.watch
-            && self.lexical == previous.lexical
-            && self.rrf == previous.rrf
-            && self.index_writer == previous.index_writer
-        {
-            self != previous
-        } else {
-            let mut previous = previous.clone();
-            previous.ann_search = self.ann_search;
-            previous.watch = self.watch;
-            previous.lexical = self.lexical;
-            previous.rrf = self.rrf;
-            previous.index_writer = self.index_writer;
-            self != &previous
-        }
+        // Dense state depends on document inputs, the embedding identity and
+        // its ANN/vector-store policies. Query and execution policy changes
+        // can be published using the same resident data.
+        self.ann_build != previous.ann_build
+            || self.dense != previous.dense
+            || self.vector_store != previous.vector_store
+            || self.hybrid_cfg.cache != previous.hybrid_cfg.cache
+            || self.hybrid_cfg.ranking != previous.hybrid_cfg.ranking
+            || crate::index::outcome::vector_inputs_id(self)
+                != crate::index::outcome::vector_inputs_id(previous)
+            || match (self.embedding_model_key(), previous.embedding_model_key()) {
+                (Ok(next), Ok(old)) => next != old,
+                _ => true,
+            }
     }
 
     /// Rejects values that would silently disable indexing.
@@ -319,6 +358,9 @@ impl Config {
         }
         crate::hybrid::config::validate_settings(&self.hybrid_cfg)?;
         SearchSpec::validate(&self.search, &Capabilities::current())?;
+        RetrievalSpec::validate(&self.retrieval, &Capabilities::current())?;
+        ClientSpec::validate(&self.client, &Capabilities::current())?;
+        ConfigLockSpec::validate(&self.config_lock, &Capabilities::current())?;
         DbSpec::validate(&self.store, &Capabilities::current())?;
         ReadPoolSpec::validate(&self.read_pool, &Capabilities::current())?;
         DenseSpec::validate(&self.dense, &Capabilities::current())?;
@@ -430,7 +472,11 @@ impl SettingsSpec for ConfigSpec {
         let mut fields = Self::FIELDS.to_vec();
         fields.extend_from_slice(WatchSpec::FIELDS);
         fields.extend_from_slice(HybridSpec::FIELDS);
+        fields.extend_from_slice(local_settings::INFERENCE_FIELDS);
         fields.extend_from_slice(SearchSpec::FIELDS);
+        fields.extend_from_slice(RetrievalSpec::FIELDS);
+        fields.extend_from_slice(ClientSpec::FIELDS);
+        fields.extend_from_slice(ConfigLockSpec::FIELDS);
         fields.extend_from_slice(DbSpec::FIELDS);
         fields.extend_from_slice(ReadPoolSpec::FIELDS);
         fields.extend(DenseSpec::file_fields());
@@ -459,6 +505,9 @@ impl SettingsSpec for ConfigSpec {
             chunk: ChunkSpec::initial(&ChunkSpec::defaults(context)),
             index_writer: WriterSpec::defaults(context),
             search: SearchSpec::initial(&search),
+            retrieval: RetrievalSpec::defaults(context),
+            client: ClientSpec::defaults(context),
+            config_lock: ConfigLockSpec::defaults(context),
             store: DbSpec::defaults(context),
             read_pool: ReadPoolSpec::defaults(context),
             dense: DenseSpec::defaults(context),
@@ -473,7 +522,7 @@ impl SettingsSpec for ConfigSpec {
             hybrid_cfg: HybridSpec::initial(&hybrid),
             ann_search: None,
             ann_build: AnnBuildSpec::initial(&AnnBuildSpec::defaults(context)),
-            providers: ProvidersCfg::default(),
+            providers: ProvidersCfg::with_cpu_count(context.available_parallelism),
             vector_store: None,
         };
         ConfigDefaults {
@@ -523,14 +572,24 @@ impl SettingsSpec for ConfigSpec {
             settings.hybrid = settings.hybrid_cfg.enabled;
         }
         if let Some(raw) = patch.providers {
-            settings.providers = providers_from_raw(raw)?;
+            settings.providers = providers_from_raw(raw, defaults.initial.providers.clone())?;
             origins.set("providers", source)?;
+            local_settings::set_origins(&settings.providers, origins, source)?;
         }
         if let Some(patch) = patch.search {
             SearchSpec::overlay(
                 &mut settings.search,
                 patch,
                 &defaults.search,
+                source,
+                origins,
+            )?;
+        }
+        if let Some(patch) = patch.client {
+            ClientSpec::overlay(
+                &mut settings.client,
+                patch,
+                &defaults.initial.client,
                 source,
                 origins,
             )?;
@@ -603,6 +662,7 @@ impl ConfigSpec {
         ] {
             view.push(key, value, None)?;
         }
+        local_settings::view_fields(&settings.providers, view)?;
         crate::hybrid::config::view::fields(&settings.hybrid_cfg, view)?;
         if view.has_field(crate::vector_cache::settings::MAX_BYTES_FIELD.key) {
             let policy = settings
@@ -618,6 +678,9 @@ impl ConfigSpec {
             )?;
         }
         SearchSpec::view_fields(&settings.search, view)?;
+        RetrievalSpec::view_fields(settings.retrieval, view)?;
+        ClientSpec::view_fields(settings.client, view)?;
+        ConfigLockSpec::view_fields(settings.config_lock, view)?;
         settings.store.view_fields(view)?;
         view.push(
             "read_pool.max_connections",
@@ -633,7 +696,8 @@ impl ConfigSpec {
         settings.ann_build.view_fields(view)?;
         let ann = settings
             .ann_search
-            .unwrap_or_else(AnnSearchSettings::owner_defaults);
+            .unwrap_or_else(AnnSearchSettings::legacy_defaults);
+        view.push("ann.search.mode", ann.mode_name().into(), None)?;
         for (key, value) in [
             ("ann.search.ef_base", ann.ef_base()),
             ("ann.search.ef_max", ann.ef_max()),
@@ -641,7 +705,13 @@ impl ConfigSpec {
         ] {
             view.push(key, serde_json::json!(value), None)?;
         }
-        WatchSpec::view_fields(settings.watch, view)?;
+        WatchSpec::view_fields(settings.watch, settings.watchers_enabled(), view)?;
+        if matches!(
+            settings.daemon.profile,
+            crate::daemon::settings::DaemonProfile::Website { .. }
+        ) {
+            view.set_derived_from("watch.enabled", "daemon.profile")?;
+        }
         LexicalSpec::view_fields(settings.lexical, view)?;
         RrfSpec::view_fields(settings.rrf, view)
     }

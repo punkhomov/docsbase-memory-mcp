@@ -27,7 +27,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     run_captured(path, config.into_settings(), settings, started)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hybrid-remote"))]
 pub(crate) fn run_with_settings(
     path: Option<&Path>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
@@ -178,7 +178,7 @@ fn canonical_target(path: Option<PathBuf>) -> Result<PathBuf> {
 enum DirectIndex {
     Legacy(crate::index::async_job::JobContext),
     Generation(generation::Target),
-    HybridGeneration(catalog_sync::BuildContext, PathBuf),
+    HybridGeneration(catalog_sync::BuildContext, catalog_sync::DirectSourcePaths),
 }
 
 pub(super) async fn run_with_operation(
@@ -253,7 +253,7 @@ pub(super) async fn run_with_operation(
             });
             return crate::daemon::request::run(worker, Some(&operation)).await;
         }
-        DirectIndex::HybridGeneration(build, config_dir) => {
+        DirectIndex::HybridGeneration(build, sources) => {
             let id = build.project.id;
             let stats = catalog_sync::index_direct(
                 &context.jobs,
@@ -263,7 +263,7 @@ pub(super) async fn run_with_operation(
                 &context.budget,
                 build,
                 catalog_sync::DirectPublication {
-                    config_dir,
+                    sources,
                     reviewed: None,
                 },
             )

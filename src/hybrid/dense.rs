@@ -21,10 +21,8 @@ use crate::config::schema::SettingsSpec;
 use crate::error::{Error, Result};
 use crate::hybrid::ann::{self, AnnIndex};
 use crate::hybrid::ann_settings::AnnBuildSettings;
-#[cfg(test)]
-use crate::hybrid::ann_store;
 use crate::hybrid::ann_store::{
-    ANN_FORMAT_VERSION, AnnArtifact, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore,
+    self, ANN_FORMAT_VERSION, AnnArtifact, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore,
 };
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::dense_settings::{DenseSettings, DenseSpec, QueryCacheSettings};
@@ -712,6 +710,7 @@ pub struct DenseCache {
     limits: DenseCacheLimits,
     policy: AnnPolicy,
     ann_build: AnnBuildSettings,
+    cpu_pool: Option<Arc<super::cpu::CpuPool>>,
     store: Option<AnnStore>,
     bound_root: Arc<Mutex<Option<PathBuf>>>,
     cold_flights: Arc<Flights<ColdKey, DenseRows>>,
@@ -755,7 +754,7 @@ impl DenseCache {
     /// Construct a cache using the complete component-owned dense/query policy.
     ///
     /// # Errors
-    /// Invalid query capacities or retention are rejected before construction.
+    /// Invalid query capacities, ANN read limits, or retention are rejected before construction.
     pub fn with_settings(
         policy: AnnPolicy,
         cache_root: &Path,
@@ -763,7 +762,11 @@ impl DenseCache {
     ) -> Result<Self> {
         DenseSpec::validate(settings, &crate::config::schema::Capabilities::current())?;
         let store = (policy != AnnPolicy::Disabled).then(|| {
-            AnnStore::with_retention(cache_root.to_path_buf(), settings.ann_keep_generations)
+            AnnStore::with_policy(
+                cache_root.to_path_buf(),
+                settings.ann_keep_generations,
+                settings.max_ann_read_file_bytes,
+            )
         });
         Ok(Self::with_explicit_query_settings(
             policy,
@@ -806,6 +809,10 @@ impl DenseCache {
         };
         dense.ann_build = config.ann_build;
         Ok(dense)
+    }
+
+    pub(crate) fn set_cpu_pool(&mut self, pool: Option<Arc<super::cpu::CpuPool>>) {
+        self.cpu_pool = pool;
     }
 
     /// Explicit connection policy for jobs, coverage and streaming fallback.
@@ -926,6 +933,7 @@ impl DenseCache {
             limits,
             policy,
             ann_build: AnnBuildSettings::owner_defaults(),
+            cpu_pool: None,
             store,
             bound_root: Arc::new(Mutex::new(root.map(Path::to_path_buf))),
             cold_flights: Arc::new(Flights::default()),
@@ -1256,6 +1264,7 @@ impl DenseCache {
             limits: self.limits,
             policy: self.policy,
             ann_build: self.ann_build,
+            cpu_pool: self.cpu_pool.clone(),
             store: self.store.clone(),
             bound_root: Arc::new(Mutex::new(
                 self.bound_root
@@ -1651,6 +1660,11 @@ impl DenseCache {
         let Some(slot) = store.load_artifact(artifact, self.ann_build) else {
             return Ok(AnnLoad::Missing);
         };
+        match ann_store::dump_within_read_budget(&slot.dir, store.read_file_limit()) {
+            Ok(true) => {}
+            Ok(false) => return Ok(AnnLoad::Deferred),
+            Err(_) => return Ok(AnnLoad::Missing),
+        }
         check()?;
         let Some(bytes) = ann::checked_ann_estimated_bytes(key.chunk_count, key.dim)
             .and_then(|bytes| u64::try_from(bytes).ok())
@@ -1673,7 +1687,8 @@ impl DenseCache {
             }
             BuildReservation::new(self.active_build_bytes.clone(), bytes)
         };
-        let loaded = AnnIndex::load(&slot);
+        let loaded =
+            AnnIndex::load_with_cpu_pool(&slot, store.read_file_limit(), self.cpu_pool.as_deref());
         #[cfg(test)]
         self.observe_ann_load(&slot, loaded.is_ok());
         check()?;
@@ -2305,6 +2320,7 @@ impl DenseCache {
             limits: self.limits,
             policy: self.policy,
             ann_build: self.ann_build,
+            cpu_pool: self.cpu_pool.clone(),
             store: self.store.clone(),
             bound_root: Arc::clone(&self.bound_root),
             cold_flights: Arc::clone(&self.cold_flights),
@@ -2456,16 +2472,28 @@ fn build_in_background(
     // build hit a Windows sharing violation on `vectors.db` (CI run
     // 41043371926, `cold_start_loads_persisted_ann_without_vectors_db`).
     let result: Result<(Arc<AnnIndex>, u64)> = catch_unwind(AssertUnwindSafe(|| {
-        let ann = AnnIndex::build_with_settings(&rows, dim, cache.ann_build)?;
+        let ann =
+            AnnIndex::build_with_cpu_pool(&rows, dim, cache.ann_build, cache.cpu_pool.as_deref())?;
         let slot = ann.dump_artifact(store, AnnArtifact::for_index(&key, index))?;
         // Loading must not hold the source rows, the built graph and the loaded
         // copy at once: on the heap-reload path that would add a third full
         // copy (~1.86 GiB at 75k x 2048) on top of the admitted peak.
         let published_bytes = ann.estimated_bytes() as u64;
-        drop(ann);
-        drop(rows);
-        let loaded = AnnIndex::load(&slot)?.with_disk_pin(pin.finish_build());
-        Ok((Arc::new(loaded), published_bytes))
+        let read_file_limit = store.read_file_limit();
+        let graph = if ann_store::dump_within_read_budget(&slot.dir, read_file_limit)? {
+            drop(ann);
+            drop(rows);
+            AnnIndex::load_with_cpu_pool(&slot, read_file_limit, cache.cpu_pool.as_deref())?
+        } else {
+            // The build reservation already covers this graph. Its valid dump
+            // remains available to readers with a larger working budget.
+            drop(rows);
+            ann
+        };
+        Ok((
+            Arc::new(graph.with_disk_pin(pin.finish_build())),
+            published_bytes,
+        ))
     }))
     .unwrap_or_else(|payload| Err(Error::internal(format!("ann build panic: {payload:?}"))));
     if job_pin.is_some() {
@@ -2522,14 +2550,18 @@ fn build_in_background(
     cache.enforce_byte_cap(&mut entries, project_id);
     drop(entries);
     if dump_completed {
-        if index.generation_id().is_some()
-            && let Err(err) = cache.cleanup(project_id)
-        {
-            eprintln!("warning: ann generation cleanup after build failed: {err}");
-        }
-        if let Err(err) = cache.cleanup_ann_disk() {
-            eprintln!("warning: ann disk cleanup after build failed: {err}");
-        }
+        cleanup_completed_ann_build(&cache, index);
+    }
+}
+
+fn cleanup_completed_ann_build(cache: &DenseCache, index: ProjectIndex) {
+    if index.generation_id().is_some()
+        && let Err(err) = cache.cleanup(index.project_id())
+    {
+        eprintln!("warning: ann generation cleanup after build failed: {err}");
+    }
+    if let Err(err) = cache.cleanup_ann_disk() {
+        eprintln!("warning: ann disk cleanup after build failed: {err}");
     }
 }
 
@@ -2542,6 +2574,92 @@ fn legacy_index(project: i64, generation: i64) -> ProjectIndex {
 mod tests {
     use super::*;
     use crate::vector_cache::{Embedder, VectorCache};
+
+    #[test]
+    fn ann_owner_regression_omitted_search_preserves_legacy_fetch() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("config.toml"), "config_version = 2\n").unwrap();
+        let config = crate::config::Config::global_from(root.path()).unwrap();
+        let traversal = config.ann_search.expect("v2 resolved traversal");
+        assert_eq!(traversal.beam_for(4097).unwrap(), 4096);
+        let effective = crate::config::view::load_from(root.path(), None).unwrap();
+        assert!(
+            effective
+                .fields
+                .iter()
+                .any(|field| { field.key == "ann.search.mode" && field.value == "legacy" })
+        );
+
+        std::fs::write(
+            root.path().join("config.toml"),
+            "config_version = 2\n[ann.search]\nef_max = 4096\n",
+        )
+        .unwrap();
+        let explicit = crate::config::Config::global_from(root.path()).unwrap();
+        assert!(explicit.ann_search.unwrap().beam_for(4097).is_err());
+    }
+
+    #[test]
+    fn ann_owner_regression_read_cap_leaves_a_valid_dump_available() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("config.toml"),
+            "config_version = 2\n[dense]\nmin_vectors = 1\nmax_ann_read_file_bytes = 1\n",
+        )
+        .unwrap();
+        let config = crate::config::Config::global_from(root.path()).unwrap();
+        let input = small_input();
+        let key = ann_key(
+            1,
+            1,
+            "m@d128",
+            input.dim,
+            input.chunks.len(),
+            input.digest.clone(),
+        );
+        let dir = AnnStore::new(root.path().to_path_buf());
+        let graph = AnnIndex::build(&input.rows, input.dim).unwrap();
+        let slot = graph.dump(&dir, &key).unwrap();
+        let limited =
+            DenseCache::with_settings(AnnPolicy::BuildOrLoad, root.path(), &config.dense).unwrap();
+        assert!(matches!(
+            limited.resolve_rows(1, 1, "m@d128", input),
+            DenseRows::TooLarge(_)
+        ));
+        assert!(slot.dir.join("READY").is_file());
+        let compatibility_slot = dir.load(&key).unwrap().unwrap();
+        assert_eq!(
+            AnnIndex::load(&compatibility_slot).unwrap().count(),
+            graph.count()
+        );
+        let seen = crate::config::view::load_from(root.path(), None).unwrap();
+        assert!(seen.fields.iter().any(|field| {
+            field.key == "dense.max_ann_read_file_bytes"
+                && field.value == 1
+                && field.origin.source
+                    == crate::config::schema::SourceId::Global(root.path().join("config.toml"))
+        }));
+
+        assert!(matches!(
+            limited.resolve_rows(1, 2, "m@d128", small_input()),
+            DenseRows::Building(_)
+        ));
+        limited.join_job_builds_for_test().unwrap();
+        assert_eq!(
+            limited.ann_snapshot(1),
+            Some((graph.count(), graph.estimated_bytes() as u64))
+        );
+        assert_eq!(limited.active_build_bytes.load(AtomicOrdering::Acquire), 0);
+
+        for invalid in [0, 2_147_483_649_u64] {
+            std::fs::write(
+                root.path().join("config.toml"),
+                format!("config_version = 2\n[dense]\nmax_ann_read_file_bytes = {invalid}\n"),
+            )
+            .unwrap();
+            assert!(crate::config::Config::global_from(root.path()).is_err());
+        }
+    }
 
     #[test]
     fn configured_retention_waits_for_the_slot_pin_to_drop() {

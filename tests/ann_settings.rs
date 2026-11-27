@@ -31,12 +31,19 @@ fn default_policy_preserves_beams_and_records_project_scope() {
         assert_eq!(settings.beam_for(fetch).unwrap(), beam);
     }
     let origins: Vec<_> = resolved.provenance().iter().collect();
-    assert_eq!(origins.len(), 3);
+    assert_eq!(origins.len(), 4);
     for (key, origin) in origins {
         assert!(key.starts_with("ann.search."));
         assert_eq!(origin.source, SourceId::Defaults);
         assert_eq!(origin.scope, Scope::Project);
-        assert_eq!(origin.unit, Unit::Count);
+        assert_eq!(
+            origin.unit,
+            if key == "ann.search.mode" {
+                Unit::Name
+            } else {
+                Unit::Count
+            }
+        );
     }
 }
 
@@ -67,6 +74,10 @@ fn layered_policy_tracks_each_source_without_changing_the_parent() {
     )
     .unwrap();
     assert_eq!(resolved.settings().beam_for(7).unwrap(), 14);
+    assert_eq!(
+        resolved.provenance().get("ann.search.mode").unwrap().source,
+        project
+    );
     assert_eq!(
         resolved
             .provenance()

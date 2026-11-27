@@ -365,7 +365,10 @@ fn migration_draft_preserves_actual_v1_settings_and_never_writes_sources() {
             .into_settings();
         settings.max_bytes = 16384;
         expected.vector_store = Some(settings);
-        assert_eq!(actual.effective.settings(), &expected);
+        let mut actual_settings = actual.effective.settings().clone();
+        let traversal = actual_settings.ann_search.take().unwrap();
+        assert_eq!(traversal.beam_for(4097).unwrap(), 4096);
+        assert_eq!(actual_settings, expected);
         assert_eq!(
             actual.conflicts,
             [] as [docsbase_memory::config::source::PreviewConflict; 0]

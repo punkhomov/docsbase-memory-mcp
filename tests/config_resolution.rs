@@ -458,6 +458,8 @@ fn bootstrap_captures_only_whitelisted_inputs_and_never_secrets() {
             "DOCSBASE_DATA_DIR",
             "ORT_DYLIB_PATH",
             "DOCSBASE_DAEMON_EXE",
+            "DOCSBASE_IPC_DEBUG",
+            "DOCSBASE_WATCH_DEBUG",
         ]
         .contains(key)
     }));
@@ -764,6 +766,65 @@ fn v2_watcher_window_layers_and_reports_provenance() {
         );
         let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
         assert!(error.to_string().contains("watch.debounce_ms"), "{error}");
+    }
+}
+
+#[test]
+fn v2_watcher_enable_is_global_and_preserves_watcher_bounds() {
+    use docsbase_memory::config::schema::{Scope, Unit};
+
+    let global = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let view = || docsbase_memory::config::view::load_from(global.path(), Some(project.path()));
+    let defaults = view().unwrap();
+    let enabled = defaults
+        .fields
+        .iter()
+        .find(|field| field.key == "watch.enabled")
+        .unwrap();
+    assert_eq!(enabled.value, true);
+    assert_eq!(enabled.origin.source, SourceId::Defaults);
+
+    layer(
+        &global,
+        "config.toml",
+        "config_version = 2\n[watch]\nenabled = false\n",
+    );
+    let disabled = view().unwrap();
+    let enabled = disabled
+        .fields
+        .iter()
+        .find(|field| field.key == "watch.enabled")
+        .unwrap();
+    assert_eq!(enabled.value, false);
+    assert_eq!(enabled.origin.scope, Scope::Daemon);
+    assert_eq!(enabled.origin.unit, Unit::Boolean);
+    assert_eq!(
+        enabled.origin.source,
+        SourceId::Global(global.path().join("config.toml"))
+    );
+
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[watch]\nenabled = true\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(error.to_string().contains("watch.enabled"), "{error}");
+
+    for (setting, key) in [
+        ("max_debounce_ms = 2001", "watch.debounce_ms"),
+        ("batch_queue_capacity = 4097", "watch queue capacities"),
+        ("lease_retry_ms = 0", "watch retry durations"),
+        ("max_expand_depth = 33", "max_expand_depth"),
+    ] {
+        layer(
+            &global,
+            "config.toml",
+            &format!("config_version = 2\n[watch]\nenabled = false\n{setting}\n"),
+        );
+        let error = Config::load_from(global.path(), None).unwrap_err();
+        assert!(error.to_string().contains(key), "{error}");
     }
 }
 
@@ -1160,6 +1221,50 @@ fn v2_lexical_collection_rejects_unsafe_score_or_growth() {
 }
 
 #[test]
+fn v2_retrieval_request_defaults_enforce_candidate_and_document_bounds() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(&global, "config.toml", "config_version = 2\n");
+    for (field, value) in [
+        ("default_limit", 1001),
+        ("default_n_per_doc", 0),
+        ("default_n_per_doc", 11),
+        ("rrf_candidate_window", 0),
+        ("rrf_candidate_window", 1001),
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!("config_version = 2\n[retrieval]\n{field} = {value}\n"),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(
+            matches!(error, docsbase_memory::error::Error::Admission { message } if message.contains(field)),
+            "{field}={value}"
+        );
+    }
+}
+
+#[test]
+fn v2_retrieval_overscan_rejects_a_zero_multiplier() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(&global, "config.toml", "config_version = 2\n");
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 0\n",
+    );
+    let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("retrieval.post_filter_overscan must be at least 1"),
+        "{error}"
+    );
+}
+
+#[test]
 fn v2_rrf_inherits_individual_fields_and_refuses_invalid_scoring() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");
@@ -1209,4 +1314,37 @@ fn v2_rrf_inherits_individual_fields_and_refuses_invalid_scoring() {
         let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
         assert!(error.to_string().contains(message), "{text}: {error}");
     }
+}
+
+#[test]
+fn v2_configuration_lock_policy_is_bounded_and_machine_scoped() {
+    let global = TempDir::new().unwrap();
+    let path = global.path().join("config.toml");
+    let write = |body: &str| {
+        std::fs::write(&path, format!("config_version=2\n[config_lock]\n{body}\n")).unwrap();
+    };
+    for invalid in [
+        "attempts=0",
+        "attempts=1001",
+        "attempts=50\nretry_delay_ms=21",
+    ] {
+        write(invalid);
+        assert!(Config::global_from(global.path()).is_err(), "{invalid}");
+    }
+    write("attempts=3\nretry_delay_ms=7");
+    let view = docsbase_memory::config::view::load_from(global.path(), None).unwrap();
+    let field = view
+        .fields
+        .iter()
+        .find(|field| field.key == "config_lock.attempts")
+        .unwrap();
+    assert_eq!(field.value, 3);
+    assert_eq!(field.origin.source, SourceId::Global(path));
+    let project = TempDir::new().unwrap();
+    layer(
+        &project,
+        ".docsbase.toml",
+        "config_version=2\n[config_lock]\nattempts=1\n",
+    );
+    assert!(Config::load_from(global.path(), Some(project.path())).is_err());
 }

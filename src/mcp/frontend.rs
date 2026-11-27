@@ -28,6 +28,7 @@ use crate::ipc::protocol::{
     ACTIVE_WEBSITE_CAPABILITY, CHUNK_REF_CAPABILITY, MAX_FRAME_BYTES, TOOL_ALLOWLIST,
     ensure_config_version,
 };
+use crate::ipc::settings::{ClientSettings, ClientSpec};
 use crate::mcp::tools;
 use crate::search::operation::SearchOperation;
 use crate::search::settings::{SearchSettings, SearchSpec};
@@ -46,6 +47,7 @@ pub struct Frontend {
     transport: crate::platform::transport::Transport,
     conn: Arc<Mutex<Option<Conn>>>,
     search_policy: SearchSettings,
+    client_settings: ClientSettings,
     config_v2: Option<bool>,
 }
 
@@ -65,12 +67,23 @@ impl Frontend {
         cache: PathBuf,
         search_policy: SearchSettings,
     ) -> Self {
+        Self::with_policies(transport, cache, search_policy, ClientSpec::DEFAULTS, None)
+    }
+
+    fn with_policies(
+        transport: crate::platform::transport::Transport,
+        cache: PathBuf,
+        search_policy: SearchSettings,
+        client_settings: ClientSettings,
+        config_v2: Option<bool>,
+    ) -> Self {
         Self {
             cache,
             transport,
             conn: Arc::new(Mutex::new(None)),
             search_policy,
-            config_v2: None,
+            client_settings,
+            config_v2,
         }
     }
 
@@ -79,10 +92,13 @@ impl Frontend {
         cache: PathBuf,
         config: Config,
     ) -> Self {
-        Self {
-            config_v2: Some(config.vector_store.is_some()),
-            ..Self::with_search_policy(transport, cache, config.search)
-        }
+        Self::with_policies(
+            transport,
+            cache,
+            config.search,
+            config.client,
+            Some(config.vector_store.is_some()),
+        )
     }
 
     #[cfg(test)]
@@ -154,7 +170,8 @@ impl Frontend {
                     lease = Some(if let Some(operation) = operation {
                         open_for_search(operation, open).await?
                     } else {
-                        let deadline = tokio::time::Instant::now() + tools::QUICK_TIMEOUT;
+                        let deadline =
+                            tokio::time::Instant::now() + self.client_settings.mcp_quick_timeout();
                         open_before(open, deadline, tokio::time::sleep_until(deadline)).await?
                     });
                 }
@@ -162,9 +179,9 @@ impl Frontend {
                     .as_mut()
                     .ok_or_else(|| Error::internal("daemon connection lost"))?;
                 let timeout = if tools::LONG_TOOLS.contains(&name) {
-                    tools::LONG_TIMEOUT
+                    self.client_settings.mcp_long_timeout()
                 } else {
-                    tools::QUICK_TIMEOUT
+                    self.client_settings.mcp_quick_timeout()
                 };
                 legacy_budget(
                     operation,
@@ -193,7 +210,7 @@ impl Frontend {
                             .ok_or_else(|| Error::internal("completed index lost connection"))?;
                         healthy = legacy_budget(
                             operation,
-                            tools::QUICK_TIMEOUT,
+                            self.client_settings.mcp_quick_timeout(),
                             rebind_after_index(conn),
                         )
                         .await

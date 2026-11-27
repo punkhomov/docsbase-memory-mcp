@@ -18,7 +18,9 @@ use crate::config::{
 use crate::daemon::{admission, registry, request::CancelOnDrop};
 use crate::error::Error;
 use crate::hybrid::work::Cancellation;
-use crate::index::async_job::catalog_sync::{self, BuildContext, DirectPublication};
+use crate::index::async_job::catalog_sync::{
+    self, BuildContext, DirectPublication, DirectSourcePaths,
+};
 use crate::search::operation::SearchOperation;
 use crate::store::{
     GENERATION_SCHEMA_VERSION, generation_build::open_index_registry, settings::DbSettings,
@@ -57,6 +59,7 @@ pub(super) fn execute(
     if preview.replacement.is_none() {
         return Ok(serde_json::json!({"plan_id": plan_id, "applied": false}));
     }
+    let config_lock_dir = crate::config::paths::config_lock_dir()?;
 
     // Keep the daemon out until all native work retires. Direct Index can
     // still race this command and is serialized by the catalog project leases.
@@ -100,9 +103,13 @@ pub(super) fn execute(
                     admission("plan application requires version 2 configuration")
                 })?;
                 let store = VectorStore::reserve(&cache, policy)?;
-                let mut embedding_config = Config::clone(&project_config);
-                embedding_config.hybrid_cfg.reranker = None;
-                let stages = Arc::new(owner.stages(&embedding_config)?);
+                let embedder = if reviewed.reuse_vectors_only {
+                    None
+                } else {
+                    let mut embedding_config = Config::clone(&project_config);
+                    embedding_config.hybrid_cfg.reranker = None;
+                    owner.stages(&embedding_config)?.embedder
+                };
                 let pin_ttl = project_config.dense.ann_lifetimes.backfill_pin_ttl();
                 Ok((
                     BuildContext {
@@ -111,7 +118,7 @@ pub(super) fn execute(
                         settings,
                         project,
                         config: project_config,
-                        stages,
+                        embedder,
                         active_model: None,
                         source: VectorCacheSource::Owned(store),
                         pin_ttl,
@@ -128,7 +135,10 @@ pub(super) fn execute(
             &context.budget,
             build,
             DirectPublication {
-                config_dir: config,
+                sources: DirectSourcePaths {
+                    config_dir: config,
+                    config_lock_dir,
+                },
                 reviewed: Some(reviewed),
             },
         )

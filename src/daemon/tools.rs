@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
 use crate::hybrid::Ranking;
 use crate::hybrid::blocking;
+#[cfg(test)]
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
 use crate::hybrid::dense::{self, BoundDenseRequest, DenseCache, DenseRows};
 use crate::hybrid::dense_metadata::DenseMetadata;
@@ -25,11 +26,13 @@ use crate::index::job::{JobStats, run_full};
 use crate::index::tantivy_index::{MAX_HITS, ReadIndex, chunk_id, chunk_id_parts};
 use crate::index::{LexicalSettings, QueryMode, lexical_settings};
 use crate::ipc::protocol::{PROTOCOL_VERSION, build_id};
+use crate::search::RetrievalSettings;
 use crate::search::budget::PayloadBudget;
 use crate::search::chunk_ref::{self, ChunkBinding};
 use crate::search::metadata::{MetadataSource, ProjectReader};
 use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
+use crate::search::retrieval::{self, Dedupe};
 use crate::search::scope::{DocumentScope, ScopeRequest, has_tags};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
@@ -57,7 +60,7 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
         cache,
         project,
         args,
-        DEFAULT_RERANK_WINDOW,
+        retrieval::DEFAULT_RRF_CANDIDATE_WINDOW,
     )
 }
 
@@ -166,7 +169,7 @@ fn dense_candidates<Guard>(
         |hashes| stream_hashes(context, query.index, model_id, hashes, vector, query.fetch);
     if context
         .ann_search
-        .is_some_and(|settings| query.fetch > settings.ef_max())
+        .is_some_and(|settings| !settings.admits_fetch(query.fetch))
     {
         let metadata = in_read_phase(context, source, admit, |reader, index| {
             require_search_index(index, Some(query.index))?;
@@ -493,6 +496,7 @@ pub fn search_docs_from<Guard>(
 pub(super) struct SearchRankingSettings<'a> {
     lexical: LexicalSettings,
     rrf: RrfSettings,
+    retrieval: RetrievalSettings,
     config: Option<&'a Config>,
 }
 
@@ -501,6 +505,7 @@ impl SearchRankingSettings<'_> {
         Ok(Self {
             lexical: lexical_settings::standalone()?,
             rrf: crate::hybrid::rrf::settings::standalone()?,
+            retrieval: retrieval::standalone()?,
             config: None,
         })
     }
@@ -511,6 +516,7 @@ impl<'a> From<&'a Config> for SearchRankingSettings<'a> {
         Self {
             lexical: config.lexical,
             rrf: config.rrf,
+            retrieval: config.retrieval,
             config: Some(config),
         }
     }
@@ -542,6 +548,7 @@ pub(super) struct StartedSearch {
     fetch: usize,
     lexical: LexicalSnapshot,
     rrf: RrfSettings,
+    retrieval: RetrievalSettings,
     dense_started: std::time::Instant,
 }
 impl StartedSearch {
@@ -581,7 +588,7 @@ pub(super) fn start_search<Guard>(
     if !catalog {
         ensure_indexed(context.project)?;
     }
-    let arguments = parse_search_args(args)?;
+    let arguments = parse_search_args(args, settings.retrieval)?;
     if arguments.chunk_ref && !catalog {
         return Err(chunk_ref::unavailable());
     }
@@ -607,7 +614,12 @@ pub(super) fn start_search<Guard>(
         })
         .map(SearchStart::Complete);
     }
-    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
+    let (active, fetch) = search_plan(
+        context.stages,
+        &arguments,
+        context.window,
+        settings.retrieval,
+    )?;
     let lexical = lexical_snapshot(context, source, &admit, &arguments, fetch, settings)?;
     Ok(SearchStart::Prepared(StartedSearch {
         arguments,
@@ -615,6 +627,7 @@ pub(super) fn start_search<Guard>(
         fetch,
         lexical,
         rrf: settings.rrf,
+        retrieval: settings.retrieval,
         dense_started: std::time::Instant::now(),
     }))
 }
@@ -764,6 +777,7 @@ fn search_plan(
     stages: &HybridStages,
     args: &SearchArgs,
     window: u32,
+    retrieval: RetrievalSettings,
 ) -> Result<(ActiveStages, usize)> {
     let rrf_active = stages.ranking == Ranking::Rrf;
     if rrf_active && stages.embedder.is_none() {
@@ -778,15 +792,11 @@ fn search_plan(
                 .to_owned(),
         });
     }
-    let filtering = args.dedupe != Dedupe::None;
     let fetch = if rerank_active || rrf_active {
         // Ordinary base pool; document caps may refill before one rerank.
         args.limit.max(window as usize).min(MAX_HITS)
-    } else if filtering {
-        args.limit
-            .saturating_mul(SEARCH_UX_OVERSCAN)
-            .max(args.limit)
-            .min(MAX_HITS)
+    } else if args.dedupe == Dedupe::Path {
+        retrieval.lexical_cap_window(args.limit)
     } else {
         args.limit
     };
@@ -1042,8 +1052,13 @@ fn prepare_search<Guard>(
     admit: &impl Fn() -> Result<Guard>,
     arguments: SearchArgs,
 ) -> Result<PreparedSearch> {
-    let (active, fetch) = search_plan(context.stages, &arguments, context.window)?;
     let settings = SearchRankingSettings::standalone()?;
+    let (active, fetch) = search_plan(
+        context.stages,
+        &arguments,
+        context.window,
+        settings.retrieval,
+    )?;
     let lexical = lexical_snapshot(context, source, admit, &arguments, fetch, settings)?;
     prepare_with_query_vector(
         context,
@@ -1055,6 +1070,7 @@ fn prepare_search<Guard>(
             fetch,
             lexical,
             rrf: settings.rrf,
+            retrieval: settings.retrieval,
             dense_started: std::time::Instant::now(),
         },
         None,
@@ -1074,14 +1090,14 @@ pub(super) fn prepare_with_query_vector<Guard>(
         active,
         mut fetch,
         mut lexical,
-        rrf,
-        dense_started,
+        ..
     } = start;
     let mut refill = Refill::new(
         &arguments,
         fetch,
         context.payload_budget.settings().dedupe_max_candidates,
         active.rrf_active,
+        start.retrieval,
     );
     let mut bm25_ms = lexical.elapsed_ms;
     let mut stage_ms = Vec::with_capacity(4);
@@ -1107,7 +1123,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
             lexical.scope.as_ref(),
             &mut degraded,
         )?;
-        stage_ms.push((Stage::Dense, elapsed_ms(dense_started)));
+        stage_ms.push((Stage::Dense, elapsed_ms(start.dense_started)));
         hits
     } else {
         Vec::new()
@@ -1120,7 +1136,7 @@ pub(super) fn prepare_with_query_vector<Guard>(
             let fused = rrf_merge_with_settings(
                 &lexical.hits,
                 &dense_hits[..fetch.min(dense_hits.len())],
-                rrf,
+                start.rrf,
             );
             fusion_ms = fusion_ms.saturating_add(elapsed_ms(started));
             fused
@@ -1382,11 +1398,10 @@ fn filters_of(
     }
 }
 
-/// Post-filter overscan on the lexical path (`search-ux` FR-2).
-pub const SEARCH_UX_OVERSCAN: usize = 4;
+pub use crate::search::retrieval::DEFAULT_POST_FILTER_OVERSCAN as SEARCH_UX_OVERSCAN;
 
 /// Upper bound for `n_per_doc` (`search-ux` FR-2).
-pub const MAX_CHUNKS_PER_DOC: u64 = 10;
+pub const MAX_CHUNKS_PER_DOC: u64 = retrieval::MAX_CHUNKS_PER_DOC as u64;
 
 /// Longest snippet returned to a caller (`search-ux` FR-1).
 pub const SNIPPET_MAX_CHARS: usize = 240;
@@ -1424,9 +1439,9 @@ struct PostFilterArgs {
     tags: Vec<String>,
 }
 
-fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
+fn parse_post_filter(args: &Value, settings: RetrievalSettings) -> Result<PostFilterArgs> {
     let dedupe = match args.get("dedupe") {
-        None | Some(Value::Null) => Dedupe::None,
+        None | Some(Value::Null) => settings.default_dedupe(),
         Some(value) => match value.as_str() {
             Some("none") => Dedupe::None,
             Some("path") => Dedupe::Path,
@@ -1440,22 +1455,19 @@ fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
         },
     };
     let n_per_doc = match args.get("n_per_doc") {
-        // Measured default: with 1 the ru_morph slice loses 3 of 11 expected-path
-        // hits, with 2 it loses one and still halves the repetition
-        // (`tests/search_bench.rs::dedupe_slice_diagnostics`).
-        None | Some(Value::Null) => 2,
+        None | Some(Value::Null) => settings.default_n_per_doc(),
         Some(value) => {
             let raw = value.as_u64().ok_or_else(|| Error::Protocol {
                 message: format!("search_docs: n_per_doc must be an integer, got {value}"),
             })?;
-            if !(1..=MAX_CHUNKS_PER_DOC).contains(&raw) {
-                return Err(Error::Protocol {
+            usize::try_from(raw)
+                .ok()
+                .filter(|n| (1..=retrieval::MAX_CHUNKS_PER_DOC).contains(n))
+                .ok_or_else(|| Error::Protocol {
                     message: format!(
                         "search_docs: n_per_doc must be 1..={MAX_CHUNKS_PER_DOC}, got {raw}"
                     ),
-                });
-            }
-            usize::try_from(raw).unwrap_or(usize::try_from(MAX_CHUNKS_PER_DOC).unwrap_or(10))
+                })?
         }
     };
     // `null` means "unset", like every sibling key: only a real value demands
@@ -1516,16 +1528,7 @@ struct SearchArgs {
     tags: Vec<String>,
 }
 
-/// Which post-filter the caller asked for (`search-ux` FR-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Dedupe {
-    /// No post-filter (the default).
-    None,
-    /// At most `n_per_doc` chunks per document.
-    Path,
-}
-
-fn parse_search_args(args: &Value) -> Result<SearchArgs> {
+fn parse_search_args(args: &Value, settings: RetrievalSettings) -> Result<SearchArgs> {
     let query_mode = QueryMode::from_argument(args.get("query_mode"))?;
     let query = args
         .get("query")
@@ -1546,7 +1549,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
     // proportional to the request (final review C1). A wrong type is a
     // protocol error instead of a silent default.
     let limit = match args.get("limit") {
-        None | Some(Value::Null) => 10,
+        None | Some(Value::Null) => settings.default_limit(),
         Some(value) => {
             let raw = value.as_u64().ok_or_else(|| Error::Protocol {
                 message: format!("search_docs: limit must be a positive integer, got {value}"),
@@ -1578,7 +1581,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
         n_per_doc,
         path_prefix,
         tags,
-    } = parse_post_filter(args)?;
+    } = parse_post_filter(args, settings)?;
     Ok(SearchArgs {
         query,
         query_mode,
@@ -2158,11 +2161,19 @@ pub(super) fn project_entry_with_counts(
 /// # Errors
 /// Returns [`Error::Internal`] on `SQLite` failures.
 pub fn enqueue_sync(db: &Db, project: &Project) -> Result<(i64, bool)> {
+    enqueue_sync_with_retention(db, project, repo::MAX_SYNC_JOBS)
+}
+
+pub(crate) fn enqueue_sync_with_retention(
+    db: &Db,
+    project: &Project,
+    max_sync_jobs: usize,
+) -> Result<(i64, bool)> {
     for _ in 0..3 {
         if let Some(id) = repo::create_sync_job(db.connection(), project.id)? {
             // Best effort: a prune failure must not strand a queued job with
             // no runner blocking later syncs (FR-17).
-            if let Err(err) = repo::prune_sync_jobs(db.connection(), project.id) {
+            if let Err(err) = repo::prune_sync_jobs_to(db.connection(), project.id, max_sync_jobs) {
                 eprintln!("warning: cannot prune sync jobs: {err}");
             }
             return Ok((id, true));

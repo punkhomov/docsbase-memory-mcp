@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::bootstrap::{BootstrapContext, DefaultsContext};
 use crate::config::capture::{ReadFailure, path_is_absent, read_prefix};
 use crate::config::resolve::{LaunchFailure, LaunchUse, has_version_header};
 use crate::config::schema::Resolved;
@@ -29,6 +30,7 @@ enum CapturedBytes {
 pub struct LaunchSnapshot {
     path: Option<PathBuf>,
     bytes: CapturedBytes,
+    defaults: DefaultsContext,
 }
 
 /// Complete immutable launch data passed to resource consumers.
@@ -36,6 +38,11 @@ pub(crate) struct LaunchConfig {
     pub config: Resolved<Config>,
     pub path: Option<PathBuf>,
     pub stamp: ConfigStamp,
+    pub overrides: DaemonPatch,
+    pub defaults: DefaultsContext,
+    pub cpu_pool: Option<std::sync::Arc<crate::hybrid::cpu::CpuPool>>,
+    pub ipc_debug: bool,
+    pub watch_debug: bool,
     pub error: Option<String>,
     pub invalidation: crate::config::policy::PolicyContext,
     pub startup: Option<preflight::StartupExpectations>,
@@ -51,6 +58,8 @@ pub(crate) struct AdmittedLaunch {
     pub launch: LaunchConfig,
     pub website: Option<FixedProject>,
     pub catalog_epoch: Option<[u8; 16]>,
+    // Read-only work can proceed without a discovered data directory.
+    pub config_lock_dir: Option<PathBuf>,
 }
 
 impl AdmittedLaunch {
@@ -115,6 +124,15 @@ impl LaunchConfig {
         self,
         cache: &Path,
         settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    ) -> Result<AdmittedLaunch> {
+        self.admit_with_config_lock_dir(cache, settings, paths::config_lock_dir().ok())
+    }
+
+    pub(crate) fn admit_with_config_lock_dir(
+        self,
+        cache: &Path,
+        settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+        config_lock_dir: Option<PathBuf>,
     ) -> Result<AdmittedLaunch> {
         self.config.settings().validate()?;
         self.recheck_startup(None)?;
@@ -203,6 +221,7 @@ impl LaunchConfig {
             launch: self,
             website,
             catalog_epoch,
+            config_lock_dir,
         })
     }
 }
@@ -211,21 +230,38 @@ impl LaunchSnapshot {
     /// Capture the explicit global source once, using the existing trusted bootstrap cap.
     #[must_use]
     pub fn capture_from(config_dir: &Path) -> Self {
+        Self::capture_from_with_defaults(config_dir, DefaultsContext::for_host())
+    }
+
+    fn capture_from_with_defaults(config_dir: &Path, defaults: DefaultsContext) -> Self {
         let path = config_dir.join("config.toml");
         let bytes = capture(&path);
         Self {
             path: Some(path),
             bytes,
+            defaults,
         }
+    }
+
+    pub(crate) fn capture_with_bootstrap(bootstrap: &BootstrapContext) -> Self {
+        Self::capture_directory(
+            paths::config_dir_from(bootstrap).map(|directory| directory.value),
+            bootstrap.defaults,
+        )
     }
 
     /// Capture the system-selected global source once. Errors remain visible to adapters.
     #[must_use]
     pub fn capture() -> Self {
-        match paths::config_dir() {
-            Ok(path) => Self::capture_from(&path),
+        Self::capture_directory(paths::config_dir(), DefaultsContext::for_host())
+    }
+
+    fn capture_directory(directory: Result<PathBuf>, defaults: DefaultsContext) -> Self {
+        match directory {
+            Ok(path) => Self::capture_from_with_defaults(&path, defaults),
             Err(error) => Self {
                 path: None,
+                defaults,
                 bytes: CapturedBytes::Unavailable {
                     reason: error.to_string(),
                     versioned: false,
@@ -264,14 +300,19 @@ impl LaunchSnapshot {
         let path = self.path.as_deref().ok_or_else(|| {
             LaunchFailure::Legacy(Error::internal("global config path unavailable"))
         })?;
-        crate::config::resolve::launch_resolution(path, bytes, launch_use)
+        crate::config::resolve::launch_resolution(path, bytes, launch_use, &self.defaults)
     }
 
     pub(crate) fn strict(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
         Ok(LaunchConfig {
-            config: self.resolve(patch)?,
+            config: self.resolve(patch.clone())?,
             path: self.path.clone(),
             stamp: self.stamp(),
+            overrides: patch,
+            defaults: self.defaults,
+            cpu_pool: None,
+            ipc_debug: false,
+            watch_debug: false,
             error: None,
             invalidation: crate::config::policy::PolicyContext::Legacy,
             startup: None,
@@ -283,10 +324,15 @@ impl LaunchSnapshot {
     pub(crate) fn library_compatibility(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
         if matches!(self.bytes, CapturedBytes::Missing) {
             Ok(LaunchConfig {
-                config: crate::config::resolve::LaunchResolution::legacy_defaults()
-                    .finish(patch)?,
+                config: crate::config::resolve::LaunchResolution::legacy_defaults(&self.defaults)
+                    .finish(patch.clone())?,
                 path: self.path.clone(),
                 stamp: self.stamp(),
+                overrides: patch,
+                defaults: self.defaults,
+                cpu_pool: None,
+                ipc_debug: false,
+                watch_debug: false,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -305,9 +351,14 @@ impl LaunchSnapshot {
     fn legacy_for(&self, patch: DaemonPatch, launch_use: LaunchUse) -> Result<LaunchConfig> {
         match self.resolution(launch_use) {
             Ok(resolution) => Ok(LaunchConfig {
-                config: resolution.finish(patch)?,
+                config: resolution.finish(patch.clone())?,
                 path: self.path.clone(),
                 stamp: self.stamp(),
+                overrides: patch,
+                defaults: self.defaults,
+                cpu_pool: None,
+                ipc_debug: false,
+                watch_debug: false,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -315,6 +366,7 @@ impl LaunchSnapshot {
             Err(
                 LaunchFailure::Daemon(error)
                 | LaunchFailure::Remote(error)
+                | LaunchFailure::Client(error)
                 | LaunchFailure::Versioned(error),
             ) => Err(error),
             Err(LaunchFailure::Legacy(error)) => {
@@ -327,11 +379,17 @@ impl LaunchSnapshot {
                 }
                 eprintln!("warning: global config unavailable: {error}");
                 let config =
-                    crate::config::resolve::LaunchResolution::legacy_defaults().finish(patch)?;
+                    crate::config::resolve::LaunchResolution::legacy_defaults(&self.defaults)
+                        .finish(patch.clone())?;
                 Ok(LaunchConfig {
                     config,
                     path: self.path.clone(),
                     stamp: self.stamp(),
+                    overrides: patch,
+                    defaults: self.defaults,
+                    cpu_pool: None,
+                    ipc_debug: false,
+                    watch_debug: false,
                     error: Some(error.to_string()),
                     invalidation: crate::config::policy::PolicyContext::Legacy,
                     startup: None,
@@ -374,7 +432,14 @@ pub(crate) fn website_unavailable() -> Error {
 }
 
 pub(crate) fn require_shared_without_daemon(launch_use: LaunchUse) -> Result<LaunchConfig> {
-    let launch = LaunchSnapshot::capture().legacy_for(DaemonPatch::default(), launch_use)?;
+    require_shared_snapshot(&LaunchSnapshot::capture(), launch_use)
+}
+
+pub(crate) fn require_shared_snapshot(
+    snapshot: &LaunchSnapshot,
+    launch_use: LaunchUse,
+) -> Result<LaunchConfig> {
+    let launch = snapshot.legacy_for(DaemonPatch::default(), launch_use)?;
     if matches!(
         launch.config.settings().daemon.profile,
         crate::daemon::settings::DaemonProfile::Website { .. }
@@ -389,7 +454,52 @@ pub(crate) fn restart_notice(path: Option<&Path>, baseline: &ConfigStamp) -> Opt
         || ConfigStamp::Unavailable("global config path unavailable".to_owned()),
         |path| stamp(&capture(path)),
     );
-    match (&current, baseline) {
+    source_notice(&current, baseline)
+}
+
+pub(crate) fn runtime_restart_notice(
+    path: Option<&Path>,
+    baseline: &ConfigStamp,
+    active: &Config,
+    overrides: &DaemonPatch,
+    defaults: DefaultsContext,
+    compare_effective_policy: bool,
+) -> Option<String> {
+    let Some(path) = path else {
+        return restart_notice(None, baseline);
+    };
+    let snapshot = LaunchSnapshot {
+        path: Some(path.to_owned()),
+        bytes: capture(path),
+        defaults,
+    };
+    let notice = source_notice(&snapshot.stamp(), baseline)?;
+    let unchanged = if matches!(baseline, ConfigStamp::Unavailable(_)) {
+        false
+    } else {
+        snapshot
+            .resolve(overrides.clone())
+            .and_then(|resolved| {
+                let current = resolved.settings();
+                let client = current.client;
+                // Legacy status still reports raw source drift unless MCP is
+                // the only consumer affected. Compare daemon policy rather
+                // than the installed native handles attached to its snapshot.
+                if !compare_effective_policy
+                    && client == client.with_mcp_timeouts_from(active.client)
+                {
+                    return Ok(false);
+                }
+                Ok(crate::config::view::launch_identity(current)?
+                    == crate::config::view::launch_identity(active)?)
+            })
+            .unwrap_or(false)
+    };
+    (!unchanged).then_some(notice)
+}
+
+fn source_notice(current: &ConfigStamp, baseline: &ConfigStamp) -> Option<String> {
+    match (current, baseline) {
         (ConfigStamp::Unavailable(reason), _) => Some(format!(
             "global config unavailable ({reason}); restart the daemon: `docsbase daemon stop`"
         )),

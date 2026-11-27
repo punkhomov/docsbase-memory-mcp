@@ -69,6 +69,8 @@ pub struct SourceLayer {
     pub(super) index_writer: Option<crate::index::writer_settings::WriterPatch>,
     pub(super) provisioning: Option<crate::hybrid::provisioning::ProvisioningPatch>,
     pub(super) rrf: Option<crate::hybrid::rrf::settings::RrfPatch>,
+    pub(super) retrieval: Option<crate::search::retrieval::RetrievalPatch>,
+    pub(super) config_lock: Option<super::paths::ConfigLockPatch>,
 }
 impl fmt::Debug for SourceLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -116,6 +118,8 @@ impl SourceLayer {
         let mut watch = None;
         let mut lexical = None;
         let mut rrf = None;
+        let mut retrieval = None;
+        let mut config_lock = None;
         let mut store = None;
         let mut read_pool = None;
         let mut dense = None;
@@ -145,16 +149,9 @@ impl SourceLayer {
                         .map_err(|_| invalid("invalid v2 lexical fields"))?,
                 );
             }
-            if let Some(value) = fields.remove("rrf") {
-                let toml::Value::Table(_) = &value else {
-                    return Err(invalid("v2 rrf settings require a table"));
-                };
-                rrf = Some(
-                    value
-                        .try_into()
-                        .map_err(|_| invalid("invalid v2 rrf fields"))?,
-                );
-            }
+            rrf = take_project_table(&mut fields, "rrf")?;
+            retrieval = take_project_table(&mut fields, "retrieval")?;
+            config_lock = take_global_table(&mut fields, &source, "config_lock")?;
             provisioning = take_global_table(&mut fields, &source, "provisioning")?;
             store = take_global_table(&mut fields, &source, "store")?;
             read_pool = take_global_table(&mut fields, &source, "read_pool")?;
@@ -193,6 +190,8 @@ impl SourceLayer {
             watch,
             lexical,
             rrf,
+            retrieval,
+            config_lock,
             provisioning,
             store,
             read_pool,
@@ -224,6 +223,16 @@ impl SourceLayer {
         }
     }
 }
+fn take_project_table<P: serde::de::DeserializeOwned>(
+    fields: &mut toml::Table,
+    key: &str,
+) -> Result<Option<P>> {
+    fields
+        .remove(key)
+        .map(|value| decode_v2_table(value, key))
+        .transpose()
+}
+
 fn take_global_table<P: serde::de::DeserializeOwned>(
     fields: &mut toml::Table,
     source: &SourceId,
@@ -259,6 +268,10 @@ fn global_table<P: serde::de::DeserializeOwned>(
     if matches!(source, SourceId::Project(_)) {
         return Err(invalid(&format!("{key} is global-only")));
     }
+    decode_v2_table(value, key)
+}
+
+fn decode_v2_table<P: serde::de::DeserializeOwned>(value: toml::Value, key: &str) -> Result<P> {
     if !value.is_table() {
         return Err(invalid(&format!("v2 {key} settings require a table")));
     }

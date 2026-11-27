@@ -539,3 +539,6 @@ mod tests;
 
 #[cfg(test)]
 mod project_tests;
+
+#[cfg(test)]
+pub(crate) use project::IndexRecipeEvidence;

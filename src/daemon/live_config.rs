@@ -146,7 +146,7 @@ async fn control<T: Send + 'static>(
 
 pub(super) fn inspection_operation(shared: &Shared) -> Result<SearchOperation> {
     let timeout = Duration::from_millis(shared.daemon_settings().control_timeout_ms)
-        .min(crate::ipc::client::IO_TIMEOUT);
+        .min(shared.global_config.client.ipc_io_timeout());
     SearchOperation::with_timeout(Instant::now(), timeout, Cancellation::new())
 }
 
@@ -202,8 +202,8 @@ pub(super) fn snapshot(
                 None => AnnObservation::Unknown,
             },
         )?;
-        // Initial lazy resolution does not take the preparation lock.
-        // Reject it if it appeared while the paired artifact was being read.
+        // Initial lazy resolution also takes a read guard. Reject it
+        // if it appeared while the paired artifact was being read.
         let current_slot = slot.clone().or_else(|| existing_slot(shared, project.id));
         let current = runtime_config(current_slot.as_deref())?;
         match (config.as_ref(), current.as_ref()) {
@@ -240,6 +240,8 @@ pub(super) fn snapshot(
             config,
             global: shared.global_config_stamp.clone(),
             daemon: &shared.global_config,
+            overrides: &shared.global_config_overrides,
+            defaults: shared.global_config_defaults,
             ann,
         },
     )?;
@@ -341,27 +343,29 @@ pub(super) fn publish_runtime(
     let Some(slot) = existing_slot(shared, project.id) else {
         return Ok(None);
     };
+    let Some(expected) = change.active else {
+        return Ok(None);
+    };
     let config = change.config;
     operation.check()?;
-    let stages = if config.hybrid_cfg == change.active.hybrid_cfg
-        && config.providers == change.active.providers
-    {
-        let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if !state
-            .config
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, &change.active))
-        {
-            return Ok(None);
-        }
-        state
-            .search_stages
-            .as_ref()
-            .or(state.stages.as_ref())
-            .cloned()
-    } else {
-        None
-    };
+    let stages =
+        if config.hybrid_cfg == expected.hybrid_cfg && config.providers == expected.providers {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state
+                .config
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &expected))
+            {
+                return Ok(None);
+            }
+            state
+                .search_stages
+                .as_ref()
+                .or(state.stages.as_ref())
+                .cloned()
+        } else {
+            None
+        };
     let stages = match stages {
         Some(stages) => stages,
         None => Arc::new(build_stages(&config)?),
@@ -381,6 +385,8 @@ pub(super) fn publish_runtime(
     };
     let base = change.reviewed.base;
     crate::config::paths::with_index_config_write_locks(
+        shared.config_lock_dir()?,
+        config.config_lock,
         shared.global_config_path.as_deref(),
         &project.canonical_root,
         || {
@@ -400,7 +406,7 @@ pub(super) fn publish_runtime(
                     project_index::require_catalog_recipe(local.as_ref(), recipe)?;
                     let publication = slot.try_catalog_publication()?;
                     if !runtime_config(Some(&slot))?
-                        .is_some_and(|active| Arc::ptr_eq(&active, &change.active))
+                        .is_some_and(|active| Arc::ptr_eq(&active, &expected))
                     {
                         return Ok(None);
                     }
@@ -408,7 +414,7 @@ pub(super) fn publish_runtime(
                         return Ok(None);
                     }
                     operation.check()?;
-                    if config.ann_build != change.active.ann_build {
+                    if config.ann_build != expected.ann_build {
                         shared.dense.invalidate_memory(project.id);
                     }
                     let old = publication.install(Arc::clone(&config), Arc::clone(&stages));

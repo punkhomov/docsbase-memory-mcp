@@ -2337,3 +2337,159 @@ budget. The Stop exchange and its process wait are capped by that outer
 deadline. A native unanswered Unix socket reproduced an old 15-second wait
 with a 500 ms caller deadline. The corrected fixture returns in 0.52 s and
 leaves the still-owned daemon state intact.
+
+## 2026-11-27 — CF4, действующая политика запуска live v5
+
+Task CF4 launch policy comparison: complete (typed policy, captured CLI
+priority, exact source review and independent fix review). Native checks
+remain pending.
+
+Ruling: a semantic launch identity covers the v2 vector-owner limits and
+runtime values after the original CLI overlay. An edit masked by that overlay
+or restricted to comments changes the exact source plan ID without requiring
+restart. Actual transport or vector policy changes require a restart. The
+live plan also reports a valid Website profile change when the requested
+project is outside the new fixed scope. Status and live plan use the same
+identity. Guarded startup and apply still compare exact source observations.
+
+minor (deferred): a changed source is parsed for each status request until
+restart. This is bounded by the existing config byte limit. No global
+observation cache was added.
+
+## 2026-11-27 — CF12 I52, предел чтения bootstrap
+
+Task CF12 bounded bootstrap reads: complete (focused CLI tests, growth
+regression and fresh review). Native checks remain pending.
+
+Ruling: daemon state, install manifest and `web.toml` use the existing 1 MiB
+trusted read ceiling. The reader consumes at most the limit plus one byte
+regardless of earlier metadata. Missing/corrupt handling remains local to
+its owner. A valid oversized Web file fails before trying an occupied port.
+Forty focused Linux tests and focused Linux/Windows GNU Clippy passed.
+
+## 2026-11-27 — CF13, исполнение FastEmbed
+
+Task CF13 FastEmbed inference ownership: complete (typed policy, actual
+consumer options, shared model lifetime and independent fix review).
+Native PR checks remain pending.
+
+Ruling: resolve batch and thread counts once and use the same stored values
+in the view and both local stages. Launch, status and live-plan comparison
+retain the original CPU facts. Keys and default truncation are unchanged.
+A live shared session owns its model file lease. The last stage releases
+both. Fixtures exercise resolved settings, option construction, batch
+sizes and file-lock retirement without fetching or loading an ONNX model.
+
+Ruling: the public source preview uses the same host defaults as operational
+file resolution. The portable migration proposal uses one explicit defaults
+context for both sides of its equivalence check and does not write the host's
+thread count to TOML. The full run exposed the previous one-CPU preview
+mismatch. All 18 migration tests passed after separating the two contexts.
+
+## 2026-11-27 — bootstrap, FastEmbed and dependent artifacts
+
+Task I36: complete (typed FastEmbed limit, captured execution, byte-identical
+default vector key, config view and sealed catalog consumers).
+Ruling: the setting affects embeddings. Reranking keeps its own input limit.
+
+Task I56/I58/I64: complete (bootstrap diagnostic flags, local runtime provenance,
+native module identity, and one lazy daemon-owned Rayon pool across ANN and local
+inference). A real loaded-symbol lookup passed on Linux. Fresh review identified
+relative loader paths, runtime rebinding after a source edit and ambient Rayon
+teardown. The implementation rejects ambiguous relative module identities,
+retains the installed policy and holds the owned pool through graph teardown.
+Ruling: embedded adapters preserve host ownership. No new package versions.
+
+Task CF11-vector-inputs: complete (plan action follows the document input and
+embedding recipes, and a selected compatible pair authorizes reuse-only).
+Ruling: an absent vector fails before publication. The existing generation
+continues serving reads. Older seals provide unknown vector-input evidence.
+A native v5 fixture proved reuse, refusal on a cache miss and zero provider calls
+for the reviewed lexical-only path. Existing source, head and pin checks remain.
+
+Task I13: complete (project-owned bounded post-filter overscan with CLI and
+daemon evidence, default preserved, search baseline passed).
+Ruling: Factor 1 keeps the first window at the request limit and still advances
+bounded refill. The ANN/RRF/reranker base window remains owner-specific.
+minor (deferred): non-default hybrid refill factor coverage in the benchmark.
+
+Task I44: complete (global Shared watcher policy, Website mask provenance,
+native explicit Sync and restart inspection).
+Ruling: the configuration changes the next daemon's watcher owner. Website
+masks the setting before restart comparison. Fresh review and fix round completed.
+
+Task I49: complete (global typed client deadlines, bounded native I/O, MCP
+exchange consumers, unsupported versions and invalid source handling).
+Ruling: invalid recognized owner policy fails before startup; an MCP-only
+change does not replace the daemon. Blocking Windows setters are operational.
+Fresh review and fixes passed; 105 serial Linux cases and Windows cross-check.
+
+Task I55: complete (captured daemon/cache/model/ORT paths and source-lock
+directory, explicit CLI/autostart boundaries).
+Ruling: project configuration publication and its writer serialize using the
+same captured locks. The injected-daemon test exercises ambient path divergence
+and an existing held lock.
+
+Task CF11-cache-only: complete (stopped replacement derives model identity
+from the reviewed config, pins and verifies cached vectors without constructing
+a provider, including empty generations).
+Ruling: Live replacement can retain the exact prior stages if their settings
+are equal. A complete native stopped fixture proves this route with the
+provider credentials absent; a miss keeps the prior pair selected.
+
+## 2026-11-27 — retrieval defaults and operating limits
+
+Task I12/I14: complete (resolved CLI and IPC retrieval defaults and runtime RRF
+candidate window). Real CLI and IPC requests distinguish omitted values from
+explicit zero and none. RRF keeps the reranker's configured window precedence.
+Ruling: request ceilings and artifact recipes are unchanged.
+
+Task I17/I53: complete (owned Sync receipt retention and detached daemon log
+rotation). Native CLI tests cover both registry generations and log rollover.
+Ruling: in-flight jobs and the independent registration conflict log retain
+their contracts.
+
+Task I33/I34: complete (resolved legacy ANN traversal, per-file read cap).
+The cap preserves valid stored files and releases the load reservation when it
+refuses a dump. Legacy v1 migration compares effective traversal.
+Ruling: no rebuild or vector invalidation follows a read cap change.
+
+Task I50: complete (installation-wide bounded config-lock retry policy). A
+resolved custom policy runs against a real contended lock, including retry
+handoff and exhaustion. Canonical alias locking and source rereads remain in
+the publication path.
+Ruling: the bound applies per lock file. Editors can acquire the lock with the
+built-in policy if decoding the policy source fails.
+
+Task CF14-owner-boundary: complete (owner descriptors distinguish settings
+used by the daemon from launcher, provisioning and MCP-only settings. The
+FastEmbed CPU-derived default exposes its expression in the effective view).
+Ruling: runtime still publishes one consistent project snapshot. Changes to
+launcher-only settings update source identity and leave the daemon plan empty.
+minor (deferred): report the ANN read-cap reason separately from resident
+capacity. Sync history retains its bounded recent-receipt contract: a client
+that polls after enough successor jobs may find its receipt evicted.
+
+Task CF11-cold-apply: complete (native CLI live plan, acknowledgment and
+generation replacement with watchers disabled and no prior project open).
+Ruling: an absent runtime is a checked revision. Initial runtime installation
+takes the same preparation guard. Selected head, exact sources and runtime
+preconditions still fence publication. Linux PTY acceptance observed both a
+declined startup plan with the original head and approved publication.
+
+Task CF14-feature-compat: complete (optional local-pool entrypoint and
+remote-only test helpers are compiled by their consumers). Clippy passed
+for the individual local and remote build configurations. The Sync history
+fixture accounts for terminal receipts preceding physical owner retirement.
+
+CF14 remains partial. The launcher applies new caller policy on the next
+invocation, while applicable daemon settings still compare as one published
+runtime. The installer admission loop and stale Tantivy directory removal
+retain their fixed retry budgets (I48 and I21). The inventory still needs to
+classify remaining fixed administrative and metadata-read limits before
+SC-5 can be asserted.
+
+Task CF14-portable-source-fixture: complete (construct the expected config
+source with native path components). The first Windows run reached the
+bootstrap provenance regression and found a mixed-separator test literal.
+The actual CLI provenance used the native path.

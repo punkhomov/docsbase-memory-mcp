@@ -84,8 +84,12 @@ impl Env {
     }
 
     fn start_daemon_with(&mut self, mut command: Command) {
+        command.args(["serve", "--detached", "--grace-ms", "3000"]);
+        self.start_daemon_child(command);
+    }
+
+    fn start_daemon_child(&mut self, mut command: Command) {
         let child = command
-            .args(["serve", "--detached", "--grace-ms", "3000"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -969,7 +973,11 @@ fn v2_live_config_plan_observes_current_runtime_without_loading_new_settings() {
         "project_runtime"
     );
 
-    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\npoll_interval_ms = 25\n",
+    )
+    .unwrap();
     let restart = env.run_json(&["config", "plan", "--live"]);
     assert_eq!(restart["restart_required"], true);
     assert_eq!(restart["actions"][0]["resource"]["value"], "daemon_global");
@@ -988,6 +996,173 @@ fn assert_restart_follows_replacement(env: &Env) {
     assert_eq!(index["value"]["component"], "project_index");
     assert_eq!(actions[1]["resource"]["value"], "daemon_global");
     assert_eq!(actions[1]["dependencies"], serde_json::json!([index]));
+}
+
+#[test]
+fn v2_shared_watcher_toggle_takes_effect_on_restart_and_keeps_sync() {
+    let mut env = Env::new(&[("guide.md", "initialwatcherwidget")]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\nauto_index = true\n",
+    )
+    .unwrap();
+    env.start_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let status = |client: &mut Client| client.call_tool("status", serde_json::json!({})).unwrap();
+    assert_eq!(status(&mut client)["watchers"], 1);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\nauto_index = true\n[watch]\nenabled = false\n",
+    )
+    .unwrap();
+    let changed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(changed["restart_required"], true, "{changed}");
+    let actions = changed["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{changed}");
+    assert_eq!(actions[0]["resource"]["value"], "daemon_global");
+    assert_eq!(status(&mut client)["restart_required"], true);
+
+    write_file(env.root(), "watched.md", b"automaticwatcherwidget");
+    let deadline = Instant::now() + watcher_deadline();
+    loop {
+        if search_before(&mut client, "automaticwatcherwidget", deadline) == ["watched.md"] {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    drop(client);
+    env.restart_daemon();
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let disabled = status(&mut client);
+    assert_eq!(disabled["restart_required"], false);
+    assert_eq!(disabled["watchers"], 0);
+    assert_eq!(disabled["projects"][0]["watched"], false);
+    let settled = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(settled["actions"], serde_json::json!([]));
+
+    let another = tempfile::tempdir().unwrap();
+    write_file(another.path(), "fresh.md", b"freshwatcherwidget");
+    let mut registered = env.client();
+    registered.handshake(another.path()).unwrap();
+    assert_eq!(search(&mut registered, "freshwatcherwidget"), ["fresh.md"]);
+    assert_eq!(status(&mut client)["watchers"], 0);
+
+    write_file(env.root(), "manual.md", b"manualwatcherwidget");
+    assert_eq!(
+        search(&mut client, "manualwatcherwidget"),
+        Vec::<String>::new()
+    );
+    assert_eq!(env.run_json(&["sync"])["state"], "done");
+    assert_eq!(search(&mut client, "manualwatcherwidget"), ["manual.md"]);
+    assert_eq!(status(&mut client)["watchers"], 0);
+}
+
+#[test]
+fn v2_live_plan_uses_effective_global_settings_for_restart() {
+    let mut env = Env::new(&[("guide.md", "semanticglobalwidget")]);
+    let global_file = env.global_config();
+    let write_global = |grace, note: &str| {
+        fs::write(
+            &global_file,
+            format!("config_version = 2\n[daemon]\nidle_grace_ms = {grace}\n{note}\n"),
+        )
+        .unwrap();
+    };
+    write_global(1200, "# Startup file");
+    env.run_json(&["index"]);
+    env.start_daemon(); // --grace-ms=3000 overrides the file
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let baseline = env.run_json(&["config", "plan", "--live", "--check"]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\nidle_grace_ms = 1800\n# Updated file with an overridden setting\n",
+    ).unwrap();
+    let edited = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(edited["restart_required"], false);
+    assert_eq!(edited["actions"], serde_json::json!([]));
+    assert_ne!(edited["plan_id"], baseline["plan_id"]);
+    let status = |client: &mut Client| {
+        client.call_tool("status", serde_json::json!({})).unwrap()["restart_required"].clone()
+    };
+    assert_eq!(status(&mut client), false);
+
+    write_global(
+        1800,
+        "start_timeout_ms = 3000\nstop_timeout_ms = 4000\nlog_rotate_bytes = 65536\n[provisioning.models]\nlock_attempts = 2",
+    );
+    let launcher_edit = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(launcher_edit["restart_required"], false, "{launcher_edit}");
+    assert_eq!(launcher_edit["actions"], serde_json::json!([]));
+    assert_eq!(status(&mut client), false);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\nidle_grace_ms = 1800\npoll_interval_ms = 40\n",
+    )
+    .unwrap();
+    let changed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(changed["restart_required"], true);
+    assert_eq!(changed["actions"][0]["resource"]["value"], "daemon_global");
+    assert_eq!(status(&mut client), true);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[vector_cache]\nmax_entries = 1234\nbusy_timeout = 789\n",
+    )
+    .unwrap();
+    let vector_change = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(vector_change["restart_required"], true);
+    assert_ne!(vector_change["actions"], serde_json::json!([]));
+    assert_eq!(status(&mut client), true);
+    assert_eq!(
+        search(&mut client, "semanticglobalwidget"),
+        vec!["guide.md"]
+    );
+}
+
+#[test]
+fn v2_live_plan_reports_profile_restart_for_an_excluded_project() {
+    let mut env = Env::new(&[("guide.md", "requestedprofilewidget")]);
+    let fixed = TempDir::new().unwrap();
+    fs::write(fixed.path().join("guide.md"), "fixedprofilewidget").unwrap();
+    env.run_json(&["index"]);
+    env.run_json(&["index", fixed.path().to_str().unwrap()]);
+    env.daemon = Some(
+        env.cmd()
+            .args(["serve", "--detached"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_until(Duration::from_secs(10), || platform::exists(
+        &platform::daemon_endpoint(env.cache())
+    )));
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let root = toml::Value::String(
+        fixed
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+    );
+    fs::write(env.global_config(), format!(
+        "config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {root} }}\n"
+    )).unwrap();
+    let changed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(changed["restart_required"], true);
+    assert_eq!(changed["actions"][0]["resource"]["value"], "daemon_global");
+    assert_eq!(changed["blockers"][0]["code"], "invalid_settings");
+    assert_eq!(
+        client.call_tool("status", serde_json::json!({})).unwrap()["restart_required"],
+        true
+    );
 }
 
 #[test]
@@ -1072,7 +1247,11 @@ fn v2_live_config_applies_only_the_reviewed_project_runtime() {
         vec!["guide.md"]
     );
 
-    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\npoll_interval_ms = 25\n",
+    )
+    .unwrap();
     let restart = env.run_json(&["config", "plan", "--live"]);
     assert_eq!(restart["restart_required"], true);
     let refused = env
@@ -1090,9 +1269,153 @@ fn v2_live_config_applies_only_the_reviewed_project_runtime() {
     assert_eq!(env.run_json(&["config", "plan", "--live"]), restart);
 }
 
+fn serve_with_injected_lock_data(data: &std::ffi::OsStr) {
+    use docsbase_memory::config::bootstrap::{BootstrapContext, EntrypointFacts};
+    use docsbase_memory::daemon::launch::LaunchSnapshot;
+    use docsbase_memory::daemon::settings::DaemonPatch;
+
+    let cache = PathBuf::from(std::env::var_os("DOCSBASE_CACHE_DIR").unwrap());
+    let config = PathBuf::from(std::env::var_os("DOCSBASE_CONFIG_DIR").unwrap());
+    let snapshot = LaunchSnapshot::capture_from(&config);
+    let patch = DaemonPatch {
+        idle_grace_ms: Some(15_000),
+        ..DaemonPatch::default()
+    };
+    let bootstrap = BootstrapContext::capture_with(2, EntrypointFacts::standalone(), |key| {
+        (key == "DOCSBASE_DATA_DIR").then(|| data.to_os_string())
+    })
+    .unwrap();
+    docsbase_memory::daemon::lifecycle::run_daemon_with_launch_and_bootstrap(
+        &cache,
+        &docsbase_memory::store::settings::standalone().unwrap(),
+        &docsbase_memory::store::settings::standalone_read_pool().unwrap(),
+        docsbase_memory::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+        &snapshot,
+        patch,
+        &bootstrap,
+    )
+    .unwrap();
+}
+
+#[test]
+fn live_config_publication_uses_the_daemon_bootstrap_data_directory() {
+    const INJECTED_DATA: &str = "DOCSBASE_TEST_INJECTED_LOCK_DATA";
+    if let Some(data) = std::env::var_os(INJECTED_DATA) {
+        serve_with_injected_lock_data(&data);
+        return;
+    }
+
+    let mut env = Env::new(&[("guide.md", "source lock fixture")]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    env.run_json(&["index"]);
+    let injected = env.cache().join("captured-data");
+    let ambient = env.cache().join("ambient-daemon-data");
+    let mut daemon = Command::new(std::env::current_exe().unwrap());
+    daemon
+        .args([
+            "--exact",
+            "live_config_publication_uses_the_daemon_bootstrap_data_directory",
+        ])
+        .env(INJECTED_DATA, &injected)
+        .env("DOCSBASE_CACHE_DIR", env.cache())
+        .env("DOCSBASE_CONFIG_DIR", env.cache().join("config"))
+        .env("DOCSBASE_DATA_DIR", &ambient)
+        .current_dir(env.root());
+    env.start_daemon_child(daemon);
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty=0.25\n",
+    )
+    .unwrap();
+    let runtime = env.run_json(&["config", "plan", "--live"]);
+    let apply = |plan: &Value| {
+        env.run_json(&[
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            plan["plan_id"].as_str().unwrap(),
+        ])
+    };
+    assert_eq!(apply(&runtime)["applied"], true);
+    let lock_dir = injected.join("locks");
+    assert!(
+        lock_dir.is_dir(),
+        "live apply must use the captured data directory"
+    );
+    assert!(!ambient.join("locks").exists());
+
+    // A replacement runs in the catalog Sync job. It must contend with
+    // config writers holding the source locks in the same directory.
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty=0.25\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let replacement = env.run_json(&["config", "plan", "--live"]);
+    let mut locks = fs::read_dir(&lock_dir)
+        .unwrap()
+        .map(|entry| {
+            fd_lock::RwLock::new(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(entry.unwrap().path())
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        locks.len() >= 2,
+        "global and project sources must be locked"
+    );
+    let guards = locks
+        .iter_mut()
+        .map(|lock| lock.try_write().unwrap())
+        .collect::<Vec<_>>();
+    let blocked = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            replacement["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !blocked.status.success(),
+        "held source locks must block publication"
+    );
+    drop(guards);
+    assert_eq!(apply(&replacement)["applied"], true);
+    assert!(!ambient.join("locks").exists());
+}
+
 #[test]
 fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
+    assert_live_index_replacement(true);
+}
+
+#[test]
+fn v2_live_config_apply_replaces_a_cold_project_with_watchers_disabled() {
+    assert_live_index_replacement(false);
+}
+
+fn assert_live_index_replacement(watchers: bool) {
     let mut env = Env::new(&[("guide.md", "reviewedliveindexwidget")]);
+    if !watchers {
+        fs::write(
+            env.global_config(),
+            "config_version = 2\n[watch]\nenabled = false\n",
+        )
+        .unwrap();
+    }
     let initial = env.run_json(&["index"]);
     env.start_daemon();
     let project_id = initial["project_id"].as_i64().unwrap();
@@ -1111,8 +1434,11 @@ fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
             .unwrap()
     };
     let original_generation = selected();
-    let mut client = env.client();
-    client.handshake(env.root()).unwrap();
+    let client = watchers.then(|| {
+        let mut client = env.client();
+        client.handshake(env.root()).unwrap();
+        client
+    });
 
     fs::write(
         env.project_config(),
@@ -1120,7 +1446,17 @@ fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
     )
     .unwrap();
     let reviewed = env.run_json(&["config", "plan", "--live"]);
-    assert_eq!(reviewed["blockers"], serde_json::json!([]));
+    assert_eq!(reviewed["blockers"], serde_json::json!([]), "{reviewed}");
+    if !watchers {
+        assert!(
+            reviewed["expected"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["resource"]["value"] == "project_runtime"
+                    && entry["state"]["kind"] == "missing")
+        );
+    }
     let replacement = reviewed["actions"]
         .as_array()
         .unwrap()
@@ -1160,6 +1496,11 @@ fn v2_live_config_apply_waits_for_the_reviewed_index_replacement() {
     let installed = env.run_json(&["config", "plan", "--live", "--check"]);
     assert_eq!(installed["actions"], serde_json::json!([]));
     assert_eq!(installed["blockers"], serde_json::json!([]));
+    let mut client = client.unwrap_or_else(|| {
+        let mut client = env.client();
+        client.handshake(env.root()).unwrap();
+        client
+    });
     assert_eq!(
         search(&mut client, "reviewedliveindexwidget"),
         vec!["guide.md"]
@@ -1489,6 +1830,150 @@ fn v2_config_apply_requires_the_current_plan_and_publishes_its_replacement() {
         env.run_json(&["search", "reviewedconfigwidget"])[0]["path"],
         "guide.md"
     );
+}
+
+#[test]
+#[cfg(feature = "hybrid-remote")]
+fn v2_stopped_config_apply_reuses_vectors_without_provider_credentials() {
+    use docsbase_memory::store::DB_FILE;
+
+    const GUIDE: &str = "# Guide\n\nCached vector fixture\n";
+    let env = Env::new(&[("guide.md", GUIDE)]);
+    let project = env.run_json(&["index"])["project_id"].as_i64().unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version=2\n[hybrid]\nenabled=true\nranking='rrf'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\n",
+    )
+    .unwrap();
+    let registry = || rusqlite::Connection::open(env.cache().join(DB_FILE)).unwrap();
+    let head = || {
+        registry()
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id = ?1",
+                [project],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let generation = |id| {
+        env.cache()
+            .join(format!("projects/{project}/generations/{id}"))
+    };
+    seed_openrouter_vectors(&env, &generation(head()));
+    let indexed = env
+        .cmd()
+        .env("OPENROUTER_API_KEY", "cache-fixture-only")
+        .args(["index"])
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let apply = |plan: &Value| {
+        env.cmd()
+            .env_remove("OPENROUTER_API_KEY")
+            .args([
+                "config",
+                "apply",
+                "--plan-id",
+                plan["plan_id"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let guide = env.root().join("guide.md");
+    for retain_guide in [true, false] {
+        let base = head();
+        let embedding = simulate_previous_tokenizer(&registry(), base, &generation(base));
+        let plan = env.run_json(&["config", "plan"]);
+        assert_eq!(plan["actions"].as_array().unwrap().len(), 1, "{plan}");
+        assert_eq!(
+            plan["actions"][0]["resource"]["value"]["component"],
+            "project_index"
+        );
+        assert_eq!(plan["required_grants"], serde_json::json!([]));
+        if retain_guide {
+            fs::write(&guide, "Changed after review with no cached vector").unwrap();
+            let miss = apply(&plan);
+            assert!(!miss.status.success());
+            let error = String::from_utf8_lossy(&miss.stderr);
+            assert!(error.contains("some are missing"), "{error}");
+            assert_eq!(head(), base);
+            fs::write(&guide, GUIDE).unwrap();
+        } else {
+            fs::remove_file(&guide).unwrap();
+        }
+
+        let applied = apply(&plan);
+        assert!(
+            applied.status.success(),
+            "{}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        let selected = head();
+        assert_ne!(selected, base);
+        let published: Value =
+            serde_json::from_slice(&fs::read(generation(selected).join("seal.json")).unwrap())
+                .unwrap();
+        assert_eq!(published["embedding_recipe"], embedding);
+        assert_eq!(
+            env.run_json(&["config", "plan"])["actions"],
+            serde_json::json!([])
+        );
+    }
+}
+
+#[cfg(feature = "hybrid-remote")]
+fn seed_openrouter_vectors(env: &Env, generation: &Path) {
+    use docsbase_memory::vector_cache::{VectorStore, chunk_hash};
+    use docsbase_memory::{config::Config, hybrid::embedding_model_id};
+
+    let config = Config::load_from(&env.cache().join("config"), Some(env.root())).unwrap();
+    let model = embedding_model_id(config.hybrid_cfg.embedding.as_ref().unwrap());
+    let metadata = rusqlite::Connection::open(generation.join("metadata.db")).unwrap();
+    let mut chunks = metadata.prepare("SELECT text FROM chunks").unwrap();
+    let store = VectorStore::acquire(env.cache(), config.vector_store.as_ref().unwrap()).unwrap();
+    let mut cache = store.connect().unwrap();
+    let texts = chunks.query_map([], |row| row.get::<_, String>(0)).unwrap();
+    for text in texts {
+        cache
+            .put(&model, &chunk_hash(&text.unwrap()), &[1.0, 0.0, 0.0])
+            .unwrap();
+    }
+}
+
+#[cfg(feature = "hybrid-remote")]
+fn simulate_previous_tokenizer(
+    registry: &rusqlite::Connection,
+    id: i64,
+    generation: &Path,
+) -> Value {
+    // Change only the tokenizer-dependent identity in the outcome and seal.
+    let seal_path = generation.join("seal.json");
+    let mut seal: Value = serde_json::from_slice(&fs::read(&seal_path).unwrap()).unwrap();
+    let prior_recipe = format!("index-recipe-v1:{}", "f".repeat(64));
+    {
+        let metadata = rusqlite::Connection::open(generation.join("metadata.db")).unwrap();
+        metadata.execute(
+            "UPDATE projects SET index_outcome_json = json_set(index_outcome_json, '$.recipe_id', ?1)",
+            [&prior_recipe],
+        ).unwrap();
+    }
+    seal["index_recipe"] = serde_json::json!(prior_recipe);
+    let encoded = serde_json::to_vec(&seal).unwrap();
+    fs::write(seal_path, &encoded).unwrap();
+    registry
+        .execute(
+            "UPDATE project_generations SET seal_digest = ?1 WHERE id = ?2",
+            rusqlite::params![blake3::hash(&encoded).as_bytes().as_slice(), id],
+        )
+        .unwrap();
+    let embedding = seal["embedding_recipe"].clone();
+    assert!(!embedding.is_null());
+    embedding
 }
 
 #[test]
@@ -2443,6 +2928,79 @@ fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
 }
 
 #[test]
+fn invalid_legacy_client_policy_fails_before_creating_daemon_state() {
+    for (source, error) in [
+        (
+            "[client]\nipc_io_timeout_ms=0\n",
+            "client.ipc_io_timeout_ms",
+        ),
+        ("client = false\n", "invalid global [client] timeout fields"),
+    ] {
+        let env = Env::new(&[]);
+        write_file(env.cache(), "config/config.toml", source.as_bytes());
+        let output = env
+            .cmd()
+            .args(["serve", "--detached", "--grace-ms", "1"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        assert!(!env.cache().join("state").exists());
+        assert!(!env.cache().join(docsbase_memory::store::DB_FILE).exists());
+    }
+}
+
+#[test]
+fn live_config_client_policy_returns_unavailable_with_the_field_error() {
+    let env = Env::new(&[]);
+    write_file(
+        env.cache(),
+        "config/config.toml",
+        b"[client]\nipc_io_timeout_ms=0\n",
+    );
+    for arguments in [
+        &["config", "plan", "--live", "--check"][..],
+        &["config", "apply", "--live", "--plan-id", "fixture"][..],
+    ] {
+        let output = env.cmd().args(arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(5), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("client.ipc_io_timeout_ms"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn legacy_daemon_restart_notice_observes_the_scope_of_client_policy_changes() {
+    let mut env = Env::new(&[]);
+    let original = "[client]\nmcp_quick_timeout_ms=3000\n";
+    fs::write(env.global_config(), original).unwrap();
+    env.start_daemon();
+
+    let mut registry = env.client();
+    registry.handshake_registry().unwrap();
+    for (source, requires_restart) in [
+        ("[client]\nmcp_quick_timeout_ms=2000\n", false),
+        (
+            "[client]\nmcp_quick_timeout_ms=3000\nipc_io_timeout_ms=1000\n",
+            true,
+        ),
+        (
+            "# comment-only edit\n[client]\nmcp_quick_timeout_ms=3000\n",
+            true,
+        ),
+    ] {
+        fs::write(env.global_config(), source).unwrap();
+        let status = registry.call_tool("status", serde_json::json!({})).unwrap();
+        assert_eq!(status["restart_required"], requires_restart, "{status}");
+    }
+}
+
+#[test]
 fn invalid_v2_global_fails_before_creating_daemon_state() {
     let oversized = format!(
         "config_version=2\n#{}",
@@ -2611,6 +3169,189 @@ fn v2_lexical_weights_change_real_search_without_reindexing() {
     assert_eq!(index["stats"]["docs"], 0);
     assert_eq!(index["stats"]["skipped"], 2);
     assert_eq!(env.run_json(&query)["hits"], direct["hits"]);
+}
+
+#[test]
+fn v2_retrieval_defaults_only_apply_to_unset_cli_and_ipc_arguments() {
+    let content = "# Widgets\n\nquerydefaultprobe querydefaultprobe\n\n".repeat(15);
+    let mut env = Env::new(&[("dominant.md", &content)]);
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+    let query = ["search", "querydefaultprobe", "--explain"];
+    let fallback = env.run_json(&query);
+    assert_eq!(fallback["hits"].as_array().unwrap().len(), 10);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[retrieval]\ndefault_limit = 3\ndefault_dedupe = 'path'\nrrf_candidate_window = 27\n",
+    )
+    .unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[retrieval]\ndefault_n_per_doc = 1\n",
+    )
+    .unwrap();
+    let direct = env.run_json(&query);
+    assert_eq!(direct["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(direct["meta"]["filters"]["dedupe"], "path");
+    assert_eq!(direct["meta"]["filters"]["n_per_doc"], 1);
+    let explicit = env.run_json(&[
+        "search",
+        "querydefaultprobe",
+        "--explain",
+        "--limit",
+        "10",
+        "--dedupe",
+        "none",
+    ]);
+    assert_eq!(explicit["hits"], fallback["hits"]);
+    assert_eq!(explicit["meta"]["window"], 10);
+    let zero = env.run_json(&["search", "querydefaultprobe", "--explain", "--limit", "0"]);
+    assert_eq!(zero["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(zero["meta"]["window"], 0);
+
+    env.start_daemon();
+    let connected = env.run_json(&query);
+    assert_eq!(connected["hits"], direct["hits"]);
+    assert_eq!(connected["meta"]["filters"], direct["meta"]["filters"]);
+
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let via_ipc = client.call_tool("search_docs", serde_json::json!({
+        "query": "querydefaultprobe", "explain": true, "limit": null, "dedupe": null, "n_per_doc": null,
+    })).unwrap();
+    assert_eq!(via_ipc["hits"], direct["hits"]);
+    assert_eq!(via_ipc["meta"]["filters"], direct["meta"]["filters"]);
+    let inherited_limit = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({
+                "query": "querydefaultprobe", "explain": true, "dedupe": "none",
+            }),
+        )
+        .unwrap();
+    assert_eq!(inherited_limit["hits"].as_array().unwrap().len(), 3);
+    assert_eq!(inherited_limit["meta"]["window"], 3);
+    let override_cap = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({
+                "query": "querydefaultprobe", "explain": true, "n_per_doc": 3,
+            }),
+        )
+        .unwrap();
+    assert_eq!(override_cap["hits"].as_array().unwrap().len(), 3);
+    assert_eq!(override_cap["meta"]["filters"]["n_per_doc"], 3);
+    let error = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({
+                "query": "querydefaultprobe", "dedupe": "none", "n_per_doc": 1,
+            }),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Protocol { .. }));
+
+    let view = env.run_json(&["config", "effective"]);
+    let fields = view["fields"].as_array().unwrap();
+    let field = |key| fields.iter().find(|entry| entry["key"] == key).unwrap();
+    assert_eq!(field("retrieval.default_limit")["source"]["kind"], "global");
+    assert_eq!(field("retrieval.default_limit")["value"], 3);
+    assert_eq!(field("retrieval.default_dedupe")["value"], "path");
+    assert_eq!(
+        field("retrieval.default_n_per_doc")["source"]["kind"],
+        "project"
+    );
+    assert_eq!(field("retrieval.default_n_per_doc")["value"], 1);
+    assert_eq!(field("retrieval.rrf_candidate_window")["value"], 27);
+}
+
+#[test]
+fn v2_retrieval_overscan_reaches_direct_and_daemon_cap_refill() {
+    let dominant = "# Widgets\n\noverscanprobe overscanprobe overscanprobe\n\n".repeat(40);
+    let mut env = Env::new(&[
+        ("dominant.md", &dominant),
+        ("answer.md", "# Answer\n\nSet overscanprobe here.\n"),
+    ]);
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 2);
+    let query = [
+        "search",
+        "overscanprobe",
+        "--explain",
+        "--limit",
+        "2",
+        "--dedupe",
+        "path",
+        "--n-per-doc",
+        "1",
+    ];
+    let default = env.run_json(&query);
+    assert_eq!(default["meta"]["window"], 128);
+    assert_eq!(default["meta"]["refill"]["rounds"], 3);
+    assert_eq!(default["meta"]["refill"]["stop_reason"], "satisfied");
+    assert_eq!(default["hits"][0]["path"], "dominant.md");
+    assert_eq!(default["hits"][1]["path"], "answer.md");
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 3\n",
+    )
+    .unwrap();
+    let inherited = env.run_json(&query);
+    assert_eq!(inherited["meta"]["window"], 54);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 1\n",
+    )
+    .unwrap();
+    let direct = env.run_json(&query);
+    assert_eq!(direct["meta"]["window"], 64);
+    assert_eq!(direct["meta"]["refill"]["rounds"], 6);
+    assert_eq!(direct["meta"]["refill"]["stop_reason"], "satisfied");
+    assert_eq!(direct["hits"], default["hits"]);
+    assert_eq!(
+        direct["meta"]["index_generation"],
+        default["meta"]["index_generation"]
+    );
+
+    env.start_daemon();
+    let daemon = env.run_json(&query);
+    assert_eq!(daemon["hits"], direct["hits"]);
+    assert_eq!(daemon["meta"]["window"], 64);
+    assert_eq!(daemon["meta"]["refill"], direct["meta"]["refill"]);
+
+    let effective = env.run_json(&["config", "effective"]);
+    let field = effective["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "retrieval.post_filter_overscan")
+        .unwrap();
+    assert_eq!(field["value"], 1);
+    assert_eq!(field["source"]["kind"], "project");
+    assert_eq!(field["scope"], "project");
+    assert_eq!(field["unit"], "multiplier");
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[retrieval]\npost_filter_overscan = 1000\n",
+    )
+    .unwrap();
+    let bounded = env.run_json(&query);
+    assert_eq!(bounded["meta"]["window"], 1000);
+    assert_eq!(bounded["meta"]["refill"]["rounds"], 1);
+    assert_eq!(bounded["hits"], direct["hits"]);
+    let uncapped = env.run_json(&[
+        "search",
+        "overscanprobe",
+        "--explain",
+        "--limit",
+        "2",
+        "--path-prefix",
+        "answer",
+    ]);
+    assert_eq!(uncapped["meta"]["window"], 2);
+    assert_eq!(uncapped["hits"][0]["path"], "answer.md");
 }
 
 #[test]
