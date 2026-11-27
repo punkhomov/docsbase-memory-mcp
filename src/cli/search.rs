@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::cli::status::read_project_for_search;
+use crate::cli::status::read_project_for_index;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
@@ -163,7 +163,7 @@ async fn run_in(
     let original = operation.clone();
     let captured = context
         .control(&operation, &activity, move || {
-            let (db, project) = read_project_for_search(&settings)?;
+            let (db, project) = read_project_for_index(&settings)?;
             let config =
                 std::sync::Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
             if db.has_generation_catalog()

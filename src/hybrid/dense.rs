@@ -278,6 +278,7 @@ pub struct DenseIndex {
     generation: i64,
     model_id: String,
     rows: Vec<(u64, Arc<[f32]>)>,
+    reusable: bool,
 }
 
 impl DenseIndex {
@@ -1401,7 +1402,8 @@ impl DenseCache {
         let ready = match &entry.state {
             DenseRows::Ann(_) | DenseRows::Building(_) => true,
             DenseRows::Failed(failed) => failed.failed_at.elapsed() < self.limits.build_backoff,
-            DenseRows::Ready(_) | DenseRows::TooLarge(_) => matches!(lookup, Lookup::Get),
+            DenseRows::Ready(index) => index.reusable && matches!(lookup, Lookup::Get),
+            DenseRows::TooLarge(_) => matches!(lookup, Lookup::Get),
         };
         ready.then(|| entry.state.clone())
     }
@@ -1562,8 +1564,16 @@ impl DenseCache {
             .connect(request.cache_root)?;
         let mut rows = Vec::with_capacity(chunks.len());
         let mut full_coverage = true;
+        let dimension = request
+            .index
+            .catalog_generation()
+            .and_then(|_| model_dim(request.model_id));
         for (chunk_id, hash) in &chunks {
-            match cache.get(request.model_id, hash)? {
+            let vector = match dimension {
+                Some(dimension) => cache.get_for_dimension(request.model_id, hash, dimension)?,
+                None => cache.get(request.model_id, hash)?,
+            };
+            match vector {
                 Some(vector) => rows.push((*chunk_id, Arc::from(vector))),
                 None => full_coverage = false,
             }
@@ -1695,7 +1705,10 @@ impl DenseCache {
             if exact_bytes > self.limits.max_bytes {
                 return Ok(self.stash_too_large(index, model_id, chunks));
             }
-            return Ok(self.stash_ready(index, model_id, rows, Arc::new(chunks)));
+            // Partial catalog coverage still needs resident budget admission,
+            // but the next lookup must be allowed to see repaired vectors.
+            let reusable = full_coverage || index.catalog_generation().is_none();
+            return Ok(self.stash_ready(index, model_id, rows, Arc::new(chunks), reusable));
         }
         if admission == BuildAdmission::WorkerPressure {
             // Keep the fallback transient so lookup retries after the worker retires.
@@ -1733,7 +1746,7 @@ impl DenseCache {
                 activity: self.origin_activity.clone(),
             }))
         } else {
-            Ok(self.stash_ready(index, model_id, rows, Arc::new(chunks)))
+            Ok(self.stash_ready(index, model_id, rows, Arc::new(chunks), true))
         }
     }
 
@@ -1756,11 +1769,13 @@ impl DenseCache {
         model_id: &str,
         rows: Vec<(u64, Arc<[f32]>)>,
         hashes: Arc<Vec<(u64, String)>>,
+        reusable: bool,
     ) -> DenseRows {
         let state = DenseRows::Ready(Arc::new(DenseIndex {
             generation: index.content_revision(),
             model_id: model_id.to_owned(),
             rows,
+            reusable,
         }));
         if let Some(retained) = self.stash(index, model_id, state.clone()) {
             retained
@@ -1815,7 +1830,7 @@ impl DenseCache {
                 // This request can finish from its own rows, but it cannot
                 // replace the newer slot or start an obsolete ANN worker.
                 drop(entries);
-                return self.stash_ready(index, &job.model_id, job.rows, job.hashes);
+                return self.stash_ready(index, &job.model_id, job.rows, job.hashes, true);
             }
             if let Some(entry) = entries.get(&project_id)
                 && entry.index == index
@@ -1837,7 +1852,7 @@ impl DenseCache {
                 }
                 BuildAdmission::ResidentLimit => {
                     drop(entries);
-                    return self.stash_ready(index, &job.model_id, job.rows, job.hashes);
+                    return self.stash_ready(index, &job.model_id, job.rows, job.hashes, true);
                 }
             }
             let Some(pin) = self.store.as_ref().and_then(|store| {
@@ -2706,12 +2721,14 @@ mod tests {
             "model",
             wide_rows(1, 3),
             Arc::new(vec![(0, "new".to_owned())]),
+            true,
         );
         let old = cache.stash_ready(
             legacy_index(1, 1),
             "model",
             wide_rows(1, 3),
             Arc::new(vec![(0, "old".to_owned())]),
+            true,
         );
         assert!(matches!(old, DenseRows::Ready(ref rows) if rows.generation() == 1));
         let entries = cache.lock_entries();
@@ -2740,6 +2757,7 @@ mod tests {
             "model",
             input.rows,
             Arc::new(input.chunks),
+            true,
         );
         let old = cache.resolve_rows(1, 1, "model", small_input());
         assert!(matches!(old, DenseRows::Ready(ref rows) if rows.generation() == 1));

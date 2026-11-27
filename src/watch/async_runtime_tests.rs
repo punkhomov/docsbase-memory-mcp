@@ -303,6 +303,7 @@ fn queue_fixture(
         entered: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
         calls: AtomicUsize::new(0),
+        invalid_on: AtomicUsize::new(0),
     });
     let owner = Arc::get_mut(&mut fixture.shared).unwrap();
     let mut remote = owner.global_config.remote.clone();

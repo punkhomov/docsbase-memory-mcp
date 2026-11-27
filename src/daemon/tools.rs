@@ -162,6 +162,8 @@ fn dense_candidates<Guard>(
         &fresh
     };
     operation.check()?;
+    let stream =
+        |hashes| stream_hashes(context, query.index, model_id, hashes, vector, query.fetch);
     if context
         .ann_search
         .is_some_and(|settings| query.fetch > settings.ef_max())
@@ -176,7 +178,7 @@ fn dense_candidates<Guard>(
             AnnState::Fallback,
             Some("ANN window exceeds the configured ef_max"),
         );
-        return stream_hashes(context, model_id, metadata.chunks(), vector, query.fetch);
+        return stream(metadata.chunks());
     }
     let rows = dense.get_bound_with_metadata_admitted(
         BoundDenseRequest {
@@ -209,17 +211,17 @@ fn dense_candidates<Guard>(
             // not an error.
             degrade(degraded, Degraded::ExactFallback);
             record(AnnState::TooLarge, Some("above the resident cap"));
-            stream_hashes(context, model_id, &hashes, vector, fetch)
+            stream(&hashes)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
             record(AnnState::Building, Some("background build in flight"));
-            stream_hashes(context, model_id, &building.hashes, vector, fetch)
+            stream(&building.hashes)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
             record(AnnState::Fallback, Some("the last build failed"));
-            stream_hashes(context, model_id, &failed.hashes, vector, fetch)
+            stream(&failed.hashes)
         }
     }
 }
@@ -317,6 +319,7 @@ fn scoped_dense<Guard>(
         .vector_source(context.project.id)
         .connect(context.cache)?;
     let mut top = dense::TopK::new(vector, query.fetch)?;
+    let dimension = query.index.catalog_generation().map(|_| vector.len());
     for documents in scope.documents().chunks(repo::BATCH_KEYS) {
         let mut after = (0_i64, 0_u32);
         loop {
@@ -340,13 +343,18 @@ fn scoped_dense<Guard>(
             if let Some((id, _)) = hashes.chunks.last() {
                 after = chunk_id_parts(*id);
             }
-            cache.visit_page(embedder.model_id(), &hashes.chunks, |id, vector| {
-                context.operation.check()?;
-                if let Some(vector) = vector {
-                    top.push(id, vector)?;
-                }
-                Ok(())
-            })?;
+            cache.visit_page(
+                embedder.model_id(),
+                &hashes.chunks,
+                dimension,
+                |id, vector| {
+                    context.operation.check()?;
+                    if let Some(vector) = vector {
+                        top.push(id, vector)?;
+                    }
+                    Ok(())
+                },
+            )?;
             if !hashes.more {
                 break;
             }
@@ -364,11 +372,12 @@ fn stream_exact(
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
     let metadata = capture_dense(source, context.project, index)?;
-    stream_hashes(context, model_id, metadata.chunks(), vector, fetch)
+    stream_hashes(context, index, model_id, metadata.chunks(), vector, fetch)
 }
 
 fn stream_hashes(
     context: &SearchContext<'_>,
+    index: ProjectIndex,
     model_id: &str,
     hashes: &[(u64, String)],
     vector: &[f32],
@@ -378,13 +387,18 @@ fn stream_hashes(
         .dense
         .vector_source(context.project.id)
         .connect(context.cache)?;
-    let rows = hashes
-        .iter()
-        .filter_map(move |(chunk_id, hash)| match cache.get(model_id, hash) {
+    let dimension = index.catalog_generation().map(|_| vector.len());
+    let rows = hashes.iter().filter_map(move |(chunk_id, hash)| {
+        let value = match dimension {
+            Some(dimension) => cache.get_for_dimension(model_id, hash, dimension),
+            None => cache.get(model_id, hash),
+        };
+        match value {
             Ok(Some(vector)) => Some(Ok((*chunk_id, vector))),
             Ok(None) => None,
             Err(err) => Some(Err(err)),
-        });
+        }
+    });
     dense::top_k_iter(vector, rows, fetch)
 }
 
@@ -1970,6 +1984,47 @@ pub fn status(
         coverage,
         dense,
     )
+}
+
+pub(crate) fn stopped_catalog_status(db: &Db) -> Result<Value> {
+    use crate::store::project_index::{CatalogProjectInfo, catalog_project_info};
+
+    let mut entries = Vec::new();
+    let empty = repo::ProjectCounts { docs: 0, chunks: 0 };
+    for mut registered in registry::list_projects(db)? {
+        let selected = catalog_project_info(db, &registered, |_, _, _, _| ());
+        let (project, counts, revision, unavailable) = match selected {
+            Ok(Some(CatalogProjectInfo {
+                project,
+                counts,
+                index,
+                details: (),
+            })) => (project, counts, index.content_revision(), None),
+            Ok(None) => {
+                registered.status = ProjectStatus::NotIndexed;
+                (registered, empty, 0, None)
+            }
+            Err(error) if lifecycle::is_lease_conflict(&error) => {
+                registered.status = ProjectStatus::Indexing;
+                (registered, empty, 0, None)
+            }
+            Err(error @ Error::Project { .. }) => {
+                registered.status = ProjectStatus::Error;
+                (registered, empty, 0, Some(error.to_string()))
+            }
+            Err(error) => return Err(error),
+        };
+        let mut entry = project_entry_with_counts(db, &project, counts, Some(false), true)?;
+        entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
+        entry["index_generation"] = json!(revision);
+        entry["embed_coverage"] = Value::Null;
+        entry["ann"] = ann_state(None, project.id, false);
+        if let Some(error) = unavailable {
+            entry["last_error"] = json!(error);
+        }
+        entries.push(entry);
+    }
+    status_document(db, &entries, &Stats::default(), 0, None, None)
 }
 
 // The caller filters identities before any project/runtime/coverage callback.

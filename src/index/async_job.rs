@@ -48,6 +48,7 @@ fn acquire_writer_lease(cache: &std::path::Path, project: i64) -> Result<Exclusi
     })
 }
 
+pub(crate) mod catalog_backfill;
 pub(crate) mod catalog_sync;
 pub(crate) mod catalog_watch;
 
@@ -81,6 +82,7 @@ pub(crate) struct JobContext {
 
 // Explicit native/data before guards: also preserves ordering if terminal publication unwinds.
 pub(crate) struct IndexState {
+    catalog_backfill: Option<catalog_backfill::CatalogBackfill>,
     catalog_job: Option<catalog_sync::CatalogJob>,
     catalog_watch: Option<catalog_watch::CatalogWatch>,
     index: Option<IndexHandle>,
@@ -112,6 +114,7 @@ pub(crate) struct IndexState {
 impl IndexState {
     pub(crate) fn empty(account: Arc<PayloadPermit>) -> Self {
         Self {
+            catalog_backfill: None,
             catalog_job: None,
             catalog_watch: None,
             index: None,
@@ -460,7 +463,7 @@ impl IndexState {
         if let Some(job) = &self.catalog_job {
             return job.terminal(self.error.as_deref());
         }
-        if self.catalog_watch.is_some() {
+        if self.catalog_watch.is_some() || self.catalog_backfill.is_some() {
             return Ok(serde_json::Value::Null);
         }
         let Some(context) = &self.context else {
@@ -859,6 +862,9 @@ async fn embed_batches(
         let call = operation.clone();
         let (next, packet) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
+                if let Some(job) = &mut state.catalog_backfill {
+                    return job.batch_packet(&call, state.account.clone());
+                }
                 if let Some(job) = &mut state.catalog_job {
                     return job.batch_packet(&call, state.account.clone());
                 }
@@ -893,23 +899,24 @@ async fn embed_batches(
         let (next, written) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
                 call.check()?;
-                if let Some(job) = &mut state.catalog_watch {
-                    let batch = packet
-                        .0
-                        .as_ref()
-                        .ok_or_else(|| Error::internal("embedding batch absent"))?;
+                let batch = packet
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::internal("embedding batch absent"))?;
+                if let Some(job) = &state.catalog_job {
+                    return job.store(batch, &vectors);
+                }
+                if state.catalog_backfill.is_some() || state.catalog_watch.is_some() {
                     let account = state
                         .account
                         .as_deref()
-                        .ok_or_else(|| Error::internal("watcher payload account missing"))?;
-                    return job.store(batch, &vectors, &call, account);
-                }
-                if let Some(job) = &state.catalog_job {
-                    let batch = packet
-                        .0
-                        .as_ref()
-                        .ok_or_else(|| Error::internal("embedding batch absent"))?;
-                    return job.store(batch, &vectors);
+                        .ok_or_else(|| Error::internal("catalog payload account missing"))?;
+                    if let Some(job) = &mut state.catalog_backfill {
+                        return job.store(batch, &vectors, &call, account);
+                    }
+                    if let Some(job) = &mut state.catalog_watch {
+                        return job.store(batch, &vectors, &call, account);
+                    }
                 }
                 let context = state
                     .context
@@ -928,10 +935,7 @@ async fn embed_batches(
                         .as_ref()
                         .ok_or_else(|| Error::internal("embedding stage absent"))?
                         .model_id(),
-                    packet
-                        .0
-                        .as_ref()
-                        .ok_or_else(|| Error::internal("embedding batch absent"))?,
+                    batch,
                     &vectors,
                     state.dimension,
                     crate::vector_cache::WriteCapacity::AllowPinnedOverflow,

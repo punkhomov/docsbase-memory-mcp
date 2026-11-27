@@ -212,6 +212,118 @@ fn configured_direct_catalog_index_preserves_the_head_on_failure() {
     assert_eq!(calls.synchronous.load(Ordering::SeqCst), 0);
 }
 
+#[test]
+#[cfg(unix)]
+fn stopped_catalog_index_preserves_vectors_of_a_legacy_head_under_pressure() {
+    if child(
+        "stopped_catalog_index_preserves_vectors_of_a_legacy_head_under_pressure",
+        "rrf",
+    )
+    .is_some()
+    {
+        return;
+    }
+    let cache = crate::config::paths::cache_dir().unwrap();
+    let config = crate::config::paths::config_dir().unwrap();
+    let target = std::env::current_dir().unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "config_version = 2\n[vector_cache]\nmax_entries = 2\n[remote]\nembed_batch_texts = 1\n",
+    )
+    .unwrap();
+    let settings = crate::store::settings::standalone().unwrap();
+    let (addr, _, server) = http_fixture(3);
+    let index = || super::index::run_with_settings(Some(&target), &settings);
+    index().unwrap();
+
+    let (id, key) = adopt_legacy_index_for_test(&cache);
+    std::fs::write(target.join("guide.md"), "replacementfirst").unwrap();
+    std::fs::write(target.join("other.md"), "replacementsecond").unwrap();
+    std::fs::write(target.join("third.md"), "replacementthird").unwrap();
+    let failure = index().unwrap_err();
+    let connection = std::net::TcpStream::connect(addr);
+    drop(connection);
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "the attempt must reach the capacity boundary"
+    );
+    assert!(
+        matches!(
+            failure.downcast_ref::<crate::error::Error>(),
+            Some(crate::error::Error::Admission { .. })
+        ),
+        "{failure}"
+    );
+    let registry = rusqlite::Connection::open(cache.join(crate::store::DB_FILE)).unwrap();
+    let active: i64 = registry
+        .query_row(
+            "SELECT active_id FROM project_generation_head WHERE project_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active, 1);
+    let vectors =
+        rusqlite::Connection::open(cache.join(crate::vector_cache::VECTOR_DB_FILE)).unwrap();
+    let retained: i64 = vectors.query_row(
+        "SELECT count(*) FROM vector_cache WHERE model_id = 'openrouter/fixture@d3@l2' AND chunk_hash = ?1",
+        [key],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        retained, 1,
+        "a failed staged rebuild must preserve the selected legacy vector"
+    );
+}
+
+#[cfg(unix)]
+fn adopt_legacy_index_for_test(cache: &std::path::Path) -> (i64, String) {
+    let mut registry = crate::store::Db::open(cache).unwrap();
+    let project = crate::daemon::registry::list_projects(&registry)
+        .unwrap()
+        .remove(0);
+    let chunks = crate::store::repo::chunk_texts(registry.connection(), project.id).unwrap();
+    assert_eq!(chunks.len(), 1);
+    let key = crate::vector_cache::chunk_hash(&chunks[0]);
+    std::fs::write(
+        cache
+            .join("projects")
+            .join(project.id.to_string())
+            .join(".legacy-generation.lock"),
+        [],
+    )
+    .unwrap();
+    let tx = registry.begin_write().unwrap();
+    tx.execute_batch(include_str!("../store/generation_catalog/schema.sql"))
+        .unwrap();
+    tx.execute(
+        "INSERT INTO generation_store VALUES (1, 1, ?1)",
+        [[11_u8; 16].as_slice()],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO project_generations (id, project_id, layout, phase, base_revision, reserved_disk_bytes)
+         VALUES (1, ?1, 'legacy', 'active', 0, 0)",
+        [project.id]
+    ).unwrap();
+    tx.execute(
+        "INSERT INTO project_generation_head VALUES (?1, 1, 'active')",
+        [project.id],
+    )
+    .unwrap();
+    tx.pragma_update(
+        None,
+        "user_version",
+        crate::store::GENERATION_SCHEMA_VERSION,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    (project.id, key)
+}
+
 #[cfg(unix)]
 fn assert_website_rejects_direct_hybrid_before_registration(
     cache: &std::path::Path,

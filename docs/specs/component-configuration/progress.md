@@ -2035,3 +2035,28 @@ the content revision, a no-op keeps it, and identical text reuses its vector.
 
 minor (deferred): the route fixture resubmits the batch directly. Native
 watcher delivery and coalescing remain part of Shared hybrid acceptance.
+
+## 2026-11-27 — CF11c/CF11d, configured Shared hybrid on v5
+
+Task CF11c/CF11d configured Shared hybrid: complete (main entry-point
+acceptance, fresh task and integrated reviews, and fix review).
+
+Ruling: a configured v2 Shared instance on an existing Unix v5 registry
+executes Index, detached Sync, native watcher edits and a dense-only query
+with a hermetic OpenRouter transport. Sync reuses the existing vector.
+Startup restores a watcher after installing the async job owner. A cold
+recipe change, including disabling embeddings, requires an explicit Index;
+a failed Index cannot make later registration accept an incompatible seal.
+
+Ruling: open-time refill coalesces on the project and obeys existing logical
+admission and byte limits. It checks the runtime and selected pair for
+capture and storage. The fixture holds inference while another open and a
+native watcher run, then confirms the late vector is discarded. Cache-only
+repair restores dense and scoped hits without a new content revision or Sync
+row. The exact resident path keeps its byte admission even with partial
+coverage. Stopped Index preserves an active legacy layout's usable vector
+under pressure. Stopped status and list read the selected v5 pair.
+
+Ruling: Rust 1.100.0 Linux cli-full (including unchanged search gates), lean
+offline, all-target and opt-in Clippy, formatting, vendor integrity, Cargo age
+and CI observer checks passed locally. Native PR checks follow this commit.

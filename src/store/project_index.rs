@@ -131,15 +131,49 @@ pub(crate) fn require_catalog_embedding(
     local: Option<&LocalMetadata>,
     model_id: &str,
 ) -> Result<()> {
+    require_catalog_recipe(
+        local,
+        Some(crate::vector_cache::EmbeddingRecipe::for_model(model_id)),
+    )
+}
+
+fn require_catalog_recipe(
+    local: Option<&LocalMetadata>,
+    recipe: Option<crate::vector_cache::EmbeddingRecipe>,
+) -> Result<()> {
     // A migrated legacy head still uses the v4 content-addressed cache
     // contract. A local head must prove the recipe selected at publication.
     if let Some(local) = local
-        && local.embedding_recipe != Some(crate::vector_cache::EmbeddingRecipe::for_model(model_id))
+        && local.embedding_recipe != recipe
     {
         return Err(Error::Project {
-            message: "published embedding recipe does not match the configured model".into(),
-            instruction: Some("publish a generation built with the current embedding model".into()),
+            message: "published embedding recipe does not match the configured settings".into(),
+            instruction: Some(
+                "run index to publish a generation for the current embedding settings".into(),
+            ),
         });
+    }
+    Ok(())
+}
+
+/// An unindexed project or a legacy head has no local embedding seal.
+pub(crate) fn require_selected_catalog_embedding<R>(
+    registry: R,
+    project: &Project,
+    model: Option<&str>,
+) -> Result<()>
+where
+    R: Deref<Target = Db>,
+{
+    let head = generation_catalog::active_head(registry.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?;
+    if head.is_some_and(|head| matches!(head.layout, Layout::Local { .. })) {
+        with_catalog_pair(registry, project, |_, local, _| {
+            require_catalog_recipe(
+                local.as_ref(),
+                model.map(crate::vector_cache::EmbeddingRecipe::for_model),
+            )
+        })?;
     }
     Ok(())
 }
@@ -190,8 +224,7 @@ where
         Some(Layout::Legacy) => Ok(true),
         Some(Layout::Local { .. }) => with_catalog_pair(registry, project, |_, local, _| {
             Ok(local.is_none_or(|local| {
-                local.index_recipe != recipe
-                    || embedding_recipe.is_some_and(|wanted| local.embedding_recipe != Some(wanted))
+                local.index_recipe != recipe || local.embedding_recipe != embedding_recipe
             }))
         }),
     }

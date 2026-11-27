@@ -1490,6 +1490,10 @@ impl Watchers {
         }
     }
 
+    pub(crate) const fn enabled(&self) -> bool {
+        !self.disabled
+    }
+
     pub(crate) fn activate_async(&self, shared: Weak<crate::daemon::server::Shared>) -> Result<()> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|error| Error::internal_with_source("watcher runtime owner absent", error))?;

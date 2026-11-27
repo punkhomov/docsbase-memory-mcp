@@ -50,6 +50,10 @@ impl EmbeddingRecipe {
 
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
+const SELECT_VECTOR: &str = "SELECT dim, vector FROM vector_cache
+    WHERE model_id = ?1 AND chunk_hash = ?2
+      AND (?3 IS NULL OR (dim = ?3 AND typeof(vector) = 'blob'
+                          AND length(vector) = 4 * ?3))";
 
 const COUNT_PRESENT_SELECT: &str =
     "SELECT COUNT(*) FROM vector_cache WHERE model_id = ?1 AND chunk_hash IN (";
@@ -207,6 +211,32 @@ impl VectorCache {
         self.get_using(model_id, chunk_hash, Some(dimension))
     }
 
+    /// Check an existing vector without reading it into an owned buffer or
+    /// making an automatic backfill scan change eviction order.
+    pub(crate) fn has_valid_vector(
+        &self,
+        model_id: &str,
+        hash: &str,
+        dimension: usize,
+    ) -> Result<bool> {
+        let width =
+            i64::try_from(dimension).map_err(|_| Error::internal("vector dimension overflow"))?;
+        self.conn
+            .prepare_cached(SELECT_VECTOR)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![model_id, hash, width], |row| {
+                        Ok(row
+                            .get_ref("vector")?
+                            .as_blob()
+                            .is_ok_and(|bytes| valid_vector_blob(dimension, bytes)))
+                    })
+                    .optional()
+            })
+            .map(|hit| hit.unwrap_or(false))
+            .map_err(|err| Error::internal_with_source("check vector for backfill", err))
+    }
+
     fn get_using(
         &mut self,
         model_id: &str,
@@ -250,11 +280,16 @@ impl VectorCache {
         &mut self,
         model_id: &str,
         hashes: &[(u64, String)],
+        expected_dimension: Option<usize>,
         mut visitor: impl FnMut(u64, Option<&[f32]>) -> Result<()>,
     ) -> Result<()> {
         if hashes.is_empty() {
             return Ok(());
         }
+        let width = expected_dimension
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| Error::internal("vector dimension overflow"))?;
         // Take the write reservation before reading to avoid WAL read->write
         // upgrade races between concurrent page visitors/embedding writers.
         let tx = self
@@ -263,9 +298,7 @@ impl VectorCache {
             .map_err(|err| Error::internal_with_source("begin vector access page", err))?;
         {
             let mut select = tx
-                .prepare_cached(
-                    "SELECT dim,vector FROM vector_cache WHERE model_id=?1 AND chunk_hash=?2",
-                )
+                .prepare_cached(SELECT_VECTOR)
                 .map_err(|err| Error::internal_with_source("prepare vector page read", err))?;
             let mut touch = tx
                 .prepare_cached(
@@ -274,7 +307,7 @@ impl VectorCache {
                 .map_err(|err| Error::internal_with_source("prepare vector page touch", err))?;
             for (id, hash) in hashes {
                 let row = select
-                    .query_row(params![model_id, hash], |row| {
+                    .query_row(params![model_id, hash, width], |row| {
                         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
                     })
                     .optional()
@@ -283,6 +316,10 @@ impl VectorCache {
                     visitor(*id, None)?;
                     continue;
                 };
+                if expected_dimension.is_some_and(|expected| !valid_vector_blob(expected, &bytes)) {
+                    visitor(*id, None)?;
+                    continue;
+                }
                 let dim = usize::try_from(dim)
                     .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
                 let vector = decode_vector(dim, &bytes)?;
@@ -658,10 +695,7 @@ fn lookup(
         .map_err(|_| Error::internal("vector dimension overflow"))?;
     let row = conn
         .query_row(
-            "SELECT dim, vector FROM vector_cache
-                 WHERE model_id = ?1 AND chunk_hash = ?2
-                   AND (?3 IS NULL OR (dim = ?3 AND typeof(vector) = 'blob'
-                                       AND length(vector) = 4 * ?3))",
+            SELECT_VECTOR,
             params![model_id, chunk_hash, expected_width],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )

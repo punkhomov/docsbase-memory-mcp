@@ -409,7 +409,15 @@ impl CatalogJob {
     ) -> Result<Option<String>> {
         let context = &self.context;
         let Some(local) = local else {
-            return Ok(context.active_model.clone());
+            // A legacy head resolves its vectors with the configured cache
+            // key. A stopped Index has no retained runtime to supply it.
+            return Ok(Some(
+                context
+                    .active_model
+                    .as_deref()
+                    .unwrap_or(requested)
+                    .to_owned(),
+            ));
         };
         let Some(recipe) = local.embedding_recipe else {
             return Ok(None);

@@ -39,6 +39,7 @@ pub(crate) fn apply_lexical_batch<A>(
     with_catalog_pair_using(registry, project, PairAccess::Write, |_, local, index| {
         drop(admit()?);
         let mut local = checked_local(local, config)?;
+        require_watch_recipe(&local, None)?;
         let tantivy = local.tantivy_dir()?;
         let (mut plan, scope) = capture_batch(&local.db, project, config, input, capture)?;
         let _admission = admit()?;
