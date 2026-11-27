@@ -233,7 +233,7 @@ impl IndexHandle {
                     // cache, so recreate it and signal the caller to
                     // re-index from SQLite (T27).
                     drop(existing);
-                    create_fresh(dir, &marker)?;
+                    create_fresh(dir, &marker, writer_settings)?;
                     recreated = true;
                     open_index(dir)?
                 }
@@ -245,7 +245,7 @@ impl IndexHandle {
                         "warning: index {} is unreadable ({err}); recreating",
                         dir.display()
                     );
-                    create_fresh(dir, &marker)?;
+                    create_fresh(dir, &marker, writer_settings)?;
                     recreated = true;
                     open_index(dir)?
                 }
@@ -848,27 +848,29 @@ fn remove_dir_all_retry(
 
 /// Removes a stale index directory and creates a current-schema one with the
 /// rebuild marker already in place.
-fn create_fresh(dir: &Path, marker: &Path) -> Result<()> {
+fn create_fresh(
+    dir: &Path,
+    marker: &Path,
+    settings: super::writer_settings::IndexWriterSettings,
+) -> Result<()> {
     // Windows: a concurrent reader may still hold mmaps, so `remove_dir_all`
     // fails with `AccessDenied` until it drops (searches are short). Bounded
     // retries give readers time instead of failing the batch outright.
-    const REMOVE_ATTEMPTS: u32 = 20;
-    const REMOVE_PAUSE: Duration = Duration::from_millis(100);
+    let (attempts, pause) = settings.removal();
     // Before the directory goes away: the reader must keep seeing "needs to be
     // rebuilt" while the heal runs, not "index is missing".
     write_healing_marker(dir);
-    remove_dir_all_retry(dir, REMOVE_ATTEMPTS, REMOVE_PAUSE, &|dir| {
-        std::fs::remove_dir_all(dir)
-    })
-    .map_err(|err| {
-        Error::internal_with_source(
-            format!(
-                "remove stale index {} after {REMOVE_ATTEMPTS} attempts: {err}",
-                dir.display()
-            ),
-            err,
-        )
-    })?;
+    remove_dir_all_retry(dir, attempts, pause, &|dir| std::fs::remove_dir_all(dir)).map_err(
+        |err| {
+            Error::internal_with_source(
+                format!(
+                    "remove stale index {} after {attempts} attempts: {err}",
+                    dir.display()
+                ),
+                err,
+            )
+        },
+    )?;
     std::fs::create_dir_all(dir).map_err(|err| {
         Error::internal_with_source(format!("recreate index dir {}: {err}", dir.display()), err)
     })?;
@@ -1208,6 +1210,43 @@ mod tests {
             .expect_err("three failures against a budget of three must surface the error");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(script.calls.get(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stale_index_recovery_uses_the_resolved_removal_budget() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join("index");
+        std::fs::create_dir(&index).unwrap();
+        let metadata = index.join("meta.json");
+        std::fs::write(&metadata, "interrupted index").unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&metadata)
+            .unwrap();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "config_version = 2\n[index.writer]\nremove_attempts = 2\nremove_retry_delay_ms = 0\n",
+        )
+        .unwrap();
+        let config = crate::config::Config::global_from(temp.path()).unwrap();
+
+        let error = IndexHandle::open_or_create_with_settings(&index, config.index_writer)
+            .err()
+            .expect("native reader sharing mode excludes removal");
+        assert!(error.to_string().contains("after 2 attempts"), "{error}");
+        assert!(healing_marker_present(&index));
+        assert!(metadata.exists());
+
+        drop(reader);
+        let recovered =
+            IndexHandle::open_or_create_with_settings(&index, config.index_writer).unwrap();
+        assert!(index.join(REBUILD_MARKER).exists());
+        drop(recovered);
     }
 
     #[test]

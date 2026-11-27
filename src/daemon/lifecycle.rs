@@ -402,10 +402,20 @@ pub(super) fn run_with_admission<T: Send>(
 /// Returns [`Error::Internal`] when the stop request cannot be delivered or
 /// the daemon does not exit within the configured stop timeout.
 pub fn stop_daemon(cache: &Path) -> Result<()> {
-    stop_daemon_with_limit(cache, None)
+    stop_daemon_with_limit(cache, None, None)
 }
 
-pub(crate) fn stop_daemon_with_limit(cache: &Path, limit: Option<Instant>) -> Result<()> {
+pub(crate) fn recovery_settings() -> DaemonSettings {
+    // Recovery is available even when the normal configuration cannot load.
+    crate::config::Config::global()
+        .map_or_else(|_| DaemonSpec::DEFAULTS.clone(), |config| config.daemon)
+}
+
+pub(crate) fn stop_daemon_with_limit(
+    cache: &Path,
+    limit: Option<Instant>,
+    settings: Option<&DaemonSettings>,
+) -> Result<()> {
     let Some(state) = read_state(cache)? else {
         return Ok(());
     };
@@ -413,10 +423,12 @@ pub(crate) fn stop_daemon_with_limit(cache: &Path, limit: Option<Instant>) -> Re
         cleanup_stale(cache)?;
         return Ok(());
     }
-    // Stop must remain available for recovery when configuration cannot load.
-    let settings = match crate::config::Config::global() {
-        Ok(config) => config.daemon,
-        Err(_) => DaemonSpec::DEFAULTS.clone(),
+    let resolved;
+    let settings = if let Some(settings) = settings {
+        settings
+    } else {
+        resolved = recovery_settings();
+        &resolved
     };
     let timeout = Duration::from_millis(settings.stop_timeout_ms);
     let poll = Duration::from_millis(settings.poll_interval_ms);

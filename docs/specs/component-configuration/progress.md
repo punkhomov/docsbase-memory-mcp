@@ -2493,3 +2493,15 @@ Task CF14-portable-source-fixture: complete (construct the expected config
 source with native path components). The first Windows run reached the
 bootstrap provenance regression and found a mixed-separator test literal.
 The actual CLI provenance used the native path.
+
+## 2026-11-27 — CF14, final runtime owners
+
+Task CF14 retry policies: complete (I21/I48 adopt resolved policies end to
+end, and inventory identifies remaining trusted bounds and model contention).
+Ruling: launcher operations capture a single deadline; index recovery
+retains its existing lease, marker and compatibility behavior. Merged
+#212 passed all four native checks. This PR adds the remaining consumer
+and portable admission evidence for the #78 acceptance checklist.
+minor (deferred): a full Unix listener queue can block the existing native
+Stop connect. The documented deadline covers Stop read/write waits and
+retry sleeps. Making connect nonblocking is an IPC transport change.

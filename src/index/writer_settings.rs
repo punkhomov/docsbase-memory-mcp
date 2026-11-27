@@ -1,4 +1,6 @@
-//! Owner of the native Tantivy writer's arena and thread policy.
+//! Owner of the native Tantivy writer and stale directory recovery policy.
+
+use std::time::Duration;
 
 use tantivy::indexer::IndexWriterOptions;
 
@@ -15,6 +17,8 @@ const MIN_ARENA_BYTES: usize = 15_000_000;
 const MAX_ARENA_BYTES_EXCLUSIVE: usize = u32::MAX as usize - 1_000_000;
 const MAX_THREADS: usize = 8;
 const DEFAULT_STAGING_DISK_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_REMOVE_ATTEMPTS: u32 = 1000;
+const MAX_REMOVE_WAIT_MS: u64 = 10_000;
 
 /// Validated settings for a single lexical writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +27,8 @@ pub struct IndexWriterSettings {
     worker_threads: usize,
     merge_threads: usize,
     staging_disk_bytes: u64,
+    remove_attempts: u32,
+    remove_retry_delay_ms: u64,
 }
 
 impl IndexWriterSettings {
@@ -49,7 +55,7 @@ impl IndexWriterSettings {
             heap_bytes,
             worker_threads,
             merge_threads,
-            staging_disk_bytes: DEFAULT_STAGING_DISK_BYTES,
+            ..Self::owner_defaults()
         })
     }
 
@@ -60,11 +66,20 @@ impl IndexWriterSettings {
             worker_threads: 1,
             merge_threads: 4,
             staging_disk_bytes: DEFAULT_STAGING_DISK_BYTES,
+            remove_attempts: 20,
+            remove_retry_delay_ms: 100,
         }
     }
 
     pub(crate) const fn staging_disk_bytes(self) -> u64 {
         self.staging_disk_bytes
+    }
+
+    pub(super) const fn removal(self) -> (u32, Duration) {
+        (
+            self.remove_attempts,
+            Duration::from_millis(self.remove_retry_delay_ms),
+        )
     }
 
     pub(crate) fn options(self) -> IndexWriterOptions {
@@ -88,6 +103,16 @@ impl IndexWriterSettings {
             self.staging_disk_bytes.into(),
             None,
         )?;
+        view.push(
+            "index.writer.remove_attempts",
+            self.remove_attempts.into(),
+            None,
+        )?;
+        view.push(
+            "index.writer.remove_retry_delay_ms",
+            self.remove_retry_delay_ms.into(),
+            None,
+        )?;
         Ok(())
     }
 }
@@ -99,6 +124,8 @@ pub(crate) struct WriterPatch {
     worker_threads: Option<usize>,
     merge_threads: Option<usize>,
     staging_disk_bytes: Option<u64>,
+    remove_attempts: Option<u32>,
+    remove_retry_delay_ms: Option<u64>,
 }
 
 pub(crate) struct WriterSpec;
@@ -116,6 +143,12 @@ impl SettingsSpec for WriterSpec {
             "index.writer.staging_disk_bytes",
             Scope::Daemon,
             Unit::Bytes,
+        ),
+        FieldSpec::new("index.writer.remove_attempts", Scope::Daemon, Unit::Count),
+        FieldSpec::new(
+            "index.writer.remove_retry_delay_ms",
+            Scope::Daemon,
+            Unit::Milliseconds,
         ),
     ];
 
@@ -154,6 +187,16 @@ impl SettingsSpec for WriterSpec {
         if patch.staging_disk_bytes.is_some() {
             origins.set("index.writer.staging_disk_bytes", source)?;
         }
+        candidate.remove_attempts = patch.remove_attempts.unwrap_or(settings.remove_attempts);
+        candidate.remove_retry_delay_ms = patch
+            .remove_retry_delay_ms
+            .unwrap_or(settings.remove_retry_delay_ms);
+        if patch.remove_attempts.is_some() {
+            origins.set("index.writer.remove_attempts", source)?;
+        }
+        if patch.remove_retry_delay_ms.is_some() {
+            origins.set("index.writer.remove_retry_delay_ms", source)?;
+        }
         *settings = candidate;
         Ok(())
     }
@@ -164,6 +207,21 @@ impl SettingsSpec for WriterSpec {
         {
             return Err(Error::Admission {
                 message: "index.writer.staging_disk_bytes must cover both ownership records and fit a SQLite integer".into(),
+            });
+        }
+        if !(1..=MAX_REMOVE_ATTEMPTS).contains(&settings.remove_attempts) {
+            return Err(Error::Admission {
+                message: format!(
+                    "index.writer.remove_attempts must be between 1 and {MAX_REMOVE_ATTEMPTS}"
+                ),
+            });
+        }
+        let waits = u64::from(settings.remove_attempts - 1);
+        if settings.remove_retry_delay_ms.saturating_mul(waits) > MAX_REMOVE_WAIT_MS {
+            return Err(Error::Admission {
+                message: format!(
+                    "index.writer.remove_retry_delay_ms must keep the total wait within {MAX_REMOVE_WAIT_MS} ms"
+                ),
             });
         }
         Ok(())

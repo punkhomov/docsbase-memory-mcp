@@ -167,6 +167,36 @@ fn stage_launcher(source: &Path, target: &Path) {
 }
 
 #[test]
+fn install_admission_uses_the_resolved_timeout() {
+    use docsbase_memory::daemon::admission::Lease;
+    use docsbase_memory::ipc::protocol;
+    use docsbase_memory::store::migrations::SCHEMA_VERSION;
+
+    let env = Env::new(&[]);
+    let cache = env.cache().canonicalize().unwrap();
+    let _lease = Lease::acquire(&cache, &protocol::build_id(), SCHEMA_VERSION).unwrap();
+    let config = env.cache().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "config_version = 2\n[daemon]\ninstall_timeout_ms = 100\ninstall_retry_delay_ms = 25\n",
+    )
+    .unwrap();
+    let result = assert_cmd::Command::from_std(env.cmd())
+        .arg("install")
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+    assert!(
+        stderr.contains("daemon did not release the admission lease"),
+        "{stderr}"
+    );
+    assert!(!env.manifest().exists());
+    assert!(!env.binary().exists());
+}
+
+#[test]
 fn launcher_publication_preserves_the_previous_file() {
     let root = TempDir::new().expect("launcher files");
     let source = root.path().join("source");

@@ -89,6 +89,10 @@ pub struct DaemonSettings {
     pub start_timeout_ms: u64,
     /// Stop command budget for exchanging the request and waiting for exit.
     pub stop_timeout_ms: u64,
+    /// Installer wait for daemon exit and the exclusive admission lease.
+    pub install_timeout_ms: u64,
+    /// Delay before an installer retries a busy admission lease.
+    pub install_retry_delay_ms: u64,
     /// Unix stop may return after observing an absent socket for this long.
     pub no_listener_timeout_ms: u64,
     /// Owner policy: `poll_interval_ms`.
@@ -200,6 +204,10 @@ pub struct DaemonPatch {
     pub start_timeout_ms: Option<u64>,
     /// Explicit stop operation timeout.
     pub stop_timeout_ms: Option<u64>,
+    /// Explicit installer wait for the exclusive admission lease.
+    pub install_timeout_ms: Option<u64>,
+    /// Explicit installer retry delay for a busy admission lease.
+    pub install_retry_delay_ms: Option<u64>,
     /// Explicit Unix stop timeout for an absent listener.
     pub no_listener_timeout_ms: Option<u64>,
     /// Explicit `poll_interval_ms` override.
@@ -234,6 +242,8 @@ impl DaemonSpec {
         control_timeout_ms: 2000,
         start_timeout_ms: 10000,
         stop_timeout_ms: 15000,
+        install_timeout_ms: 600_000,
+        install_retry_delay_ms: 100,
         no_listener_timeout_ms: 2000,
         poll_interval_ms: 50,
         janitor_interval_ms: 500,
@@ -346,6 +356,11 @@ impl DaemonSpec {
             ("daemon.control_timeout_ms", settings.control_timeout_ms),
             ("daemon.start_timeout_ms", settings.start_timeout_ms),
             ("daemon.stop_timeout_ms", settings.stop_timeout_ms),
+            ("daemon.install_timeout_ms", settings.install_timeout_ms),
+            (
+                "daemon.install_retry_delay_ms",
+                settings.install_retry_delay_ms,
+            ),
             ("daemon.poll_interval_ms", settings.poll_interval_ms),
             ("daemon.janitor_interval_ms", settings.janitor_interval_ms),
             ("daemon.reply_drain_ms", settings.reply_drain_ms),
@@ -392,6 +407,18 @@ impl SettingsSpec for DaemonSpec {
         FieldSpec::new("daemon.stop_timeout_ms", Scope::Daemon, Unit::Milliseconds)
             .outside_daemon(),
         FieldSpec::new(
+            "daemon.install_timeout_ms",
+            Scope::Daemon,
+            Unit::Milliseconds,
+        )
+        .outside_daemon(),
+        FieldSpec::new(
+            "daemon.install_retry_delay_ms",
+            Scope::Daemon,
+            Unit::Milliseconds,
+        )
+        .outside_daemon(),
+        FieldSpec::new(
             "daemon.no_listener_timeout_ms",
             Scope::Daemon,
             Unit::Milliseconds,
@@ -419,18 +446,7 @@ impl SettingsSpec for DaemonSpec {
         source: &SourceId,
         origins: &mut Provenance,
     ) -> Result<()> {
-        if let Some(value) = patch.background_active {
-            settings.background_active = value;
-            origins.set("daemon.background_active", source)?;
-        }
-        if let Some(value) = patch.background_pending {
-            settings.background_pending = value;
-            origins.set("daemon.background_pending", source)?;
-        }
-        if let Some(value) = patch.helper_active {
-            settings.helper_active = value;
-            origins.set("daemon.helper_active", source)?;
-        }
+        overlay_background_admission(settings, &patch, source, origins)?;
         if let Some(profile) = patch.profile {
             profile.validate()?;
             settings.profile = profile;
@@ -494,6 +510,14 @@ impl SettingsSpec for DaemonSpec {
         if let Some(value) = patch.stop_timeout_ms {
             settings.stop_timeout_ms = value;
             origins.set("daemon.stop_timeout_ms", source)?;
+        }
+        if let Some(value) = patch.install_timeout_ms {
+            settings.install_timeout_ms = value;
+            origins.set("daemon.install_timeout_ms", source)?;
+        }
+        if let Some(value) = patch.install_retry_delay_ms {
+            settings.install_retry_delay_ms = value;
+            origins.set("daemon.install_retry_delay_ms", source)?;
         }
         if let Some(value) = patch.no_listener_timeout_ms {
             settings.no_listener_timeout_ms = value;
@@ -566,40 +590,7 @@ impl SettingsSpec for DaemonSpec {
         {
             return Err(invalid("daemon.max_sessions allocation size overflow"));
         }
-        for (key, ms, zero_allowed) in [
-            ("daemon.idle_grace_ms", settings.idle_grace_ms, true),
-            (
-                "daemon.control_timeout_ms",
-                settings.control_timeout_ms,
-                false,
-            ),
-            ("daemon.start_timeout_ms", settings.start_timeout_ms, false),
-            ("daemon.stop_timeout_ms", settings.stop_timeout_ms, false),
-            (
-                "daemon.no_listener_timeout_ms",
-                settings.no_listener_timeout_ms,
-                false,
-            ),
-            ("daemon.poll_interval_ms", settings.poll_interval_ms, false),
-            (
-                "daemon.janitor_interval_ms",
-                settings.janitor_interval_ms,
-                false,
-            ),
-            ("daemon.reply_drain_ms", settings.reply_drain_ms, false),
-            ("daemon.drain_poll_ms", settings.drain_poll_ms, false),
-        ] {
-            if (!zero_allowed && ms == 0)
-                || Instant::now()
-                    .checked_add(Duration::from_millis(ms))
-                    .is_none()
-            {
-                return Err(invalid(&format!(
-                    "{key} must be {}representable by Instant",
-                    if zero_allowed { "" } else { "positive and " }
-                )));
-            }
-        }
+        validate_timers(settings)?;
         let required = settings
             .search_active
             .checked_add(settings.control_active)
@@ -625,6 +616,75 @@ impl SettingsSpec for DaemonSpec {
         )
     }
 }
+fn overlay_background_admission(
+    settings: &mut DaemonSettings,
+    patch: &DaemonPatch,
+    source: &SourceId,
+    origins: &mut Provenance,
+) -> Result<()> {
+    if let Some(value) = patch.background_active {
+        settings.background_active = value;
+        origins.set("daemon.background_active", source)?;
+    }
+    if let Some(value) = patch.background_pending {
+        settings.background_pending = value;
+        origins.set("daemon.background_pending", source)?;
+    }
+    if let Some(value) = patch.helper_active {
+        settings.helper_active = value;
+        origins.set("daemon.helper_active", source)?;
+    }
+    Ok(())
+}
+
+fn validate_timers(settings: &DaemonSettings) -> Result<()> {
+    for (key, ms, zero_allowed) in [
+        ("daemon.idle_grace_ms", settings.idle_grace_ms, true),
+        (
+            "daemon.control_timeout_ms",
+            settings.control_timeout_ms,
+            false,
+        ),
+        ("daemon.start_timeout_ms", settings.start_timeout_ms, false),
+        ("daemon.stop_timeout_ms", settings.stop_timeout_ms, false),
+        (
+            "daemon.install_timeout_ms",
+            settings.install_timeout_ms,
+            false,
+        ),
+        (
+            "daemon.install_retry_delay_ms",
+            settings.install_retry_delay_ms,
+            false,
+        ),
+        (
+            "daemon.no_listener_timeout_ms",
+            settings.no_listener_timeout_ms,
+            false,
+        ),
+        ("daemon.poll_interval_ms", settings.poll_interval_ms, false),
+        (
+            "daemon.janitor_interval_ms",
+            settings.janitor_interval_ms,
+            false,
+        ),
+        ("daemon.reply_drain_ms", settings.reply_drain_ms, false),
+        ("daemon.drain_poll_ms", settings.drain_poll_ms, false),
+    ] {
+        if (!zero_allowed && ms == 0)
+            || Instant::now()
+                .checked_add(Duration::from_millis(ms))
+                .is_none()
+        {
+            return Err(invalid(&format!(
+                "{key} must be {}representable by Instant",
+                if zero_allowed { "" } else { "positive and " }
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_retention(settings: &DaemonSettings) -> Result<()> {
     if settings.max_sync_jobs < 2 || i64::try_from(settings.max_sync_jobs).is_err() {
         return Err(invalid(
