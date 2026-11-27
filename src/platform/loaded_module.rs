@@ -1,6 +1,6 @@
 //! Path of the dynamic module that owns a borrowed static symbol.
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 #[allow(unsafe_code)] // POSIX dynamic loader query for a live symbol.
@@ -29,7 +29,7 @@ pub(crate) fn path_of<T>(symbol: &T) -> io::Result<PathBuf> {
     if !path.is_absolute() {
         return Err(io::Error::other("loaded module path is relative"));
     }
-    path.canonicalize()
+    Ok(path)
 }
 
 #[cfg(windows)]
@@ -69,7 +69,34 @@ pub(crate) fn path_of<T>(symbol: &T) -> io::Result<PathBuf> {
             "loaded module path exceeds the Windows path bound",
         ));
     }
-    PathBuf::from(OsString::from_wide(&name[..length as usize])).canonicalize()
+    Ok(PathBuf::from(OsString::from_wide(&name[..length as usize])))
+}
+
+pub(crate) fn matches_path(loaded: &Path, requested: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        loaded.as_os_str() == requested.as_os_str()
+    }
+    #[cfg(windows)]
+    {
+        windows_spelling(loaded) == windows_spelling(requested)
+    }
+}
+
+#[cfg(windows)]
+fn windows_spelling(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    // Ignore only Windows' verbatim spelling of an otherwise identical
+    // path. Do not dereference loader names, or fold case/non-Unicode bytes.
+    const VERBATIM: [u16; 4] = [92, 92, 63, 92];
+    const VERBATIM_UNC: [u16; 8] = [92, 92, 63, 92, 85, 78, 67, 92];
+    let mut name = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if name.starts_with(&VERBATIM_UNC) {
+        name.drain(2..VERBATIM_UNC.len());
+    } else if name.starts_with(&VERBATIM) && name.get(5) == Some(&u16::from(b':')) {
+        name.drain(..VERBATIM.len());
+    }
+    name
 }
 
 #[cfg(test)]
@@ -81,6 +108,6 @@ mod tests {
         static OWNED_BY_THIS_BINARY: u8 = 73;
         let loaded = path_of(&OWNED_BY_THIS_BINARY).unwrap();
         let expected = std::env::current_exe().unwrap().canonicalize().unwrap();
-        assert_eq!(loaded, expected);
+        assert_eq!(loaded.canonicalize().unwrap(), expected);
     }
 }

@@ -399,7 +399,10 @@ fn prepare_runtime_owners(
             activity,
             events,
             workers,
-            Arc::new(Watchers::with_diagnostics(global_config.watchers_enabled(), watch_debug)),
+            Arc::new(Watchers::with_diagnostics(
+                global_config.watchers_enabled(),
+                watch_debug,
+            )),
             None,
         )
     })

@@ -885,9 +885,7 @@ pub fn init(path: &Path) -> Result<()> {
         let loaded = crate::platform::loaded_module::path_of(api).map_err(|error| {
             Error::internal_with_source("verify loaded ONNX Runtime library", error)
         })?;
-        if crate::platform::paths::normalize_for_compare(&loaded)
-            != crate::platform::paths::normalize_for_compare(path)
-        {
+        if !crate::platform::loaded_module::matches_path(&loaded, path) {
             return Err(runtime_path_changed(&loaded, path));
         }
         // A host may already own the environment for this very library.
