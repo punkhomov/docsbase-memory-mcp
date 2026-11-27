@@ -112,6 +112,8 @@ impl Db {
             flags.insert(rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW);
             mode
         };
+        #[cfg(windows)]
+        let mode = catalog_mode_on_windows(cache_dir, &path, mode, flags, policy)?;
         let conn =
             Connection::open_with_flags(&path, flags).map_err(|err| sql_error(&path, err))?;
         conn.busy_timeout(policy.write_busy_timeout)
@@ -369,11 +371,80 @@ fn is_registry_alias(path: &Path) -> Result<bool> {
     }
 }
 
+#[cfg(windows)]
+fn catalog_mode_on_windows(
+    cache: &Path,
+    path: &Path,
+    mode: RegistryOpen,
+    flags: rusqlite::OpenFlags,
+    policy: &DbSettings,
+) -> Result<RegistryOpen> {
+    use rusqlite::OpenFlags;
+
+    if mode == RegistryOpen::Legacy {
+        return Ok(mode);
+    }
+    let probe_error = match generation_build::catalog_cache_is_supported(cache) {
+        Ok(true) => return Ok(mode),
+        Ok(false) => None,
+        Err(error) => Some(error),
+    };
+    // A write-enabled pager could recover a journal during schema discovery.
+    // On unqualified storage, establish legacy compatibility before opening it.
+    let version = if path.try_exists().map_err(|error| {
+        Error::internal_with_source("inspect registry before catalog admission", error)
+    })? {
+        let read_flags = flags
+            .difference(OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE)
+            | OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let reader = Connection::open_with_flags(path, read_flags)
+            .map_err(|error| sql_error(path, error))?;
+        reader
+            .busy_timeout(policy.read_busy_timeout)
+            .map_err(|error| sql_error(path, error))?;
+        migrations::read_version(&reader)?
+    } else {
+        0
+    };
+    if version > migrations::SCHEMA_VERSION {
+        return Err(probe_error.unwrap_or_else(|| Error::Admission {
+            message: "catalog publication requires a writable local NTFS directory".to_owned(),
+        }));
+    }
+    if version == 0
+        && mode == RegistryOpen::FreshCatalog
+        && let Some(error) = probe_error
+    {
+        return Err(error);
+    }
+    Ok(RegistryOpen::Legacy)
+}
+
+#[cfg(unix)]
 fn sync_catalog_namespace(cache: &Path) -> Result<()> {
     // Earlier attempts may have created any prefix before the directory
     // barriers completed. A fresh catalog must make the entire path durable.
     for directory in cache.ancestors() {
         generation_build::sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_catalog_namespace(cache: &Path) -> Result<()> {
+    // The closest known Windows profile directory anchors the namespace.
+    // Outside these anchors an ACL error cannot prove ancestry was durable.
+    let dirs = directories::BaseDirs::new();
+    let anchors: Vec<_> = dirs
+        .iter()
+        .flat_map(|dirs| [dirs.cache_dir(), dirs.home_dir()])
+        .filter_map(|directory| directory.canonicalize().ok())
+        .collect();
+    for directory in cache.ancestors() {
+        generation_build::sync_directory(directory)?;
+        if anchors.iter().any(|anchor| anchor == directory) {
+            break;
+        }
     }
     Ok(())
 }
@@ -523,6 +594,21 @@ mod tests {
         assert!(error.to_string().contains("inspect registry sidecar"));
         assert!(!db_path.exists());
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fresh_catalog_sharing_denial_precedes_database_creation() {
+        let cache = tempfile::tempdir().unwrap();
+        let settings = settings::standalone().unwrap();
+        let blocker = crate::platform::fs::block_directory_sync_for_test(cache.path()).unwrap();
+        let error = Db::open_for_index(cache.path(), &settings, true).unwrap_err();
+        assert!(error.to_string().contains("qualify catalog directory"));
+        assert!(!cache.path().join(DB_FILE).exists());
+        drop(blocker);
+
+        let db = Db::open_for_index(cache.path(), &settings, true).unwrap();
+        assert!(db.has_generation_catalog());
     }
 
     #[test]

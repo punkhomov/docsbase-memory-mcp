@@ -79,12 +79,12 @@ impl LaunchConfig {
         let website = match &self.config.settings().daemon.profile {
             crate::daemon::settings::DaemonProfile::Shared => {
                 let config = self.config.settings();
-                if cfg!(unix)
-                    && config.vector_store.is_some()
+                if config.vector_store.is_some()
                     && let Ok(db) =
                         crate::store::Db::open_readonly_for_admission(cache, settings, true)
                     && db.has_generation_catalog()
                 {
+                    crate::store::generation_build::admit_catalog_cache(cache)?;
                     catalog_epoch = Some(db.generation_epoch()?);
                 }
                 None
@@ -101,7 +101,7 @@ impl LaunchConfig {
                         message: "website project root must be a directory".to_owned(),
                     });
                 }
-                let allow_catalog = cfg!(unix) && self.config.settings().vector_store.is_some();
+                let allow_catalog = self.config.settings().vector_store.is_some();
                 let db =
                     crate::store::Db::open_readonly_for_admission(cache, settings, allow_catalog)
                         .map_err(|error| Error::Admission {
@@ -120,6 +120,7 @@ impl LaunchConfig {
                             .to_owned(),
                     })?;
                 if db.has_generation_catalog() {
+                    crate::store::generation_build::admit_catalog_cache(cache)?;
                     catalog_epoch = Some(db.generation_epoch()?);
                     crate::store::project_index::with_catalog_pair(
                         &db,

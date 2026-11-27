@@ -919,7 +919,7 @@ watcher-off/no-idle invariants. Explicit Shared grace0 remains valid; Website
 cannot take an idle-grace override. Daemon resources remain complete restart-time
 `[daemon]` policy; they do not become HTTP settings.
 
-To initialize v5 for a new lexical Website deployment on a supported Unix
+To initialize v5 for a new lexical Website deployment on a supported
 filesystem, select the project in the global configuration before the first
 `docsbase index ABS`:
 
@@ -997,17 +997,22 @@ reports each value and its source.
 `staging_disk_bytes` reserves logical file bytes for one unpublished lexical
 pair in an initialized v5 catalog. The default is 512 MiB. The staged
 metadata and Tantivy writers enforce the reservation during the build. Direct
-`docsbase index` on a qualified Unix filesystem uses this policy together
-with the existing retained indexing payload budgets. Open SQLite registry
+`docsbase index` uses this policy together with the existing retained
+indexing payload budgets. Open SQLite registry
 readers keep their snapshots while a later search sees the newly published
 pair. A rejected build leaves
 the old head available. A later index retries cleanup of its retired local pairs once their readers
 release them. A fresh lexical Website deployment can initialize v5 through
-the global profile above.
+the global profile above on a supported Unix filesystem or on writable
+local NTFS on Windows. A fresh Windows cache outside the user's profile
+and LocalAppData also needs permission to flush its parent directories.
 
-On a supported Unix filesystem, Shared can open an existing v5 catalog with
-lexical or hybrid settings. Index and Sync prepare the replacement pair
-before switching the active head. With embeddings enabled, the watcher
+Shared can open an existing v5 catalog with lexical or hybrid settings on a
+supported Unix filesystem or on writable local NTFS on Windows. On Windows,
+a cache on another filesystem or a network share can continue using v4.
+For publication from an unsupported cache location, move the v5 cache to a
+writable local NTFS directory while the daemon is stopped. Index and Sync
+prepare the replacement pair before switching the active head. With embeddings enabled, the watcher
 prepares vectors before applying edits. After enabling or disabling
 embeddings or changing the embedding recipe, run `docsbase index` to
 publish a matching generation. Opening an indexed project can refill

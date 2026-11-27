@@ -327,6 +327,151 @@ pub fn open_readonly_nofollow(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Opens an existing ordinary file for publication flushes without creating
+/// a replacement or following a final reparse point.
+pub(crate) fn open_readwrite_nofollow(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Qualifies the actual directory handle for a namespace flush. MS-FSA
+/// 2.1.5.7, product note 80, gives directory persistence on NTFS. Windows
+/// can report success without flushing directory metadata on other filesystems.
+pub(crate) fn open_ntfs_directory_for_sync(path: &Path) -> io::Result<File> {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_APPEND_DATA, FILE_WRITE_DATA};
+
+    let narrower = |error: io::Error, access| {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            // A parent ACL can grant an individual add right while
+            // refusing broader generic write access.
+            open_directory_with_access(path, access)
+        } else {
+            Err(error)
+        }
+    };
+    let directory = open_directory_with_access(path, GENERIC_READ | GENERIC_WRITE)
+        .or_else(|error| narrower(error, FILE_APPEND_DATA))
+        .or_else(|error| narrower(error, FILE_WRITE_DATA))?;
+    validate_ntfs_directory(&directory)?;
+    Ok(directory)
+}
+
+fn open_directory_with_access(path: &Path, access: u32) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    OpenOptions::new()
+        .access_mode(access)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+fn validate_ntfs_directory(directory: &File) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "generation directory is not a physical directory",
+        ));
+    }
+    require_local_ntfs(directory)
+}
+
+#[cfg(test)]
+pub(crate) fn block_directory_sync_for_test(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    };
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(path)
+}
+
+#[allow(unsafe_code)] // Win32 probes borrow one retained directory HANDLE.
+fn require_local_ntfs(directory: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_OPENED, GetFinalPathNameByHandleW, VOLUME_NAME_GUID,
+    };
+
+    let mut probe = [0_u16; 1];
+    // SAFETY: the live handle is borrowed and probe contains one writable
+    // unit. The too-short buffer probes for a volume GUID path without
+    // allocating it. Microsoft documents that network shares lack one.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            directory.as_raw_handle(),
+            probe.as_mut_ptr(),
+            1,
+            FILE_NAME_OPENED | VOLUME_NAME_GUID,
+        )
+    };
+    if length == 0 {
+        let error = io::Error::last_os_error();
+        return Err(
+            if error.raw_os_error() == i32::try_from(ERROR_PATH_NOT_FOUND).ok() {
+                io::Error::new(io::ErrorKind::Unsupported, error)
+            } else {
+                io::Error::other(error)
+            },
+        );
+    }
+    require_ntfs_volume(directory)
+}
+
+#[allow(unsafe_code)] // Volume information for an already qualified local HANDLE.
+fn require_ntfs_volume(directory: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+
+    const NAME_UNITS: u32 = 261; // Win32 MAX_PATH + NUL for the filesystem name.
+    let handle = directory.as_raw_handle();
+    let mut filesystem = [0_u16; NAME_UNITS as usize];
+    // SAFETY: directory owns the handle throughout; filesystem has
+    // NAME_UNITS writable UTF-16 units. Unused outputs allow null pointers.
+    let read = unsafe {
+        GetVolumeInformationByHandleW(
+            handle,
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            filesystem.as_mut_ptr(),
+            NAME_UNITS,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::other(io::Error::last_os_error()));
+    }
+    if !filesystem.starts_with(&(*b"NTFS\0").map(u16::from)) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "generation publication requires NTFS",
+        ));
+    }
+
+    Ok(())
+}
+
 /// Opens a persistent read/write coordination file without truncation, opening
 /// a final reparse point itself. Privacy follows the cache-directory ACL policy.
 ///
@@ -378,6 +523,18 @@ pub unsafe fn native_file_matches_path(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ntfs_directory_flush_works_with_the_individual_add_rights() {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_APPEND_DATA, FILE_WRITE_DATA};
+
+        let root = tempfile::tempdir().unwrap();
+        for access in [FILE_APPEND_DATA, FILE_WRITE_DATA] {
+            let directory = super::open_directory_with_access(root.path(), access).unwrap();
+            super::validate_ntfs_directory(&directory).unwrap();
+            directory.sync_all().unwrap();
+        }
+    }
+
     #[test]
     fn non_symlink_reparse_file_attributes_are_not_regular() {
         use windows_sys::Win32::Storage::FileSystem::{

@@ -24,7 +24,7 @@ pub(super) fn create_for_website(global: &Config, project: &Config, root: &Path)
     let DaemonProfile::Website { project_root } = &global.daemon.profile else {
         return false;
     };
-    if !cfg!(unix) || !project_root.canonicalize().is_ok_and(|fixed| fixed == root) {
+    if !project_root.canonicalize().is_ok_and(|fixed| fixed == root) {
         return false;
     }
     lexical(global) && lexical(project)
@@ -46,11 +46,6 @@ impl Target {
         settings: Resolved<DbSettings>,
         profile: &DaemonProfile,
     ) -> Result<Self> {
-        if !cfg!(unix) {
-            return Err(admission(
-                "this platform has no qualified generation publication barrier",
-            ));
-        }
         if config.vector_store.is_none() {
             return Err(admission(
                 "v5 index requires version 2 project configuration",

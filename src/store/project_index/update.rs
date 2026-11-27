@@ -7,6 +7,9 @@ use crate::error::{Error, Result};
 use crate::index::job::{self, CaptureBudget, JobInput, JobStats, PreparedPlan};
 use crate::index::{outcome, tantivy_index::IndexHandle};
 use crate::platform::file_lease::ExclusiveFileLease;
+#[cfg(windows)]
+use crate::store::generation_build::DirectoryBarrier;
+#[cfg(unix)]
 use crate::store::generation_build::sync_directory;
 use crate::store::models::Project;
 use crate::store::{Db, registry_inspect, repo};
@@ -30,9 +33,9 @@ pub(crate) fn apply_lexical_batch<A>(
     capture: Option<&mut CaptureBudget<'_>>,
     admit: impl Fn() -> Result<A>,
 ) -> Result<JobStats> {
-    if !cfg!(unix) || config.hybrid || config.hybrid_cfg.enabled {
+    if config.hybrid || config.hybrid_cfg.enabled {
         return Err(Error::Admission {
-            message: "incremental generation updates require a supported lexical installation"
+            message: "incremental lexical generation updates require a lexical configuration"
                 .into(),
         });
     }
@@ -77,11 +80,6 @@ impl PreparedWatch {
         capture: &mut CaptureBudget<'_>,
         admit: impl FnOnce() -> Result<A>,
     ) -> Result<Self> {
-        if !cfg!(unix) {
-            return Err(invalid_index(
-                "platform cannot publish incremental generations",
-            ));
-        }
         let directory = project_directory(&canonical_cache(registry.cache_root())?, project.id);
         registry_inspect::check_directory(&directory)
             .map_err(|reason| unavailable("project generation directory", reason))?;
@@ -222,7 +220,23 @@ fn publish_batch(
         .content_revision()
         .checked_add(1)
         .ok_or_else(|| invalid_index("index content revision is exhausted"))?;
+    #[cfg(windows)]
+    let (metadata_barrier, tantivy_barrier) = {
+        let generation = tantivy
+            .parent()
+            .ok_or_else(|| invalid_index("Tantivy directory has no generation parent"))?;
+        // Refuse an already blocked directory while the selected pair is
+        // still intact. Retain the handles through the local mutation.
+        (
+            DirectoryBarrier::open(generation)?,
+            DirectoryBarrier::open(tantivy)?,
+        )
+    };
     begin_mutation(db)?;
+    // Windows SQLite DELETE mode flushes the main file, but the namespace
+    // change removing its journal needs an explicit directory barrier.
+    #[cfg(windows)]
+    metadata_barrier.flush()?;
     let attempt = outcome::begin(db, project)?;
     let mut writer = IndexHandle::open_existing_writer(tantivy, config.index_writer)?;
     plan.begin(db, &mut writer, project.id)?;
@@ -230,6 +244,9 @@ fn publish_batch(
     writer.finish()?;
     // Tantivy syncs committed file contents. Its final merged directory
     // entries must reach the barrier before SQLite makes them readable.
+    #[cfg(windows)]
+    tantivy_barrier.flush()?;
+    #[cfg(unix)]
     sync_directory(tantivy)?;
     let manifest = registry_inspect::tantivy_manifest(tantivy)
         .map_err(|reason| unavailable("updated Tantivy manifest", reason))?;
@@ -251,7 +268,10 @@ fn publish_batch(
     if updated != 1 {
         return Err(invalid_index("index mutation intent was superseded"));
     }
-    tx.commit().map_err(repo::db_error)
+    tx.commit().map_err(repo::db_error)?;
+    #[cfg(windows)]
+    metadata_barrier.flush()?;
+    Ok(())
 }
 
 fn begin_mutation(metadata: &mut Db) -> Result<()> {

@@ -821,13 +821,11 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
 }
 
-#[cfg(unix)]
 fn seed_v5_registry(env: &Env) {
     let mut db = docsbase_memory::store::Db::open(env.cache()).unwrap();
     seed_v5_catalog(&mut db);
 }
 
-#[cfg(unix)]
 fn seed_v5_catalog(db: &mut docsbase_memory::store::Db) -> [u8; 16] {
     let epoch = [17; 16];
     // Fresh runtime initialization is covered separately. This seeds only the
@@ -995,7 +993,6 @@ fn stopped_search_checks_the_v5_embedding_recipe_before_constructing_provider() 
 }
 
 #[test]
-#[cfg(unix)]
 fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
     let env = Env::new(&[("guide.md", "# Guide\n\nfirstgenerationpulsar\n")]);
     fs::write(env.global_config(), "config_version = 2\n").unwrap();

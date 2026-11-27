@@ -625,7 +625,7 @@ fn flush_generation_files(
                 .checked_add(relative.len() + size_of::<(String, u64)>())
                 .filter(|total| *total <= limits.max_metadata_bytes)
                 .ok_or_else(|| admission("generation manifest exceeds the metadata limit"))?;
-            let file = open_coordination_file(&path, false)?;
+            let file = super::open_generation_file_to_sync(&path)?;
             let len = filesystem(&path, "inspect staged component length", file.metadata())?.len();
             filesystem(&path, "sync generation component", file.sync_all())?;
             bytes = bytes
@@ -647,7 +647,7 @@ fn write_seal(path: &Path, bytes: &[u8]) -> Result<()> {
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             let mut found = Vec::new();
-            let file = open_coordination_file(path, false)?;
+            let file = super::open_generation_file_to_sync(path)?;
             filesystem(
                 path,
                 "read existing generation seal",
@@ -681,8 +681,9 @@ fn commit_head<Admission>(
         access,
         ..
     } = commit.publication;
-    let project = commit.project;
     let seal = &commit.seal;
+    #[cfg(windows)]
+    let namespace = super::DirectoryBarrier::open(cache)?;
     let mut registry = access.writer(cache, settings)?;
     let connection = registry.connection();
     configure_publication_connection(connection, limits)?;
@@ -695,26 +696,7 @@ fn commit_head<Admission>(
     // Keep the returned proof alive until the catalog transaction settles.
     let artifact_guard = hold()?;
     let tx = registry.begin_write()?;
-    validate_catalog(&tx, request)?;
-    let registered = registry::project_by_id_in(&tx, project.id)?
-        .filter(|registered| registered.canonical_root == project.canonical_root)
-        .ok_or_else(|| admission("project registration changed before generation publication"))?;
-    match request.base.map(|base| base.layout) {
-        None if registered.status != ProjectStatus::NotIndexed => {
-            return Err(admission("project no longer accepts its first generation"));
-        }
-        Some(ProjectIndexLayout::Legacy)
-            if registered.status != ProjectStatus::Indexed
-                || registered.schema_version != migrations::PROJECT_SCHEMA_VERSION
-                || repo::has_pending_docs(&tx, project.id)? =>
-        {
-            return Err(admission("legacy generation base is no longer complete"));
-        }
-        _ => {}
-    }
-    if candidate_is_active(&tx, request, staged)? {
-        return Err(admission("prepared generation changed while publishing"));
-    }
+    validate_head_transition(&tx, commit)?;
     if let Some(base) = request.base {
         let generation = base
             .generation_id
@@ -778,7 +760,39 @@ fn commit_head<Admission>(
         .conn
         .close()
         .map_err(|(_, err)| repo::db_error(err))?;
-    sync_directory(cache)
+    #[cfg(windows)]
+    namespace.flush()?;
+    #[cfg(unix)]
+    sync_directory(cache)?;
+    Ok(())
+}
+
+fn validate_head_transition(conn: &Connection, commit: &LexicalCommit<'_>) -> Result<()> {
+    let StagedPublication {
+        request, staged, ..
+    } = commit.publication;
+    let project = commit.project;
+    validate_catalog(conn, request)?;
+    let registered = registry::project_by_id_in(conn, project.id)?
+        .filter(|registered| registered.canonical_root == project.canonical_root)
+        .ok_or_else(|| admission("project registration changed before generation publication"))?;
+    match request.base.map(|base| base.layout) {
+        None if registered.status != ProjectStatus::NotIndexed => {
+            return Err(admission("project no longer accepts its first generation"));
+        }
+        Some(ProjectIndexLayout::Legacy)
+            if registered.status != ProjectStatus::Indexed
+                || registered.schema_version != migrations::PROJECT_SCHEMA_VERSION
+                || repo::has_pending_docs(conn, project.id)? =>
+        {
+            return Err(admission("legacy generation base is no longer complete"));
+        }
+        _ => {}
+    }
+    if candidate_is_active(conn, request, staged)? {
+        return Err(admission("prepared generation changed while publishing"));
+    }
+    Ok(())
 }
 
 fn reconcile_commit_error(

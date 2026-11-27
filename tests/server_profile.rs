@@ -79,7 +79,6 @@ fn wait_for(mut done: impl FnMut() -> bool, context: &str) {
     }
 }
 
-#[cfg(unix)]
 fn index_project_through_cli(cache: &Path, config: &Path, root: &Path, text: &str) -> i64 {
     std::fs::write(root.join("guide.md"), text).unwrap();
     let output = cli(cache, config)
@@ -121,7 +120,6 @@ fn assert_catalog_views(client: &mut Client, updated: i64, state: &str, other: i
     }
 }
 
-#[cfg(unix)]
 fn start_shared_daemon(cache: &Path, config: &Path) -> (Daemon, test_transport::TestTransport) {
     let mut daemon = Daemon(
         cli(cache, config)
@@ -326,13 +324,23 @@ fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
 }
 
 #[test]
-#[cfg(unix)]
 fn fresh_v2_website_index_initializes_and_reopens_its_catalog() {
     use docsbase_memory::store::DB_FILE;
 
-    let scratch = tempfile::tempdir_in("/tmp").unwrap();
+    // Unix socket paths are short; Windows uses a named pipe.
+    let temp_root = if cfg!(unix) {
+        "/tmp".into()
+    } else {
+        std::env::temp_dir()
+    };
+    let scratch = tempfile::tempdir_in(&temp_root).unwrap();
     let cache = scratch.path().join("new-cache/website");
-    let second = tempfile::tempdir_in("/tmp").unwrap();
+    #[cfg(windows)]
+    let temp_root = directories::BaseDirs::new()
+        .unwrap()
+        .home_dir()
+        .to_path_buf();
+    let second = tempfile::tempdir_in(&temp_root).unwrap();
     let root = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     configure_v2_website(config.path(), root.path());
@@ -413,7 +421,6 @@ fn fresh_v2_website_index_initializes_and_reopens_its_catalog() {
     assert_ne!(identity(second.path()).0, epoch);
 }
 
-#[cfg(unix)]
 fn configure_v2_website(config: &Path, root: &Path) {
     std::fs::write(
         config.join("config.toml"),

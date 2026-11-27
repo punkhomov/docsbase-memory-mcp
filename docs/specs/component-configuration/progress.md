@@ -2070,3 +2070,27 @@ synthetic events written under a temporary path alias. Both tests failed
 under an aliased TMPDIR on Linux and passed after using the same canonical
 paths as native delivery. Fresh fix review, all-target Clippy, formatting
 and the Linux cli-full suite passed. The corrections affect fixtures.
+
+## 2026-11-27 — CF11, Windows catalog publication
+
+Task CF11 Windows publication: complete (local implementation and independent
+review with fix rounds). Native CI acceptance remains pending.
+
+Ruling: local NTFS qualification uses the retained directory handle. The
+volume GUID probe runs before the filesystem query so a known unsupported
+share can keep the legacy format. If qualification fails, the schema is
+observed read-only before SQLite can perform write-side recovery. A transient
+failure on a fresh v5 candidate leaves the registry absent. Bootstrap flushes
+the namespace through the nearest Windows-managed profile or LocalAppData
+directory, or checks the full chain for other locations.
+
+Ruling: sealing flushes existing files with writable no-follow handles.
+Registry publication and watcher mutation acquire directory barriers before
+committing state. Reclaim closes the Windows reader file after claiming the
+inactive generation and keeps the preparation lease through cleanup. Native
+fixtures exercise sharing denial and retry, replacement under a reader lease,
+profile-path bootstrap, and the existing process-interruption recovery cases.
+
+Rust 1.100.0 Linux cli-full passed 1,923 tests. Lean offline, all-target and
+opt-in Linux Clippy, formatting, and Windows GNU cross-Clippy passed. Native
+Windows must confirm flush access and recovery behavior before merge.

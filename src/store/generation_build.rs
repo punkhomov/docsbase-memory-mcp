@@ -47,10 +47,40 @@ pub(crate) use publication::{CatalogCommit, CatalogHead, LexicalCommit};
 
 mod recovery;
 mod retirement;
+#[cfg(windows)]
+pub(super) use recovery::DirectoryBarrier;
 pub(super) use recovery::sync_directory;
 pub use recovery::{
     discard_lexical_generation, find_lexical_build_to_discard, reclaim_retired_lexical_generation,
 };
+
+#[cfg(windows)]
+pub(super) fn catalog_cache_is_supported(cache: &Path) -> Result<bool> {
+    let path = filesystem(cache, "resolve catalog cache", fs::canonicalize(cache))?;
+    match native_fs::open_ntfs_directory_for_sync(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(false),
+        Err(error) => filesystem(&path, "qualify catalog directory", Err(error)),
+    }
+}
+
+/// Check Windows namespace support before admitting publication. Unix
+/// retains its existing barrier checks at the write boundaries.
+#[cfg(windows)]
+pub(crate) fn admit_catalog_cache(cache: &Path) -> Result<()> {
+    if !catalog_cache_is_supported(cache)? {
+        return Err(admission(
+            "catalog publication requires a writable local NTFS directory",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(clippy::unnecessary_wraps)] // The Unix adapter checks at the write boundaries.
+pub(crate) fn admit_catalog_cache(_cache: &Path) -> Result<()> {
+    Ok(())
+}
 
 /// Accepted inputs to one lexical generation build.
 #[derive(Debug, Clone, Copy)]
@@ -342,6 +372,7 @@ fn prepare_lexical_pair(
     DbSpec::validate(settings.settings(), &Capabilities::current())?;
     config.validate()?;
     let cache = filesystem(cache, "resolve cache", fs::canonicalize(cache))?;
+    admit_catalog_cache(&cache)?;
     let access = purpose.access();
     let project = probe_project(&cache, request, settings, limits, access)?;
     let source = &project.canonical_root;
@@ -371,7 +402,6 @@ fn prepare_lexical_pair(
     };
     // Keep the coordination path available if reservation commits
     // before the generation directory or its intent are created.
-    #[cfg(unix)]
     for directory in [&project_dir, &cache.join("projects"), &cache] {
         recovery::sync_directory(directory)?;
     }
@@ -419,7 +449,7 @@ fn prepare_lexical_pair(
 }
 
 fn build_reserved_pair(
-    #[cfg_attr(not(unix), allow(unused_variables))] project_dir: &Path,
+    project_dir: &Path,
     generations: &Path,
     project: &Project,
     generation: i64,
@@ -435,7 +465,6 @@ fn build_reserved_pair(
     let digest = ownership_digest(request, generation);
     let intent = claim_path(generations, generation);
     write_owner_record(&intent, digest)?;
-    #[cfg(unix)]
     for directory in [generations, project_dir] {
         recovery::sync_directory(directory)?;
     }
@@ -445,7 +474,6 @@ fn build_reserved_pair(
         native_fs::create_private_directory(&path),
     )?;
     write_owner_record(&path.join(".build-owner"), digest)?;
-    #[cfg(unix)]
     recovery::sync_directory(&path)?;
     let (revision, outcome) = build_pair(&path, project, generation, inputs, pair_budget, capture)?;
     let bytes = size_of_pair(&path)?
@@ -1015,12 +1043,31 @@ fn open_coordination_file(path: &Path, create: bool) -> Result<File> {
         native_fs::open_readonly_nofollow(path)
     };
     let file = filesystem(path, "open generation coordination file", opened)?;
+    validate_coordination_file(path, &file)?;
+    Ok(file)
+}
+
+fn open_generation_file_to_sync(path: &Path) -> Result<File> {
+    #[cfg(unix)]
+    let file = open_coordination_file(path, false)?;
+    #[cfg(windows)]
+    let file = filesystem(
+        path,
+        "open staged generation file for sync",
+        native_fs::open_readwrite_nofollow(path),
+    )?;
+    #[cfg(windows)]
+    validate_coordination_file(path, &file)?;
+    Ok(file)
+}
+
+fn validate_coordination_file(path: &Path, file: &File) -> Result<()> {
     let metadata = filesystem(path, "inspect coordination file", file.metadata())?;
     if !native_fs::is_regular_nofollow(&metadata)
         || filesystem(
             path,
             "inspect coordination file link count",
-            native_fs::file_identity_and_links(&file, &metadata),
+            native_fs::file_identity_and_links(file, &metadata),
         )?
         .1 != 1
     {
@@ -1028,7 +1075,7 @@ fn open_coordination_file(path: &Path, create: bool) -> Result<File> {
             "generation coordination file is not an ordinary single-link file",
         ));
     }
-    Ok(file)
+    Ok(())
 }
 
 fn size_of_pair(path: &Path) -> Result<u64> {

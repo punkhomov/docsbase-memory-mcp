@@ -399,7 +399,7 @@ fn reclaim_stopped(
             "retired generation has incomplete ownership or reader lease",
         ));
     }
-    let _reader_guard = reader_lock
+    let reader_guard = reader_lock
         .as_mut()
         .map(|lock| {
             lock.try_write().map_err(|error| {
@@ -434,6 +434,14 @@ fn reclaim_stopped(
         seal_digest,
     )?;
     drop(db);
+
+    if cfg!(windows) {
+        // The selected head can no longer name this reclaiming row. The
+        // preparation lease still excludes staged and maintenance access.
+        // Windows cannot remove the directory while the lease file is open.
+        drop(reader_guard);
+        drop(reader_lock);
+    }
 
     remove_reclaiming_generation(
         parent,
@@ -823,8 +831,29 @@ pub(in crate::store) fn sync_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub(in crate::store) fn sync_directory(_: &Path) -> Result<()> {
-    Err(admission(
-        "generation operation needs a supported directory durability barrier",
-    ))
+pub(in crate::store) fn sync_directory(path: &Path) -> Result<()> {
+    DirectoryBarrier::open(path)?.flush()
+}
+
+/// Keeps the verified namespace handle alive across a publication boundary.
+#[cfg(windows)]
+pub(in crate::store) struct DirectoryBarrier<'a> {
+    path: &'a Path,
+    file: super::File,
+}
+
+#[cfg(windows)]
+impl<'a> DirectoryBarrier<'a> {
+    pub(in crate::store) fn open(path: &'a Path) -> Result<Self> {
+        let file = filesystem(
+            path,
+            "open generation directory for sync",
+            native_fs::open_ntfs_directory_for_sync(path),
+        )?;
+        Ok(Self { path, file })
+    }
+
+    pub(in crate::store) fn flush(&self) -> Result<()> {
+        filesystem(self.path, "sync generation directory", self.file.sync_all())
+    }
 }

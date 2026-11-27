@@ -424,7 +424,6 @@ fn open_v5_index_shared(cache: &Path, config: &Path, toml: &str) -> Arc<Shared> 
     shared
 }
 
-#[cfg(unix)]
 async fn catalog_search_hits(shared: &Arc<Shared>, session: u64, query: &str) -> usize {
     call_tool(
         shared,
@@ -1091,7 +1090,6 @@ fn catalog_warm_metadata(
     metadata.try_recv().ok()
 }
 
-#[cfg(unix)]
 async fn catalog_diagnostics(shared: &Arc<Shared>, session: u64) -> Value {
     let mut status = call_tool(shared, Some(session), "status", json!({}))
         .await
@@ -2592,7 +2590,6 @@ impl crate::hybrid::remote::AsyncTransport for FactoryWire {
     }
 }
 #[test]
-#[cfg(unix)]
 fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
     const CHILD: &str = "DOCSBASE_SHARED_CATALOG_HYBRID_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -2667,7 +2664,6 @@ fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
     });
 }
 
-#[cfg(unix)]
 fn run_catalog_daemon(shared: &Arc<Shared>, work: impl std::future::Future<Output = ()>) {
     // Match the production lifetime: each daemon owns its runtime. Dropping
     // it retires idle cancelled consumers that can still own vector leases.
@@ -2685,7 +2681,6 @@ fn run_catalog_daemon(shared: &Arc<Shared>, work: impl std::future::Future<Outpu
     .unwrap();
 }
 
-#[cfg(unix)]
 async fn assert_disabled_catalog_model_requires_a_lexical_pair(shared: &Arc<Shared>, root: &Path) {
     let project = registry::resolve_by_cwd(&shared.db(), root).unwrap();
     let error = register_session_in(shared, std::process::id(), root, false, None)
@@ -2714,7 +2709,6 @@ async fn assert_disabled_catalog_model_requires_a_lexical_pair(shared: &Arc<Shar
     );
 }
 
-#[cfg(unix)]
 fn open_configured_remote_catalog(
     cache: &Path,
     config: &Path,
@@ -2742,7 +2736,6 @@ fn open_configured_remote_catalog(
     shared
 }
 
-#[cfg(unix)]
 async fn assert_catalog_registration_refills_only_vectors(
     shared: &Arc<Shared>,
     project: &Project,
@@ -2821,7 +2814,6 @@ async fn assert_catalog_registration_refills_only_vectors(
     assert_eq!(scoped(session).await.unwrap()[0]["path"], "guide.md");
 }
 
-#[cfg(unix)]
 async fn assert_catalog_refill_rejects_a_late_vector(
     shared: &Arc<Shared>,
     project: &Project,
@@ -2902,7 +2894,6 @@ async fn assert_catalog_refill_rejects_a_late_vector(
     );
 }
 
-#[cfg(unix)]
 async fn assert_catalog_reopen_requires_matching_seal(
     shared: &Arc<Shared>,
     project: &Path,
@@ -2950,7 +2941,6 @@ async fn assert_catalog_reopen_requires_matching_seal(
     assert_eq!(wire.calls.load(Ordering::SeqCst), calls + 2);
 }
 
-#[cfg(unix)]
 async fn assert_configured_catalog_hybrid_routes(
     shared: &Arc<Shared>,
     project: &Path,
@@ -3020,7 +3010,6 @@ async fn assert_configured_catalog_hybrid_routes(
     );
 }
 
-#[cfg(unix)]
 async fn wait_for_catalog_revision(shared: &Arc<Shared>, session: u64, revision: i64) {
     tokio::time::timeout(Duration::from_secs(12), async {
         loop {

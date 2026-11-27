@@ -84,12 +84,15 @@ pub mod fs {
 /// ACLs; no chmod semantics).
 #[cfg(windows)]
 pub mod fs {
+    #[cfg(test)]
+    pub(crate) use super::windows::block_directory_sync_for_test;
     pub use super::windows::{
         available_space, is_regular_nofollow, native_file_matches_path, open_private_lock,
         open_private_log, open_readonly_nofollow, secure_dir, secure_executable, secure_file,
     };
     pub(crate) use super::windows::{
         check_single_link, create_private_directory, file_identity_and_links,
+        open_ntfs_directory_for_sync, open_readwrite_nofollow,
     };
 }
 

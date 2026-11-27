@@ -421,7 +421,6 @@ fn catalog_reader_holds_the_pair_lease_and_distinguishes_equal_revisions() {
     assert!(error.to_string().contains("Tantivy"), "{error}");
 }
 
-#[cfg(unix)]
 struct RevisablePair {
     env: Env,
     policy: Resolved<DbSettings>,
@@ -432,7 +431,6 @@ struct RevisablePair {
     generation: i64,
 }
 
-#[cfg(unix)]
 impl RevisablePair {
     fn new() -> Self {
         let env = Env::new();
@@ -468,6 +466,7 @@ impl RevisablePair {
         self.env.generation(self.generation)
     }
 
+    #[cfg(unix)]
     fn use_schema_1(&self) -> Vec<u8> {
         let metadata_path = self.dir().join("metadata.db");
         let metadata = Connection::open(&metadata_path).unwrap();
@@ -632,7 +631,33 @@ fn catalog_reads_incremental_revision_after_schema_1_upgrade() {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(windows)]
+fn blocked_watcher_directory_keeps_the_selected_revision_searchable() {
+    let pair = RevisablePair::new();
+    let before = pair.search("Applemigration").unwrap().0;
+    pair.write_source("# Plum\n\nPlumwatchretry\n");
+    let dir = pair.dir().join("tantivy");
+    let blocked = native_fs::block_directory_sync_for_test(&dir).unwrap();
+    let error = pair.apply().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
+        "{error}"
+    );
+    let (current, hits) = pair.search("Applemigration").unwrap();
+    assert_eq!(current, before);
+    assert_eq!(hits, 1);
+    drop(blocked);
+
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    let (after, hits) = pair.search("Plumwatchretry").unwrap();
+    assert_eq!(after.generation_id(), before.generation_id());
+    assert_eq!(after.content_revision(), before.content_revision() + 1);
+    assert_eq!(hits, 1);
+}
+
+#[test]
 fn catalog_rebuild_replaces_an_interrupted_revision_and_resumes_cleanup() {
     let pair = RevisablePair::new();
     let directory = pair.dir();
@@ -724,7 +749,6 @@ fn catalog_rebuild_replaces_an_interrupted_revision_and_resumes_cleanup() {
 }
 
 #[test]
-#[cfg(unix)]
 fn explicit_rebuild_recovers_local_rollback_journals() {
     const CHILD_METADATA: &str = "DOCSBASE_TEST_ABANDON_LOCAL_METADATA";
     const CHILD_SPILL: &str = "DOCSBASE_TEST_ABANDON_LOCAL_SPILL";
@@ -750,7 +774,6 @@ fn explicit_rebuild_recovers_local_rollback_journals() {
     }
 }
 
-#[cfg(unix)]
 fn check_local_rollback_journal(metadata_env: &str, spill_env: &str, spill: &str, header: [u8; 8]) {
     let env = Env::new();
     let request = env.request();
@@ -963,7 +986,6 @@ fn retired_reclamation_requires_the_seal_while_payload_remains() {
 }
 
 #[test]
-#[cfg(unix)]
 fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
     let env = Env::new();
     let request = env.request();
@@ -1322,29 +1344,58 @@ fn publication_rechecks_a_local_base_and_rejects_a_stale_revision() {
 
 #[test]
 #[cfg(windows)]
-fn publication_without_a_directory_barrier_keeps_the_original_head() {
+fn publication_retries_after_a_native_directory_sharing_violation() {
     let env = Env::new();
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# Peach\n\nPeachmigration\n",
+    )
+    .unwrap();
     let request = env.request();
     let staged = env.build(request).unwrap();
-    let error = publish_lexical_generation(
-        env.cache.path(),
-        request,
-        staged,
-        &settings::standalone().unwrap(),
-        limits(),
-        &Config::default(),
-    )
-    .unwrap_err();
+    let root = env.generation(staged.generation_id);
+    let blocked = native_fs::block_directory_sync_for_test(&root).unwrap();
+    let publish = || {
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings::standalone().unwrap(),
+            limits(),
+            &Config::default(),
+        )
+    };
+    let error = publish().unwrap_err();
     assert!(
-        error.to_string().contains("directory durability barrier"),
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
         "{error}"
     );
-    assert!(
-        !env.generation(staged.generation_id)
-            .join("seal.json")
-            .exists()
-    );
+    assert!(!root.join("seal.json").exists());
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
     env.assert_legacy_search();
+
+    drop(blocked);
+    let cache_blocked = native_fs::block_directory_sync_for_test(env.cache.path()).unwrap();
+    let error = publish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
+        "{error}"
+    );
+    assert_eq!(env.catalog_state().0, 1);
+    env.assert_legacy_search();
+    drop(cache_blocked);
+    let selected = publish().unwrap();
+    assert_eq!(selected.generation_id, Some(staged.generation_id));
+    assert_eq!(
+        env.catalog_state(),
+        (staged.generation_id, Some("active".into()))
+    );
+    let index = ReadIndex::open(&root.join("tantivy")).unwrap();
+    assert_eq!(index.search("Peachmigration", 5).unwrap().len(), 1);
 }
 
 #[test]
@@ -1624,22 +1675,26 @@ fn discarded_build_can_be_located_and_recovered_with_abandoned_registry_wal() {
 
 #[test]
 #[cfg(windows)]
-fn discard_without_a_qualified_directory_barrier_preserves_the_reservation() {
+fn discard_retries_after_a_native_directory_sharing_violation() {
     let env = Env::new();
     let request = env.request();
-    let prepared = env.build(request).unwrap();
-    let root = env.generation(prepared.generation_id);
-
-    let error = discard_lexical_generation(
-        env.cache.path(),
-        request,
-        prepared.generation_id,
-        &settings::standalone().unwrap(),
-        limits(),
-    )
-    .unwrap_err();
+    let staged = env.build(request).unwrap();
+    let root = env.generation(staged.generation_id);
+    let blocked = native_fs::block_directory_sync_for_test(root.parent().unwrap()).unwrap();
+    let discard = || {
+        discard_lexical_generation(
+            env.cache.path(),
+            request,
+            staged.generation_id,
+            &settings::standalone().unwrap(),
+            limits(),
+        )
+    };
+    let error = discard().unwrap_err();
     assert!(
-        error.to_string().contains("directory durability barrier"),
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
         "{error}"
     );
     assert!(root.join(".build-owner").is_file());
@@ -1647,30 +1702,11 @@ fn discard_without_a_qualified_directory_barrier_preserves_the_reservation() {
     assert_eq!(env.catalog_state(), (1, Some("building".into())));
     env.assert_legacy_search();
 
-    // Windows cannot publish a local pair. Model a catalog moved from a
-    // supported installation to exercise the same durability gate on retire.
-    Connection::open(env.cache.path().join(DB_FILE))
-        .unwrap()
-        .execute(
-            "UPDATE project_generations SET phase='retired', seal_digest=?1 WHERE id=?2",
-            params![[1_u8; 32].as_slice(), prepared.generation_id],
-        )
-        .unwrap();
-    let error = reclaim_retired_lexical_generation(
-        env.cache.path(),
-        request,
-        prepared.generation_id,
-        &settings::standalone().unwrap(),
-        limits(),
-    )
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("directory durability barrier"),
-        "{error}"
-    );
-    assert!(root.join(".build-owner").is_file());
-    assert!(root.join("metadata.db").is_file());
-    assert_eq!(env.catalog_state(), (1, Some("retired".into())));
+    drop(blocked);
+    discard().unwrap();
+    assert!(!root.exists());
+    assert_eq!(env.catalog_state(), (1, None));
+    env.assert_legacy_search();
 }
 
 #[test]

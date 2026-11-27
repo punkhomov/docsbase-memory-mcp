@@ -109,10 +109,8 @@ pub(crate) fn observe_replacement_base(
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
 ) -> Result<(Option<ObservedProjectIndex>, Option<InterruptedBase>)> {
-    match observe_index_base(cache, project_id, epoch, settings, limits) {
-        Ok(base) => return Ok((base, None)),
-        Err(error) if !cfg!(unix) => return Err(error),
-        Err(_) => {}
+    if let Ok(base) = observe_index_base(cache, project_id, epoch, settings, limits) {
+        return Ok((base, None));
     }
     let db = open_operational_reader(cache, settings, limits)?;
     validate_epoch(db.connection(), epoch)?;
