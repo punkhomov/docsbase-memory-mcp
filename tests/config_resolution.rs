@@ -1221,6 +1221,31 @@ fn v2_lexical_collection_rejects_unsafe_score_or_growth() {
 }
 
 #[test]
+fn v2_retrieval_request_defaults_enforce_candidate_and_document_bounds() {
+    let global = TempDir::new().expect("global");
+    let project = TempDir::new().expect("project");
+    layer(&global, "config.toml", "config_version = 2\n");
+    for (field, value) in [
+        ("default_limit", 1001),
+        ("default_n_per_doc", 0),
+        ("default_n_per_doc", 11),
+        ("rrf_candidate_window", 0),
+        ("rrf_candidate_window", 1001),
+    ] {
+        layer(
+            &project,
+            ".docsbase.toml",
+            &format!("config_version = 2\n[retrieval]\n{field} = {value}\n"),
+        );
+        let error = Config::load_from(global.path(), Some(project.path())).unwrap_err();
+        assert!(
+            matches!(error, docsbase_memory::error::Error::Admission { message } if message.contains(field)),
+            "{field}={value}"
+        );
+    }
+}
+
+#[test]
 fn v2_retrieval_overscan_rejects_a_zero_multiplier() {
     let global = TempDir::new().expect("global");
     let project = TempDir::new().expect("project");

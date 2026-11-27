@@ -41,13 +41,13 @@ pub fn catalogue() -> Vec<Tool> {
                 "properties": {
                     "query": { "type": "string", "description": "Search query." },
                     "query_mode": { "type": ["string", "null"], "enum": [QueryMode::Syntax.as_str(), QueryMode::Literal.as_str(), null], "default": QueryMode::default().as_str(), "description": "syntax enables fields, operators and quoted phrases; literal analyzes natural-language text without query operators. Omitted/null preserves syntax. Literal requires an updated daemon." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Max hits (default 10)." },
+                    "limit": { "type": "integer", "minimum": 0, "description": "Maximum hits. Omit to use the project default (10 without an override)." },
                     "scope": { "type": "string", "enum": ["project"], "description": "Reserved; v1 supports only the current project." },
                     "rerank": { "type": "boolean", "description": "Per-request hybrid rerank override; default follows the project configuration. true requires hybrid rerank to be enabled." },
                     "snippet": { "type": "boolean", "description": "Attach a text fragment (<= 240 chars) to each hit, cut on a character boundary; snippet_truncated marks a cut fragment." },
                     "chunk_ref": { "type": ["boolean", "null"], "description": "Include references for read_neighbors_at. Requires a v5 daemon advertising chunk-ref-v1." },
-                    "dedupe": { "type": "string", "enum": ["none", "path"], "description": "Post-filter: \"path\" keeps at most n_per_doc chunks per document, preserving the order of the survivors. Default \"none\"." },
-                    "n_per_doc": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Chunks kept per document when dedupe is \"path\" (default 2, measured on the ru_morph benchmark slice). Rejected without dedupe." },
+                    "dedupe": { "type": "string", "enum": ["none", "path"], "description": "Post-filter: \"path\" keeps at most n_per_doc chunks per document, preserving the order of the survivors. Omit to use the project default (\"none\" without an override)." },
+                    "n_per_doc": { "type": "integer", "minimum": 1, "maximum": crate::search::retrieval::MAX_CHUNKS_PER_DOC, "description": "Chunks kept per document when dedupe is \"path\" (project default, 2 without an override). Rejected without path dedupe." },
                     "path_prefix": { "type": "string", "description": "Literal, case-sensitive prefix of the project-relative path; docs/ matches docs/a.md but not Docs/a.md or docsx.md." },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Frontmatter tags, ANDed over all of them; a document without frontmatter has no tags. Both single-line comma-separated tags and block lists are indexed." },
                     "explain": { "type": "boolean", "description": "Return {hits, meta} instead of a bare array. meta names the score scale, the stages that ran, per-stage timings, the candidate window, the index generation and any degradations." }

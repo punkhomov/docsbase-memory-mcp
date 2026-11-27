@@ -92,19 +92,19 @@ pub enum Command {
         /// Interpret query syntax or literal natural-language text (syntax|literal).
         #[arg(long, default_value_t = crate::index::QueryMode::default())]
         query_mode: crate::index::QueryMode,
-        /// Maximum number of hits.
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
+        /// Maximum number of hits (uses the project default if omitted).
+        #[arg(long)]
+        limit: Option<usize>,
         /// Attach telemetry: `{hits, meta}` instead of a bare array.
         #[arg(long)]
         explain: bool,
         /// Attach a text fragment to each hit.
         #[arg(long)]
         snippet: bool,
-        /// Post-filter: `none` (default) or `path` (cap chunks per document).
-        #[arg(long, default_value = "none")]
-        dedupe: String,
-        /// Chunks kept per document when `--dedupe path` (default 2, max 10).
+        /// Post-filter: `none` or `path` (cap chunks per document).
+        #[arg(long)]
+        dedupe: Option<String>,
+        /// Chunks kept per document with path dedupe (uses the project default if omitted).
         #[arg(long)]
         n_per_doc: Option<u64>,
         /// Only documents whose project-relative path starts with this prefix.
@@ -247,18 +247,18 @@ pub fn run() -> anyhow::Result<()> {
         } => {
             let started = std::time::Instant::now();
             search::run_started(
-                &query,
-                &search::Options {
+                search::Arguments {
+                    query: &query,
+                    query_mode,
                     limit,
                     explain,
                     snippet,
-                    dedupe,
+                    dedupe: dedupe.as_deref(),
                     n_per_doc,
-                    path_prefix,
-                    tags,
+                    path_prefix: path_prefix.as_deref(),
+                    tags: &tags,
                 },
                 None,
-                query_mode,
                 started,
             )
         }

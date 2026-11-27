@@ -3128,6 +3128,100 @@ fn v2_lexical_weights_change_real_search_without_reindexing() {
 }
 
 #[test]
+fn v2_retrieval_defaults_only_apply_to_unset_cli_and_ipc_arguments() {
+    let content = "# Widgets\n\nquerydefaultprobe querydefaultprobe\n\n".repeat(15);
+    let mut env = Env::new(&[("dominant.md", &content)]);
+    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+    let query = ["search", "querydefaultprobe", "--explain"];
+    let fallback = env.run_json(&query);
+    assert_eq!(fallback["hits"].as_array().unwrap().len(), 10);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[retrieval]\ndefault_limit = 3\ndefault_dedupe = 'path'\nrrf_candidate_window = 27\n",
+    )
+    .unwrap();
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[retrieval]\ndefault_n_per_doc = 1\n",
+    )
+    .unwrap();
+    let direct = env.run_json(&query);
+    assert_eq!(direct["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(direct["meta"]["filters"]["dedupe"], "path");
+    assert_eq!(direct["meta"]["filters"]["n_per_doc"], 1);
+    let explicit = env.run_json(&[
+        "search",
+        "querydefaultprobe",
+        "--explain",
+        "--limit",
+        "10",
+        "--dedupe",
+        "none",
+    ]);
+    assert_eq!(explicit["hits"], fallback["hits"]);
+    assert_eq!(explicit["meta"]["window"], 10);
+    let zero = env.run_json(&["search", "querydefaultprobe", "--explain", "--limit", "0"]);
+    assert_eq!(zero["hits"].as_array().unwrap().len(), 0);
+    assert_eq!(zero["meta"]["window"], 0);
+
+    env.start_daemon();
+    let connected = env.run_json(&query);
+    assert_eq!(connected["hits"], direct["hits"]);
+    assert_eq!(connected["meta"]["filters"], direct["meta"]["filters"]);
+
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let via_ipc = client.call_tool("search_docs", serde_json::json!({
+        "query": "querydefaultprobe", "explain": true, "limit": null, "dedupe": null, "n_per_doc": null,
+    })).unwrap();
+    assert_eq!(via_ipc["hits"], direct["hits"]);
+    assert_eq!(via_ipc["meta"]["filters"], direct["meta"]["filters"]);
+    let inherited_limit = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({
+                "query": "querydefaultprobe", "explain": true, "dedupe": "none",
+            }),
+        )
+        .unwrap();
+    assert_eq!(inherited_limit["hits"].as_array().unwrap().len(), 3);
+    assert_eq!(inherited_limit["meta"]["window"], 3);
+    let override_cap = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({
+                "query": "querydefaultprobe", "explain": true, "n_per_doc": 3,
+            }),
+        )
+        .unwrap();
+    assert_eq!(override_cap["hits"].as_array().unwrap().len(), 3);
+    assert_eq!(override_cap["meta"]["filters"]["n_per_doc"], 3);
+    let error = client
+        .call_tool(
+            "search_docs",
+            serde_json::json!({
+                "query": "querydefaultprobe", "dedupe": "none", "n_per_doc": 1,
+            }),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Protocol { .. }));
+
+    let view = env.run_json(&["config", "effective"]);
+    let fields = view["fields"].as_array().unwrap();
+    let field = |key| fields.iter().find(|entry| entry["key"] == key).unwrap();
+    assert_eq!(field("retrieval.default_limit")["source"]["kind"], "global");
+    assert_eq!(field("retrieval.default_limit")["value"], 3);
+    assert_eq!(field("retrieval.default_dedupe")["value"], "path");
+    assert_eq!(
+        field("retrieval.default_n_per_doc")["source"]["kind"],
+        "project"
+    );
+    assert_eq!(field("retrieval.default_n_per_doc")["value"], 1);
+    assert_eq!(field("retrieval.rrf_candidate_window")["value"], 27);
+}
+
+#[test]
 fn v2_retrieval_overscan_reaches_direct_and_daemon_cap_refill() {
     let dominant = "# Widgets\n\noverscanprobe overscanprobe overscanprobe\n\n".repeat(40);
     let mut env = Env::new(&[

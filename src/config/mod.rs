@@ -63,7 +63,7 @@ pub struct Config {
     pub index_writer: IndexWriterSettings,
     /// Global-only policy for request deadlines and owned search payload admission.
     pub search: SearchSettings,
-    /// Project candidate window policy for document caps.
+    /// Project search defaults and candidate window policy.
     pub retrieval: RetrievalSettings,
     /// Installation-wide timeout policy for local IPC and MCP callers.
     pub client: ClientSettings,
@@ -297,6 +297,15 @@ impl Config {
             self.daemon.profile,
             crate::daemon::settings::DaemonProfile::Shared
         ) && self.watch.enabled()
+    }
+
+    pub(crate) fn search_candidate_window(&self) -> u32 {
+        self.hybrid_cfg
+            .reranker
+            .as_ref()
+            .map_or(self.retrieval.rrf_candidate_window(), |reranker| {
+                reranker.window
+            })
     }
 
     pub(crate) fn changes_dense_state(&self, previous: &Self) -> bool {

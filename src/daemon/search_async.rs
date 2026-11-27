@@ -77,14 +77,7 @@ impl SearchSession {
             dense: &self.owners.dense,
             cache: &self.owners.cache,
             project: &self.project,
-            window: self
-                .config
-                .hybrid_cfg
-                .reranker
-                .as_ref()
-                .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |stage| {
-                    stage.window
-                }),
+            window: self.config.search_candidate_window(),
             ann_search: self.config.ann_search,
             payload_budget: &self.owners.payload_budget,
             operation: self.operation.clone(),

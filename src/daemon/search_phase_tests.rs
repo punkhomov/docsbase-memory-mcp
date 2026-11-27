@@ -222,6 +222,67 @@ impl Embedder for TestEmbedder {
     }
 }
 
+#[tokio::test]
+async fn configured_rrf_window_reaches_async_and_compat_search() {
+    let fixture = Fixture::with_global(
+        HybridStages {
+            embedder: Some(Arc::new(TestEmbedder {
+                entered: None,
+                release: Mutex::new(std_mpsc::channel().1),
+                calls: Arc::default(),
+            })),
+            ranking: Ranking::Rrf,
+            reranker: None,
+        },
+        "config_version = 2\n[retrieval]\nrrf_candidate_window = 17\n",
+    );
+    let args = json!({"query":"widgets","explain":true,"limit":2});
+    let result = call_tool(
+        &fixture.shared,
+        Some(fixture.session),
+        "search_docs",
+        args.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["meta"]["window"], 17);
+    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+
+    let compat = route_search(
+        &fixture.shared,
+        Some(fixture.session),
+        &args,
+        search_operation(&fixture.shared, "search_docs")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(compat["meta"]["window"], 17);
+    assert_eq!(compat["hits"], result["hits"]);
+
+    let slot = fixture.shared.project_slot(fixture.project.id);
+    {
+        let mut state = slot.state.lock().unwrap();
+        let mut config = state.config.as_deref().unwrap().clone();
+        config.hybrid_cfg.reranker = Some(crate::hybrid::config::RerankerCfg {
+            window: 23,
+            ..Default::default()
+        });
+        state.config = Some(Arc::new(config));
+        // Preserve the fixture stages across both transport dispatch paths.
+        state.search_stages = state.stages.clone();
+    }
+    let result = call_tool(
+        &fixture.shared,
+        Some(fixture.session),
+        "search_docs",
+        json!({"query":"widgets","explain":true,"limit":2,"rerank":false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["meta"]["window"], 23);
+}
+
 fn embedding_fixture() -> (Fixture, std_mpsc::Receiver<()>, std_mpsc::Sender<()>) {
     let (entered, observed) = std_mpsc::channel();
     let (release, proceed) = std_mpsc::channel();

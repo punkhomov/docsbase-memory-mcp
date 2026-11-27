@@ -149,7 +149,8 @@ fn prepare(
         &fixture.context(stages, &DenseCache::new(), budget, cancellation),
         MetadataSource::Borrowed(&fixture.db),
         &|| Ok(()),
-        parse_search_args(&args()).expect("arguments"),
+        parse_search_args(&args(), retrieval::standalone().expect("retrieval policy"))
+            .expect("arguments"),
     )
     .expect("prepare")
 }

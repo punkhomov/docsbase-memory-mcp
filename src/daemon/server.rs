@@ -3798,20 +3798,13 @@ fn route_search(
     let (config, stages) = shared.project_runtime(&project)?;
     operation.check()?;
     let slot = shared.project_slot(project.id);
-    let window = config
-        .hybrid_cfg
-        .reranker
-        .as_ref()
-        .map_or(crate::hybrid::config::DEFAULT_RERANK_WINDOW, |reranker| {
-            reranker.window
-        });
     tools::search_docs_with_ranking_settings(
         &tools::SearchContext {
             stages: &stages,
             dense: &shared.dense,
             cache: &shared.cache,
             project: &project,
-            window,
+            window: config.search_candidate_window(),
             ann_search: config.ann_search,
             payload_budget: &shared.payload_budget,
             operation,

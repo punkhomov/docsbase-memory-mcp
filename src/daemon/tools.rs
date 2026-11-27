@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::hybrid::HybridStages;
 use crate::hybrid::Ranking;
 use crate::hybrid::blocking;
+#[cfg(test)]
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
 use crate::hybrid::dense::{self, BoundDenseRequest, DenseCache, DenseRows};
 use crate::hybrid::dense_metadata::DenseMetadata;
@@ -31,7 +32,7 @@ use crate::search::chunk_ref::{self, ChunkBinding};
 use crate::search::metadata::{MetadataSource, ProjectReader};
 use crate::search::operation::SearchOperation;
 use crate::search::payload::{OwnedPayload, PayloadRequest};
-use crate::search::retrieval;
+use crate::search::retrieval::{self, Dedupe};
 use crate::search::scope::{DocumentScope, ScopeRequest, has_tags};
 use crate::store::migrations;
 use crate::store::models::{Project, ProjectStatus, SyncJob, SyncState};
@@ -59,7 +60,7 @@ pub fn search_docs(db: &Db, cache: &Path, project: &Project, args: &Value) -> Re
         cache,
         project,
         args,
-        DEFAULT_RERANK_WINDOW,
+        retrieval::DEFAULT_RRF_CANDIDATE_WINDOW,
     )
 }
 
@@ -587,7 +588,7 @@ pub(super) fn start_search<Guard>(
     if !catalog {
         ensure_indexed(context.project)?;
     }
-    let arguments = parse_search_args(args)?;
+    let arguments = parse_search_args(args, settings.retrieval)?;
     if arguments.chunk_ref && !catalog {
         return Err(chunk_ref::unavailable());
     }
@@ -1400,7 +1401,7 @@ fn filters_of(
 pub use crate::search::retrieval::DEFAULT_POST_FILTER_OVERSCAN as SEARCH_UX_OVERSCAN;
 
 /// Upper bound for `n_per_doc` (`search-ux` FR-2).
-pub const MAX_CHUNKS_PER_DOC: u64 = 10;
+pub const MAX_CHUNKS_PER_DOC: u64 = retrieval::MAX_CHUNKS_PER_DOC as u64;
 
 /// Longest snippet returned to a caller (`search-ux` FR-1).
 pub const SNIPPET_MAX_CHARS: usize = 240;
@@ -1438,9 +1439,9 @@ struct PostFilterArgs {
     tags: Vec<String>,
 }
 
-fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
+fn parse_post_filter(args: &Value, settings: RetrievalSettings) -> Result<PostFilterArgs> {
     let dedupe = match args.get("dedupe") {
-        None | Some(Value::Null) => Dedupe::None,
+        None | Some(Value::Null) => settings.default_dedupe(),
         Some(value) => match value.as_str() {
             Some("none") => Dedupe::None,
             Some("path") => Dedupe::Path,
@@ -1454,22 +1455,19 @@ fn parse_post_filter(args: &Value) -> Result<PostFilterArgs> {
         },
     };
     let n_per_doc = match args.get("n_per_doc") {
-        // Measured default: with 1 the ru_morph slice loses 3 of 11 expected-path
-        // hits, with 2 it loses one and still halves the repetition
-        // (`tests/search_bench.rs::dedupe_slice_diagnostics`).
-        None | Some(Value::Null) => 2,
+        None | Some(Value::Null) => settings.default_n_per_doc(),
         Some(value) => {
             let raw = value.as_u64().ok_or_else(|| Error::Protocol {
                 message: format!("search_docs: n_per_doc must be an integer, got {value}"),
             })?;
-            if !(1..=MAX_CHUNKS_PER_DOC).contains(&raw) {
-                return Err(Error::Protocol {
+            usize::try_from(raw)
+                .ok()
+                .filter(|n| (1..=retrieval::MAX_CHUNKS_PER_DOC).contains(n))
+                .ok_or_else(|| Error::Protocol {
                     message: format!(
                         "search_docs: n_per_doc must be 1..={MAX_CHUNKS_PER_DOC}, got {raw}"
                     ),
-                });
-            }
-            usize::try_from(raw).unwrap_or(usize::try_from(MAX_CHUNKS_PER_DOC).unwrap_or(10))
+                })?
         }
     };
     // `null` means "unset", like every sibling key: only a real value demands
@@ -1530,16 +1528,7 @@ struct SearchArgs {
     tags: Vec<String>,
 }
 
-/// Which post-filter the caller asked for (`search-ux` FR-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Dedupe {
-    /// No post-filter (the default).
-    None,
-    /// At most `n_per_doc` chunks per document.
-    Path,
-}
-
-fn parse_search_args(args: &Value) -> Result<SearchArgs> {
+fn parse_search_args(args: &Value, settings: RetrievalSettings) -> Result<SearchArgs> {
     let query_mode = QueryMode::from_argument(args.get("query_mode"))?;
     let query = args
         .get("query")
@@ -1560,7 +1549,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
     // proportional to the request (final review C1). A wrong type is a
     // protocol error instead of a silent default.
     let limit = match args.get("limit") {
-        None | Some(Value::Null) => 10,
+        None | Some(Value::Null) => settings.default_limit(),
         Some(value) => {
             let raw = value.as_u64().ok_or_else(|| Error::Protocol {
                 message: format!("search_docs: limit must be a positive integer, got {value}"),
@@ -1592,7 +1581,7 @@ fn parse_search_args(args: &Value) -> Result<SearchArgs> {
         n_per_doc,
         path_prefix,
         tags,
-    } = parse_post_filter(args)?;
+    } = parse_post_filter(args, settings)?;
     Ok(SearchArgs {
         query,
         query_mode,
