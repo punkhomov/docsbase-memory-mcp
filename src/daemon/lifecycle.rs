@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::bootstrap::{BootstrapContext, EntrypointFacts};
+use crate::config::capture::{ReadFailure, read_file};
 use crate::daemon::launch::{AdmittedLaunch, LaunchConfig, LaunchSnapshot};
 use crate::daemon::settings::{DaemonPatch, DaemonSettings, DaemonSpec};
 use crate::error::{Error, Result};
@@ -970,24 +971,16 @@ fn write_state(cache: &Path, schema_version: u32) -> Result<()> {
 
 pub(crate) fn read_state(cache: &Path) -> Result<Option<DaemonState>> {
     let path = state_file(cache);
-    // Bound the read: an oversized state file is corrupt input, not something
-    // to load into memory (T48).
-    match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > crate::limits::MAX_STATE_BYTES => {
+    let limit = crate::limits::MAX_STATE_BYTES;
+    let bytes = match read_file(&path, limit) {
+        Ok(bytes) => bytes,
+        Err(ReadFailure::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(ReadFailure::LimitExceeded) => {
             return Err(Error::internal(format!(
-                "daemon state {} is {} bytes, over the {} byte limit",
-                path.display(),
-                metadata.len(),
-                crate::limits::MAX_STATE_BYTES
+                "daemon state {} is over the {limit} byte limit",
+                path.display()
             )));
         }
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(Error::internal_with_source("stat daemon state", err)),
-    }
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(Error::internal_with_source("read daemon state", err)),
     };
     let state = serde_json::from_slice(&bytes)

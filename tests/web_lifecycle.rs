@@ -30,6 +30,29 @@ fn occupied_port_is_rejected_before_daemon_start() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot bind local Web port"));
     assert!(!root.path().join("cache/state/daemon.json").exists());
 }
+
+#[test]
+fn oversized_web_config_is_rejected_before_binding_or_daemon_start() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    // Occupy the configured address so the pre-fix binary also exits cleanly.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let cap = usize::try_from(docsbase_memory::limits::MAX_STATE_BYTES).unwrap();
+    std::fs::write(
+        config.join("web.toml"),
+        format!("port = {port}\n#{}\n", "x".repeat(cap)),
+    )
+    .unwrap();
+
+    let output = command(root.path()).arg("web").output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("web.toml is over the"), "{stderr}");
+    assert!(!root.path().join("cache/state/daemon.json").exists());
+}
+
 #[test]
 fn startup_lock_timeout_exits_without_waiting_for_blocking_thread() {
     let root = tempfile::tempdir().unwrap();

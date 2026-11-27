@@ -1,5 +1,6 @@
 //! Web-owned policy; no search/index defaults live here.
 use crate::config::bootstrap::DefaultsContext;
+use crate::config::capture::{ReadFailure, read_file};
 use crate::config::schema::{
     ArtifactFacts, Capabilities, ComponentImpact, FieldSpec, Provenance, Resolved, Scope,
     SettingsSpec, SourceId, Unit,
@@ -119,9 +120,19 @@ pub fn load(port: Option<u16>) -> Result<Resolved<WebSettings>> {
     let path = crate::config::paths::config_dir()?.join("web.toml");
     let mut layers = Vec::new();
     if path.exists() {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| Error::internal_with_source("read web.toml", e))?;
-        let overrides = toml::from_str(&text).map_err(|_| Error::Admission {
+        let limit = crate::limits::MAX_STATE_BYTES;
+        let bytes = match read_file(&path, limit) {
+            Ok(bytes) => bytes,
+            Err(ReadFailure::LimitExceeded) => {
+                return Err(Error::internal(format!(
+                    "web.toml is over the {limit} byte limit"
+                )));
+            }
+            Err(error) => return Err(Error::internal_with_source("read web.toml", error)),
+        };
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|error| Error::internal_with_source("read web.toml", error))?;
+        let overrides = toml::from_str(text).map_err(|_| Error::Admission {
             message: "invalid web.toml".into(),
         })?;
         layers.push((SourceId::Global(path), overrides));

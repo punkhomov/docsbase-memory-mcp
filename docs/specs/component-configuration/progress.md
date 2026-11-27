@@ -2355,3 +2355,14 @@ identity. Guarded startup and apply still compare exact source observations.
 minor (deferred): a changed source is parsed for each status request until
 restart. This is bounded by the existing config byte limit. No global
 observation cache was added.
+
+## 2026-11-27 — CF12 I52, предел чтения bootstrap
+
+Task CF12 bounded bootstrap reads: complete (focused CLI tests, growth
+regression and fresh review). Native checks remain pending.
+
+Ruling: daemon state, install manifest and `web.toml` use the existing 1 MiB
+trusted read ceiling. The reader consumes at most the limit plus one byte
+regardless of earlier metadata. Missing/corrupt handling remains local to
+its owner. A valid oversized Web file fails before trying an occupied port.
+Forty focused Linux tests and focused Linux/Windows GNU Clippy passed.
