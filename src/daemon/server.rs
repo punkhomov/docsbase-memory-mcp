@@ -121,6 +121,7 @@ pub struct Shared {
     global_config_overrides: crate::daemon::settings::DaemonPatch,
     global_config_defaults: crate::config::bootstrap::DefaultsContext,
     global_config_path: Option<PathBuf>,
+    config_lock_dir: PathBuf,
     invalidation: crate::config::policy::PolicyContext,
     /// Per-project config/stage slots; the map lock only protects lookup.
     project_states: Mutex<HashMap<i64, ProjectSlot>>,
@@ -601,6 +602,7 @@ impl Shared {
             launch,
             website,
             catalog_epoch,
+            config_lock_dir,
         } = admitted;
         validate_runtime_policies(
             launch.config.settings(),
@@ -688,6 +690,7 @@ impl Shared {
             global_config_overrides: launch.overrides,
             global_config_defaults: launch.defaults,
             global_config_path: launch.path,
+            config_lock_dir,
             invalidation: launch.invalidation,
             project_states: Mutex::new(project_states),
             dense,
@@ -3610,6 +3613,7 @@ fn prepare_catalog_project_sync(
             watchers: Arc::clone(&shared.watchers),
             global_config: shared.global_config.clone(),
             global_path: shared.global_config_path.clone(),
+            config_lock_dir: shared.config_lock_dir.clone(),
             watch_runtime: Arc::new(crate::watch::WatchRuntime::new(
                 Arc::clone(&config),
                 Arc::clone(&stages),

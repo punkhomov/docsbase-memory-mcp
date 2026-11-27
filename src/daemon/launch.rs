@@ -58,6 +58,7 @@ pub(crate) struct AdmittedLaunch {
     pub launch: LaunchConfig,
     pub website: Option<FixedProject>,
     pub catalog_epoch: Option<[u8; 16]>,
+    pub config_lock_dir: PathBuf,
 }
 
 impl AdmittedLaunch {
@@ -122,6 +123,15 @@ impl LaunchConfig {
         self,
         cache: &Path,
         settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+    ) -> Result<AdmittedLaunch> {
+        self.admit_with_config_lock_dir(cache, settings, paths::config_lock_dir()?)
+    }
+
+    pub(crate) fn admit_with_config_lock_dir(
+        self,
+        cache: &Path,
+        settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
+        config_lock_dir: PathBuf,
     ) -> Result<AdmittedLaunch> {
         self.config.settings().validate()?;
         self.recheck_startup(None)?;
@@ -210,6 +220,7 @@ impl LaunchConfig {
             launch: self,
             website,
             catalog_epoch,
+            config_lock_dir,
         })
     }
 }

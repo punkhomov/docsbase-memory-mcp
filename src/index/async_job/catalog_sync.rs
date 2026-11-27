@@ -79,6 +79,7 @@ pub(crate) struct RuntimeUpdate {
     pub(crate) active: Arc<Config>,
     pub(crate) global_config: Config,
     pub(crate) global_path: Option<PathBuf>,
+    pub(crate) config_lock_dir: PathBuf,
     pub(crate) watchers: Arc<crate::watch::Watchers>,
     pub(crate) watch_runtime: Arc<crate::watch::WatchRuntime>,
     pub(crate) reviewed: Option<Box<ReviewedReplacement>>,
@@ -92,7 +93,8 @@ impl RuntimeUpdate {
         publish: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
         let root = &context.project.canonical_root;
-        with_index_config_write_locks(self.global_path.as_deref(), root, || {
+        let global_file = self.global_path.as_deref();
+        with_index_config_write_locks(&self.config_lock_dir, global_file, root, || {
             operation.check()?;
             if let Some(reviewed) = &self.reviewed {
                 reviewed.verify_sources()?;
@@ -177,8 +179,13 @@ enum Publication {
     Direct(DirectPublication),
 }
 
-pub(crate) struct DirectPublication {
+pub(crate) struct DirectSourcePaths {
     pub(crate) config_dir: PathBuf,
+    pub(crate) config_lock_dir: PathBuf,
+}
+
+pub(crate) struct DirectPublication {
+    pub(crate) sources: DirectSourcePaths,
     pub(crate) reviewed: Option<ReviewedReplacement>,
 }
 
@@ -854,8 +861,10 @@ impl CatalogJob {
         operation: &SearchOperation,
     ) -> Result<ObservedProjectIndex> {
         let root = &self.context.project.canonical_root;
-        let config_dir = &direct.config_dir;
-        with_index_config_write_locks(Some(&config_dir.join("config.toml")), root, || {
+        let config_dir = &direct.sources.config_dir;
+        let config_lock_dir = &direct.sources.config_lock_dir;
+        let global_file = config_dir.join("config.toml");
+        with_index_config_write_locks(config_lock_dir, Some(&global_file), root, || {
             operation.check()?;
             let current = if direct.reviewed.is_some() {
                 self.context.config.clone()

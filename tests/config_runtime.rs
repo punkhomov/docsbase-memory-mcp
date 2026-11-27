@@ -84,8 +84,12 @@ impl Env {
     }
 
     fn start_daemon_with(&mut self, mut command: Command) {
+        command.args(["serve", "--detached", "--grace-ms", "3000"]);
+        self.start_daemon_child(command);
+    }
+
+    fn start_daemon_child(&mut self, mut command: Command) {
         let child = command
-            .args(["serve", "--detached", "--grace-ms", "3000"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -1253,6 +1257,134 @@ fn v2_live_config_applies_only_the_reviewed_project_runtime() {
         .unwrap();
     assert_eq!(refused.status.code(), Some(5));
     assert_eq!(env.run_json(&["config", "plan", "--live"]), restart);
+}
+
+fn serve_with_injected_lock_data(data: &std::ffi::OsStr) {
+    use docsbase_memory::config::bootstrap::{BootstrapContext, EntrypointFacts};
+    use docsbase_memory::daemon::launch::LaunchSnapshot;
+    use docsbase_memory::daemon::settings::DaemonPatch;
+
+    let cache = PathBuf::from(std::env::var_os("DOCSBASE_CACHE_DIR").unwrap());
+    let config = PathBuf::from(std::env::var_os("DOCSBASE_CONFIG_DIR").unwrap());
+    let snapshot = LaunchSnapshot::capture_from(&config);
+    let patch = DaemonPatch {
+        idle_grace_ms: Some(15_000),
+        ..DaemonPatch::default()
+    };
+    let bootstrap = BootstrapContext::capture_with(2, EntrypointFacts::standalone(), |key| {
+        (key == "DOCSBASE_DATA_DIR").then(|| data.to_os_string())
+    })
+    .unwrap();
+    docsbase_memory::daemon::lifecycle::run_daemon_with_launch_and_bootstrap(
+        &cache,
+        &docsbase_memory::store::settings::standalone().unwrap(),
+        &docsbase_memory::store::settings::standalone_read_pool().unwrap(),
+        docsbase_memory::hybrid::dense_settings::standalone()
+            .unwrap()
+            .settings(),
+        &snapshot,
+        patch,
+        &bootstrap,
+    )
+    .unwrap();
+}
+
+#[test]
+fn live_config_publication_uses_the_daemon_bootstrap_data_directory() {
+    const INJECTED_DATA: &str = "DOCSBASE_TEST_INJECTED_LOCK_DATA";
+    if let Some(data) = std::env::var_os(INJECTED_DATA) {
+        serve_with_injected_lock_data(&data);
+        return;
+    }
+
+    let mut env = Env::new(&[("guide.md", "source lock fixture")]);
+    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    env.run_json(&["index"]);
+    let injected = env.cache().join("captured-data");
+    let ambient = env.cache().join("ambient-daemon-data");
+    let mut daemon = Command::new(std::env::current_exe().unwrap());
+    daemon
+        .args([
+            "--exact",
+            "live_config_publication_uses_the_daemon_bootstrap_data_directory",
+        ])
+        .env(INJECTED_DATA, &injected)
+        .env("DOCSBASE_CACHE_DIR", env.cache())
+        .env("DOCSBASE_CONFIG_DIR", env.cache().join("config"))
+        .env("DOCSBASE_DATA_DIR", &ambient)
+        .current_dir(env.root());
+    env.start_daemon_child(daemon);
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty=0.25\n",
+    )
+    .unwrap();
+    let runtime = env.run_json(&["config", "plan", "--live"]);
+    let apply = |plan: &Value| {
+        env.run_json(&[
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            plan["plan_id"].as_str().unwrap(),
+        ])
+    };
+    assert_eq!(apply(&runtime)["applied"], true);
+    let lock_dir = injected.join("locks");
+    assert!(
+        lock_dir.is_dir(),
+        "live apply must use the captured data directory"
+    );
+    assert!(!ambient.join("locks").exists());
+
+    // A replacement runs in the catalog Sync job. It must contend with
+    // config writers holding the source locks in the same directory.
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\nlong_chunk_penalty=0.25\n[index.chunk]\nmax_chars=1200\noverlap_chars=100\n",
+    )
+    .unwrap();
+    let replacement = env.run_json(&["config", "plan", "--live"]);
+    let mut locks = fs::read_dir(&lock_dir)
+        .unwrap()
+        .map(|entry| {
+            fd_lock::RwLock::new(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(entry.unwrap().path())
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        locks.len() >= 2,
+        "global and project sources must be locked"
+    );
+    let guards = locks
+        .iter_mut()
+        .map(|lock| lock.try_write().unwrap())
+        .collect::<Vec<_>>();
+    let blocked = env
+        .cmd()
+        .args([
+            "config",
+            "apply",
+            "--live",
+            "--plan-id",
+            replacement["plan_id"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !blocked.status.success(),
+        "held source locks must block publication"
+    );
+    drop(guards);
+    assert_eq!(apply(&replacement)["applied"], true);
+    assert!(!ambient.join("locks").exists());
 }
 
 #[test]

@@ -9,7 +9,7 @@ use crate::config::schema::Resolved;
 use crate::daemon::registry;
 use crate::daemon::settings::DaemonProfile;
 use crate::error::{Error, Result};
-use crate::index::async_job::catalog_sync::BuildContext;
+use crate::index::async_job::catalog_sync::{BuildContext, DirectSourcePaths};
 use crate::index::{
     generation_job::{GenerationBase, GenerationJob},
     job::{CaptureBudget, JobStats},
@@ -41,6 +41,7 @@ pub(super) struct Target {
     epoch: [u8; 16],
     config: Arc<Config>,
     settings: Resolved<DbSettings>,
+    sources: DirectSourcePaths,
 }
 
 impl Target {
@@ -64,6 +65,10 @@ impl Target {
         let cache = db.cache_root().canonicalize().map_err(|error| {
             Error::internal_with_source("resolve generation registry cache", error)
         })?;
+        let sources = DirectSourcePaths {
+            config_dir: paths::config_dir()?,
+            config_lock_dir: paths::config_lock_dir()?,
+        };
         let epoch = db.generation_epoch()?;
         let project = registry::ensure_project(&mut db, root)?;
         // Project registration is complete. Preparation uses short registry
@@ -75,6 +80,7 @@ impl Target {
             epoch,
             config: Arc::new(config),
             settings,
+            sources,
         })
     }
 
@@ -86,7 +92,6 @@ impl Target {
         if lexical(&self.config) {
             return Ok(super::DirectIndex::Generation(self));
         }
-        let config_dir = paths::config_dir()?;
         let stages = Arc::new(owner.stages(&self.config)?);
         let pin_ttl = self.config.dense.ann_lifetimes.backfill_pin_ttl();
         let build = BuildContext {
@@ -100,7 +105,7 @@ impl Target {
             source: VectorCacheSource::Owned(store),
             pin_ttl,
         };
-        Ok(super::DirectIndex::HybridGeneration(build, config_dir))
+        Ok(super::DirectIndex::HybridGeneration(build, self.sources))
     }
 
     pub(super) fn index(
@@ -111,7 +116,6 @@ impl Target {
         operation.check()?;
         let project_id = self.project.id;
         let recipe = outcome::recipe_id(&self.config);
-        let config_dir = paths::config_dir()?;
         let account = budget.reserve(0)?;
         let mut capture = CaptureBudget {
             account: &account,
@@ -127,7 +131,7 @@ impl Target {
             config: &self.config,
         };
         if let Some(stats) = job.reuse_unchanged(operation, |_, generation| {
-            self.with_current_recipe(&config_dir, &recipe, operation, || {
+            self.with_current_recipe(&recipe, operation, || {
                 Ok(JobStats {
                     skipped: generation.skipped,
                     ..JobStats::default()
@@ -139,27 +143,25 @@ impl Target {
         let prepared = job.stage(&mut capture, GenerationBase::Observe)?;
         operation.check()?;
         let stats = prepared.publish(|commit| {
-            self.with_current_recipe(&config_dir, &recipe, operation, || {
-                commit.commit(|| operation.check())
-            })
+            self.with_current_recipe(&recipe, operation, || commit.commit(|| operation.check()))
         })?;
         Ok(serde_json::json!({ "project_id": project_id, "stats": stats }))
     }
 
     fn with_current_recipe<T>(
         &self,
-        config_dir: &Path,
         recipe: &str,
         operation: &SearchOperation,
         finish: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
         let project_root = &self.project.canonical_root;
         paths::with_index_config_write_locks(
-            Some(&config_dir.join("config.toml")),
+            &self.sources.config_lock_dir,
+            Some(&self.sources.config_dir.join("config.toml")),
             project_root,
             || {
                 operation.check()?;
-                let current = Config::load_from(config_dir, Some(project_root))?;
+                let current = Config::load_from(&self.sources.config_dir, Some(project_root))?;
                 if !lexical(&current) || outcome::recipe_id(&current) != recipe {
                     return Err(admission(
                         "project index configuration changed; retry index",

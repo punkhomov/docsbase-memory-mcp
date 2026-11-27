@@ -349,7 +349,8 @@ fn run_with_launch(
         .ok_or_else(|| Error::internal("native daemon physical capacity overflow"))?;
     let transport_policy =
         crate::ipc::transport::policy(native_handles, &launch.config.settings().daemon)?;
-    let launch = launch.admit(cache, settings)?;
+    let config_lock_dir = crate::config::paths::config_lock_dir_from(bootstrap)?;
+    let launch = launch.admit_with_config_lock_dir(cache, settings, config_lock_dir)?;
     run_with_admission(
         cache,
         &transport_policy,

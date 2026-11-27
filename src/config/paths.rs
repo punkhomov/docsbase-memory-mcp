@@ -46,6 +46,19 @@ pub fn data_dir() -> Result<PathBuf> {
     project_dirs().map(|dirs| dirs.data_dir().to_path_buf())
 }
 
+pub(crate) fn config_lock_dir() -> Result<PathBuf> {
+    lock_dir_in(&data_dir()?)
+}
+
+pub(crate) fn config_lock_dir_from(bootstrap: &BootstrapContext) -> Result<PathBuf> {
+    lock_dir_in(&data_dir_from(bootstrap)?.value)
+}
+
+fn lock_dir_in(data_dir: &Path) -> Result<PathBuf> {
+    std::path::absolute(data_dir.join("locks"))
+        .map_err(|error| Error::internal_with_source("resolve configuration lock directory", error))
+}
+
 /// Config directory (`$XDG_CONFIG_HOME/docsbase-memory-mcp`), overridable via
 /// `DOCSBASE_CONFIG_DIR`.
 ///
@@ -133,14 +146,16 @@ pub(crate) fn with_config_write_lock<T>(
 
 /// Hold source guards in global-to-project order during index publication.
 pub(crate) fn with_index_config_write_locks<T>(
+    lock_dir: &Path,
     global_file: Option<&Path>,
     project_root: &Path,
     work: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let project_file = project_root.join(".docsbase.toml");
-    let lock_project = || with_config_write_lock(&project_file, || Ok(work()?));
+    let lock_project =
+        || with_config_write_lock_in(lock_dir, &project_file, || Ok(work()?), std::thread::sleep);
     let result = if let Some(global_file) = global_file {
-        with_config_write_lock(global_file, lock_project)
+        with_config_write_lock_in(lock_dir, global_file, lock_project, std::thread::sleep)
     } else {
         lock_project()
     };
@@ -159,7 +174,7 @@ pub(crate) fn with_config_write_lock_with_wait<T>(
     f: impl FnOnce() -> anyhow::Result<T>,
     wait: impl FnMut(Duration),
 ) -> anyhow::Result<T> {
-    let lock_dir = data_dir()?.join("locks");
+    let lock_dir = config_lock_dir()?;
     with_config_write_lock_in(&lock_dir, path, f, wait)
 }
 
