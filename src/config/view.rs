@@ -94,6 +94,22 @@ pub fn from_resolved(snapshot: &Resolved<Config>) -> Result<EffectiveView> {
 }
 
 pub(crate) fn runtime_identity(config: &Config) -> Result<String> {
+    settings_identity(
+        config,
+        "project-runtime-v1",
+        Some(super::schema::Scope::Project),
+    )
+}
+
+pub(crate) fn launch_identity(config: &Config) -> Result<String> {
+    settings_identity(config, "daemon-launch-policy-v1", None)
+}
+
+fn settings_identity(
+    config: &Config,
+    domain: &str,
+    scope: Option<super::schema::Scope>,
+) -> Result<String> {
     use super::{bootstrap::DefaultsContext, resolve::Resolution};
     let snapshot =
         Resolution::<ConfigSpec>::from_provided(&DefaultsContext::standalone(), config).finish()?;
@@ -101,10 +117,20 @@ pub(crate) fn runtime_identity(config: &Config) -> Result<String> {
     let fields: Vec<_> = view
         .fields
         .iter()
-        .filter(|field| field.origin.scope == super::schema::Scope::Project)
+        .filter(|field| scope.is_none_or(|scope| field.origin.scope == scope))
         .map(|field| (field.key, &field.value))
         .collect();
-    super::change::policy_identity("project-runtime-v1", &(config.ann_search.is_some(), fields))
+    if scope.is_some() {
+        return super::change::policy_identity(domain, &(config.ann_search.is_some(), fields));
+    }
+    let vector_policy = config
+        .vector_store
+        .as_ref()
+        .map(|policy| (policy.max_entries, policy.max_bytes, policy.busy_timeout));
+    super::change::policy_identity(
+        domain,
+        &(config.ann_search.is_some(), fields, vector_policy),
+    )
 }
 
 /// Resolves the same versioned sources as the runtime loader and displays their origins.

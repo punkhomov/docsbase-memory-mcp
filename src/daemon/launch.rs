@@ -36,6 +36,7 @@ pub(crate) struct LaunchConfig {
     pub config: Resolved<Config>,
     pub path: Option<PathBuf>,
     pub stamp: ConfigStamp,
+    pub overrides: DaemonPatch,
     pub error: Option<String>,
     pub invalidation: crate::config::policy::PolicyContext,
     pub startup: Option<preflight::StartupExpectations>,
@@ -269,9 +270,10 @@ impl LaunchSnapshot {
 
     pub(crate) fn strict(&self, patch: DaemonPatch) -> Result<LaunchConfig> {
         Ok(LaunchConfig {
-            config: self.resolve(patch)?,
+            config: self.resolve(patch.clone())?,
             path: self.path.clone(),
             stamp: self.stamp(),
+            overrides: patch,
             error: None,
             invalidation: crate::config::policy::PolicyContext::Legacy,
             startup: None,
@@ -284,9 +286,10 @@ impl LaunchSnapshot {
         if matches!(self.bytes, CapturedBytes::Missing) {
             Ok(LaunchConfig {
                 config: crate::config::resolve::LaunchResolution::legacy_defaults()
-                    .finish(patch)?,
+                    .finish(patch.clone())?,
                 path: self.path.clone(),
                 stamp: self.stamp(),
+                overrides: patch,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -305,9 +308,10 @@ impl LaunchSnapshot {
     fn legacy_for(&self, patch: DaemonPatch, launch_use: LaunchUse) -> Result<LaunchConfig> {
         match self.resolution(launch_use) {
             Ok(resolution) => Ok(LaunchConfig {
-                config: resolution.finish(patch)?,
+                config: resolution.finish(patch.clone())?,
                 path: self.path.clone(),
                 stamp: self.stamp(),
+                overrides: patch,
                 error: None,
                 invalidation: crate::config::policy::PolicyContext::Legacy,
                 startup: None,
@@ -326,12 +330,13 @@ impl LaunchSnapshot {
                     return Err(error);
                 }
                 eprintln!("warning: global config unavailable: {error}");
-                let config =
-                    crate::config::resolve::LaunchResolution::legacy_defaults().finish(patch)?;
+                let config = crate::config::resolve::LaunchResolution::legacy_defaults()
+                    .finish(patch.clone())?;
                 Ok(LaunchConfig {
                     config,
                     path: self.path.clone(),
                     stamp: self.stamp(),
+                    overrides: patch,
                     error: Some(error.to_string()),
                     invalidation: crate::config::policy::PolicyContext::Legacy,
                     startup: None,
@@ -389,7 +394,39 @@ pub(crate) fn restart_notice(path: Option<&Path>, baseline: &ConfigStamp) -> Opt
         || ConfigStamp::Unavailable("global config path unavailable".to_owned()),
         |path| stamp(&capture(path)),
     );
-    match (&current, baseline) {
+    source_notice(&current, baseline)
+}
+
+pub(crate) fn effective_restart_notice(
+    path: Option<&Path>,
+    baseline: &ConfigStamp,
+    active: &Config,
+    overrides: &DaemonPatch,
+) -> Option<String> {
+    let Some(path) = path else {
+        return restart_notice(None, baseline);
+    };
+    let snapshot = LaunchSnapshot {
+        path: Some(path.to_owned()),
+        bytes: capture(path),
+    };
+    let notice = source_notice(&snapshot.stamp(), baseline)?;
+    let unchanged = if matches!(baseline, ConfigStamp::Unavailable(_)) {
+        false
+    } else {
+        snapshot
+            .resolve(overrides.clone())
+            .and_then(|resolved| {
+                Ok(crate::config::view::launch_identity(resolved.settings())?
+                    == crate::config::view::launch_identity(active)?)
+            })
+            .unwrap_or(false)
+    };
+    (!unchanged).then_some(notice)
+}
+
+fn source_notice(current: &ConfigStamp, baseline: &ConfigStamp) -> Option<String> {
+    match (current, baseline) {
         (ConfigStamp::Unavailable(reason), _) => Some(format!(
             "global config unavailable ({reason}); restart the daemon: `docsbase daemon stop`"
         )),

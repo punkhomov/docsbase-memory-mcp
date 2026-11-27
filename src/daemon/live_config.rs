@@ -240,6 +240,7 @@ pub(super) fn snapshot(
             config,
             global: shared.global_config_stamp.clone(),
             daemon: &shared.global_config,
+            overrides: &shared.global_config_overrides,
             ann,
         },
     )?;

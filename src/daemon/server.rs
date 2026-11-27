@@ -117,6 +117,7 @@ pub struct Shared {
     global_config_error: Option<String>,
     /// Fingerprint of the global config file at daemon start (OQ-6).
     global_config_stamp: ConfigStamp,
+    global_config_overrides: crate::daemon::settings::DaemonPatch,
     global_config_path: Option<PathBuf>,
     invalidation: crate::config::policy::PolicyContext,
     /// Per-project config/stage slots; the map lock only protects lookup.
@@ -671,6 +672,7 @@ impl Shared {
             website,
             global_config_error: launch.error,
             global_config_stamp: launch.stamp,
+            global_config_overrides: launch.overrides,
             global_config_path: launch.path,
             invalidation: launch.invalidation,
             project_states: Mutex::new(project_states),
@@ -2140,6 +2142,14 @@ impl Shared {
             return Some(format!(
                 "global config is invalid ({err}); fix it and run `docsbase daemon stop`"
             ));
+        }
+        if self.catalog_epoch.is_some() {
+            return crate::daemon::launch::effective_restart_notice(
+                self.global_config_path.as_deref(),
+                &self.global_config_stamp,
+                &self.global_config,
+                &self.global_config_overrides,
+            );
         }
         crate::daemon::launch::restart_notice(
             self.global_config_path.as_deref(),

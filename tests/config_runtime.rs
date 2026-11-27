@@ -969,7 +969,11 @@ fn v2_live_config_plan_observes_current_runtime_without_loading_new_settings() {
         "project_runtime"
     );
 
-    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\npoll_interval_ms = 25\n",
+    )
+    .unwrap();
     let restart = env.run_json(&["config", "plan", "--live"]);
     assert_eq!(restart["restart_required"], true);
     assert_eq!(restart["actions"][0]["resource"]["value"], "daemon_global");
@@ -988,6 +992,100 @@ fn assert_restart_follows_replacement(env: &Env) {
     assert_eq!(index["value"]["component"], "project_index");
     assert_eq!(actions[1]["resource"]["value"], "daemon_global");
     assert_eq!(actions[1]["dependencies"], serde_json::json!([index]));
+}
+
+#[test]
+fn v2_live_plan_uses_effective_global_settings_for_restart() {
+    let mut env = Env::new(&[("guide.md", "semanticglobalwidget")]);
+    let write_global = |grace, note: &str| {
+        fs::write(
+            env.global_config(),
+            format!("config_version = 2\n[daemon]\nidle_grace_ms = {grace}\n{note}\n"),
+        )
+        .unwrap();
+    };
+    write_global(1200, "# Startup file");
+    env.run_json(&["index"]);
+    env.start_daemon(); // --grace-ms=3000 overrides the file
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let baseline = env.run_json(&["config", "plan", "--live", "--check"]);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\nidle_grace_ms = 1800\n# Updated file with an overridden setting\n",
+    ).unwrap();
+    let edited = env.run_json(&["config", "plan", "--live", "--check"]);
+    assert_eq!(edited["restart_required"], false);
+    assert_eq!(edited["actions"], serde_json::json!([]));
+    assert_ne!(edited["plan_id"], baseline["plan_id"]);
+    let status = |client: &mut Client| {
+        client.call_tool("status", serde_json::json!({})).unwrap()["restart_required"].clone()
+    };
+    assert_eq!(status(&mut client), false);
+
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\nidle_grace_ms = 1800\npoll_interval_ms = 40\n",
+    )
+    .unwrap();
+    let changed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(changed["restart_required"], true);
+    assert_eq!(changed["actions"][0]["resource"]["value"], "daemon_global");
+    assert_eq!(status(&mut client), true);
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[vector_cache]\nmax_entries = 1234\nbusy_timeout = 789\n",
+    )
+    .unwrap();
+    let vector_change = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(vector_change["restart_required"], true);
+    assert_ne!(vector_change["actions"], serde_json::json!([]));
+    assert_eq!(status(&mut client), true);
+    assert_eq!(
+        search(&mut client, "semanticglobalwidget"),
+        vec!["guide.md"]
+    );
+}
+
+#[test]
+fn v2_live_plan_reports_profile_restart_for_an_excluded_project() {
+    let mut env = Env::new(&[("guide.md", "requestedprofilewidget")]);
+    let fixed = TempDir::new().unwrap();
+    fs::write(fixed.path().join("guide.md"), "fixedprofilewidget").unwrap();
+    env.run_json(&["index"]);
+    env.run_json(&["index", fixed.path().to_str().unwrap()]);
+    env.daemon = Some(
+        env.cmd()
+            .args(["serve", "--detached"])
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_until(Duration::from_secs(10), || platform::exists(
+        &platform::daemon_endpoint(env.cache())
+    )));
+    let mut client = env.client();
+    client.handshake(env.root()).unwrap();
+    let root = toml::Value::String(
+        fixed
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+    );
+    fs::write(env.global_config(), format!(
+        "config_version = 2\n[daemon]\nprofile = {{ mode = 'website', project_root = {root} }}\n"
+    )).unwrap();
+    let changed = env.run_json(&["config", "plan", "--live"]);
+    assert_eq!(changed["restart_required"], true);
+    assert_eq!(changed["actions"][0]["resource"]["value"], "daemon_global");
+    assert_eq!(changed["blockers"][0]["code"], "invalid_settings");
+    assert_eq!(
+        client.call_tool("status", serde_json::json!({})).unwrap()["restart_required"],
+        true
+    );
 }
 
 #[test]
@@ -1072,7 +1170,11 @@ fn v2_live_config_applies_only_the_reviewed_project_runtime() {
         vec!["guide.md"]
     );
 
-    fs::write(env.global_config(), "config_version = 2\n").unwrap();
+    fs::write(
+        env.global_config(),
+        "config_version = 2\n[daemon]\npoll_interval_ms = 25\n",
+    )
+    .unwrap();
     let restart = env.run_json(&["config", "plan", "--live"]);
     assert_eq!(restart["restart_required"], true);
     let refused = env

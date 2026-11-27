@@ -2337,3 +2337,21 @@ budget. The Stop exchange and its process wait are capped by that outer
 deadline. A native unanswered Unix socket reproduced an old 15-second wait
 with a 500 ms caller deadline. The corrected fixture returns in 0.52 s and
 leaves the still-owned daemon state intact.
+
+## 2026-11-27 — CF4, действующая политика запуска live v5
+
+Task CF4 launch policy comparison: complete (typed policy, captured CLI
+priority, exact source review and independent fix review). Native checks
+remain pending.
+
+Ruling: a semantic launch identity covers the v2 vector-owner limits and
+runtime values after the original CLI overlay. An edit masked by that overlay
+or restricted to comments changes the exact source plan ID without requiring
+restart. Actual transport or vector policy changes require a restart. The
+live plan also reports a valid Website profile change when the requested
+project is outside the new fixed scope. Status and live plan use the same
+identity. Guarded startup and apply still compare exact source observations.
+
+minor (deferred): a changed source is parsed for each status request until
+restart. This is bounded by the existing config byte limit. No global
+observation cache was added.

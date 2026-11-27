@@ -63,6 +63,7 @@ pub(crate) struct ActiveProjectConfig<'a> {
     pub(crate) config: Option<Arc<Config>>,
     pub(crate) global: crate::daemon::launch::ConfigStamp,
     pub(crate) daemon: &'a Config,
+    pub(crate) overrides: &'a crate::daemon::settings::DaemonPatch,
     pub(crate) ann: AnnObservation,
 }
 
@@ -222,27 +223,17 @@ fn project_plan_using(
 
     let mut replacement = None;
     let mut live_change = None;
-    let restart_required = active
-        .as_ref()
-        .map(|active| global_changed(&active.global, &global.observation.state));
+    let mut restart_required = None;
     let (full_survey, observation_failure) = if assessment.blockers.is_empty() {
-        match crate::config::resolve::resolve_observed_v2(
-            global.layer.as_ref(),
-            project.layer.as_ref(),
-            profile,
-            active
-                .as_ref()
-                .filter(|_| restart_required == Some(false))
-                .map(|active| active.daemon),
-        ) {
-            Ok(Some((global_config, config))) if permits_project(&config, root) => {
+        match resolve_plan_sources(&global, &project, active.as_ref(), profile) {
+            Ok(Some((global_config, Ok(config)))) if permits_project(&config, root) => {
                 match inspect()? {
                     Ok(inspection) => {
                         let survey = assess_project(&inspection, &config, &mut assessment)?;
                         if let Some(active) = &active {
-                            assess_runtime(
+                            restart_required = assess_runtime(
                                 active,
-                                &global.observation.state,
+                                global_config.settings(),
                                 &config,
                                 &inspection,
                                 &mut assessment,
@@ -288,11 +279,13 @@ fn project_plan_using(
                 );
                 (None, None)
             }
-            Ok(Some(_)) | Err(_) => {
-                assessment.blockers.push(Blocker {
-                    resource: None,
-                    code: BlockerCode::InvalidSettings,
-                });
+            Ok(Some((global, _))) => {
+                restart_required =
+                    blocked_project(active.as_ref(), Some(&global), &mut assessment)?;
+                (None, None)
+            }
+            Err(_) => {
+                blocked_project(None, None, &mut assessment)?;
                 (None, None)
             }
         }
@@ -315,6 +308,56 @@ fn project_plan_using(
         replacement,
         live_change,
     })
+}
+
+fn blocked_project(
+    active: Option<&ActiveProjectConfig<'_>>,
+    global: Option<&Resolved<Config>>,
+    assessment: &mut Assessment,
+) -> Result<Option<bool>> {
+    assessment.blockers.push(Blocker {
+        resource: None,
+        code: BlockerCode::InvalidSettings,
+    });
+    match active.zip(global) {
+        Some((active, global)) => assess_daemon_global(active, global.settings(), None, assessment),
+        None => Ok(None),
+    }
+}
+
+fn resolve_plan_sources(
+    global: &source::Captured,
+    project: &source::Captured,
+    active: Option<&ActiveProjectConfig<'_>>,
+    profile: Option<&DaemonProfile>,
+) -> Result<Option<(Resolved<Config>, Result<Config>)>> {
+    let overrides = active.map_or_else(
+        || crate::daemon::settings::DaemonPatch {
+            profile: profile.cloned(),
+            ..crate::daemon::settings::DaemonPatch::default()
+        },
+        |active| active.overrides.clone(),
+    );
+    let captured = active
+        .filter(|active| !global_changed(&active.global, &global.observation.state))
+        .map(|active| active.daemon);
+    let global = crate::config::resolve::resolve_observed_global_v2(
+        global.layer.as_ref(),
+        overrides,
+        captured,
+    )?;
+    Ok(global.map(|global| {
+        let settings =
+            crate::config::resolve::for_observed_project(&global, project.layer.as_ref()).and_then(
+                |config| {
+                    if matches!(config.daemon.profile, DaemonProfile::Website { .. }) {
+                        crate::daemon::launch::lexical_only(&config)?;
+                    }
+                    Ok(config)
+                },
+            );
+        (global, settings)
+    }))
 }
 
 fn capture_plan_sources(
@@ -421,51 +464,44 @@ fn global_changed(
 }
 
 fn assess_daemon_global(
-    stamp: &crate::daemon::launch::ConfigStamp,
-    source: &source::SourceState,
+    active: &ActiveProjectConfig<'_>,
+    desired: &Config,
     index_dependency: Option<ResourceId>,
     assessment: &mut Assessment,
-) -> Result<()> {
+) -> Result<Option<bool>> {
     use crate::config::schema::ComponentImpact;
-    use crate::daemon::launch::ConfigStamp;
-    let previous = match stamp {
-        ConfigStamp::Missing => Some("missing".to_owned()),
-        ConfigStamp::Loaded(hash) => Some(format!("source-bytes-v1:{}", hash.to_hex())),
-        ConfigStamp::Unavailable(_) => None,
-    };
-    let desired = match source {
-        source::SourceState::Missing => Some("missing"),
-        source::SourceState::Loaded { revision, .. } => Some(revision.as_str()),
-        source::SourceState::Unavailable(_) => None,
-    };
-    let Some((previous, desired)) = previous.as_deref().zip(desired) else {
+    if matches!(
+        active.global,
+        crate::daemon::launch::ConfigStamp::Unavailable(_)
+    ) {
         let resource = ResourceId::Runtime("daemon_global".into());
         assessment.expected.push(Observation {
             resource: resource.clone(),
             state: ExpectedState::Unknown,
         });
         block(assessment, &resource, BlockerCode::ObservationUnavailable);
-        return Ok(());
-    };
-    let previous = change::policy_identity("daemon-source-revision-v1", &previous)?;
-    let desired = change::policy_identity("daemon-source-revision-v1", &desired)?;
+        return Ok(None);
+    }
+    let previous = crate::config::view::launch_identity(active.daemon)?;
+    let desired = crate::config::view::launch_identity(desired)?;
     let impact = ComponentImpact::between(Some(&previous), &desired);
     let mut daemon = change::runtime_assessment("daemon_global", Some(previous), desired, impact);
+    let restart = !daemon.actions.is_empty();
     if let Some(action) = daemon.actions.first_mut() {
         action.dependencies.extend(index_dependency);
     }
     assessment.expected.extend(daemon.expected);
     assessment.actions.extend(daemon.actions);
-    Ok(())
+    Ok(Some(restart))
 }
 
 fn assess_runtime(
     active: &ActiveProjectConfig,
-    global: &source::SourceState,
+    global: &Config,
     config: &Config,
     inspection: &registry_inspect::ProjectRecipeInspection,
     assessment: &mut Assessment,
-) -> Result<()> {
+) -> Result<Option<bool>> {
     use crate::config::schema::ComponentImpact;
     let index = artifact("project_index", inspection.project_id);
     let index_dependency = assessment
@@ -473,7 +509,7 @@ fn assess_runtime(
         .iter()
         .any(|action| action.resource == index)
         .then_some(index);
-    assess_daemon_global(&active.global, global, index_dependency.clone(), assessment)?;
+    let restart = assess_daemon_global(active, global, index_dependency.clone(), assessment)?;
     let old = active.config.as_deref();
     if let Some(old) = old {
         let previous = crate::config::view::runtime_identity(old)?;
@@ -500,7 +536,8 @@ fn assess_runtime(
             state: ExpectedState::Missing,
         });
     }
-    assess_ann(active, config, inspection, assessment)
+    assess_ann(active, config, inspection, assessment)?;
+    Ok(restart)
 }
 
 fn assess_ann(
