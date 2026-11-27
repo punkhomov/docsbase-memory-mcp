@@ -121,7 +121,7 @@ pub struct Shared {
     global_config_overrides: crate::daemon::settings::DaemonPatch,
     global_config_defaults: crate::config::bootstrap::DefaultsContext,
     global_config_path: Option<PathBuf>,
-    config_lock_dir: PathBuf,
+    config_lock_dir: Option<PathBuf>,
     invalidation: crate::config::policy::PolicyContext,
     /// Per-project config/stage slots; the map lock only protects lookup.
     project_states: Mutex<HashMap<i64, ProjectSlot>>,
@@ -453,6 +453,12 @@ fn prepare_metadata_store(
 }
 
 impl Shared {
+    fn config_lock_dir(&self) -> Result<&Path> {
+        self.config_lock_dir
+            .as_deref()
+            .ok_or_else(|| Error::internal("configuration lock directory is unavailable"))
+    }
+
     pub(super) const fn registry_schema(&self) -> u32 {
         if self.catalog_epoch.is_some() {
             crate::store::GENERATION_SCHEMA_VERSION
@@ -3615,7 +3621,7 @@ fn prepare_catalog_project_sync(
             watchers: Arc::clone(&shared.watchers),
             global_config: shared.global_config.clone(),
             global_path: shared.global_config_path.clone(),
-            config_lock_dir: shared.config_lock_dir.clone(),
+            config_lock_dir: shared.config_lock_dir()?.to_path_buf(),
             watch_runtime: Arc::new(crate::watch::WatchRuntime::new(
                 Arc::clone(&config),
                 Arc::clone(&stages),

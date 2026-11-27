@@ -58,7 +58,8 @@ pub(crate) struct AdmittedLaunch {
     pub launch: LaunchConfig,
     pub website: Option<FixedProject>,
     pub catalog_epoch: Option<[u8; 16]>,
-    pub config_lock_dir: PathBuf,
+    // Read-only work can proceed without a discovered data directory.
+    pub config_lock_dir: Option<PathBuf>,
 }
 
 impl AdmittedLaunch {
@@ -124,14 +125,14 @@ impl LaunchConfig {
         cache: &Path,
         settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
     ) -> Result<AdmittedLaunch> {
-        self.admit_with_config_lock_dir(cache, settings, paths::config_lock_dir()?)
+        self.admit_with_config_lock_dir(cache, settings, paths::config_lock_dir().ok())
     }
 
     pub(crate) fn admit_with_config_lock_dir(
         self,
         cache: &Path,
         settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-        config_lock_dir: PathBuf,
+        config_lock_dir: Option<PathBuf>,
     ) -> Result<AdmittedLaunch> {
         self.config.settings().validate()?;
         self.recheck_startup(None)?;
