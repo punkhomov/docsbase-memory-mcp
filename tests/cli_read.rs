@@ -240,6 +240,7 @@ fn unregistered_project_message() {
 #[test]
 fn read_path_needs_no_writer() {
     let env = Env::new(&[("docs/a.md", DOC)]);
+    drop(Db::open(env.cache.path()).unwrap());
     env.index();
 
     let writer = IndexHandle::open_or_create(&env.cache.path().join("projects/1/tantivy"))
@@ -322,12 +323,7 @@ fn status_lists_projects() {
         .get_output()
         .clone();
     let json = stdout_json(&output);
-    assert_eq!(
-        json["schema_version"].as_u64(),
-        Some(u64::from(
-            docsbase_memory::store::migrations::SCHEMA_VERSION
-        ))
-    );
+    assert_eq!(json["schema_version"], 5);
     let projects = json["projects"].as_array().expect("projects");
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["status"], "indexed");

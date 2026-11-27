@@ -421,7 +421,6 @@ fn catalog_reader_holds_the_pair_lease_and_distinguishes_equal_revisions() {
     assert!(error.to_string().contains("Tantivy"), "{error}");
 }
 
-#[cfg(unix)]
 struct RevisablePair {
     env: Env,
     policy: Resolved<DbSettings>,
@@ -432,7 +431,6 @@ struct RevisablePair {
     generation: i64,
 }
 
-#[cfg(unix)]
 impl RevisablePair {
     fn new() -> Self {
         let env = Env::new();
@@ -468,6 +466,7 @@ impl RevisablePair {
         self.env.generation(self.generation)
     }
 
+    #[cfg(unix)]
     fn use_schema_1(&self) -> Vec<u8> {
         let metadata_path = self.dir().join("metadata.db");
         let metadata = Connection::open(&metadata_path).unwrap();
@@ -632,7 +631,139 @@ fn catalog_reads_incremental_revision_after_schema_1_upgrade() {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(windows)]
+fn blocked_watcher_directory_keeps_the_selected_revision_searchable() {
+    let pair = RevisablePair::new();
+    let before = pair.search("Applemigration").unwrap().0;
+    pair.write_source("# Plum\n\nPlumwatchretry\n");
+    let dir = pair.dir().join("tantivy");
+    let blocked = native_fs::block_directory_sync_for_test(&dir).unwrap();
+    let error = pair.apply().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
+        "{error}"
+    );
+    let (current, hits) = pair.search("Applemigration").unwrap();
+    assert_eq!(current, before);
+    assert_eq!(hits, 1);
+    drop(blocked);
+
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    let (after, hits) = pair.search("Plumwatchretry").unwrap();
+    assert_eq!(after.generation_id(), before.generation_id());
+    assert_eq!(after.content_revision(), before.content_revision() + 1);
+    assert_eq!(hits, 1);
+}
+
+#[test]
+fn incomplete_replacement_preserves_the_searchable_generation() {
+    let pair = RevisablePair::new();
+    let (before, hits) = pair.search("Applemigration").unwrap();
+    assert_eq!(hits, 1);
+    fs::write(pair.env.source.path().join("guide.md"), [0xff]).unwrap();
+
+    let error = pair.rebuild(|| Ok(())).unwrap_err();
+    assert!(error.to_string().contains("guide.md"), "{error}");
+    assert_eq!(pair.search("Applemigration").unwrap(), (before, 1));
+
+    pair.write_source("# Cherry\n\nCherryupdatedbatch\n");
+    pair.rebuild(|| Ok(())).unwrap();
+    let (after, hits) = pair.search("Cherryupdatedbatch").unwrap();
+    assert_ne!(after.generation_id(), before.generation_id());
+    assert_eq!(hits, 1);
+}
+
+#[test]
+fn catalog_rebuild_replaces_damaged_lexical_files_without_removing_unowned_files() {
+    let pair = RevisablePair::new();
+    let old = pair.search("Applemigration").unwrap().0;
+    let directory = pair.dir();
+    let tantivy = directory.join("tantivy");
+    fs::remove_file(tantivy.join("meta.json")).unwrap();
+    let unowned = tantivy.join("87654321876543218765432187654321.store");
+    fs::write(&unowned, b"unowned").unwrap();
+    let managed = tantivy.join(".managed.json");
+    let mut inventory: Vec<String> = serde_json::from_slice(&fs::read(&managed).unwrap()).unwrap();
+    inventory.push(unowned.file_name().unwrap().to_str().unwrap().to_owned());
+    fs::write(managed, serde_json::to_vec(&inventory).unwrap()).unwrap();
+    assert!(pair.search("Applemigration").is_err());
+    pair.write_source("# Fig\n\nFigrepairedgeneration\n");
+
+    let refused = pair
+        .rebuild(|| Err(admission("reject replacement")))
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("reject replacement"),
+        "{refused}"
+    );
+    let head = generation_catalog::active_head(pair.registry.connection(), pair.project.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(head.id), old.generation_id());
+    assert!(directory.join("metadata.db").is_file());
+
+    pair.rebuild(|| Ok(())).unwrap();
+    let (repaired, hits) = pair.search("Figrepairedgeneration").unwrap();
+    assert_ne!(repaired.generation_id(), old.generation_id());
+    assert_eq!(hits, 1);
+    assert!(
+        reclaim_retired_lexical_generation(
+            pair.env.cache.path(),
+            pair.request,
+            pair.generation,
+            &pair.policy,
+            limits(),
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&unowned).unwrap(), b"unowned");
+}
+
+#[test]
+fn catalog_rebuild_repairs_truncated_revised_positions() {
+    let pair = RevisablePair::new();
+    pair.write_source("# Fig\n\nFigrevisedgeneration\n");
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    let tantivy = pair.dir().join("tantivy");
+    let index = tantivy::Index::open_in_dir(&tantivy).unwrap();
+    let segments = index.searchable_segment_metas().unwrap();
+    let positions = segments[0].relative_path(tantivy::index::SegmentComponent::Positions);
+    drop(index);
+    fs::write(tantivy.join(positions), [0]).unwrap();
+
+    assert!(pair.search("Figrevisedgeneration").is_err());
+    pair.rebuild(|| Ok(())).unwrap();
+    let (repaired, hits) = pair.search("Figrevisedgeneration").unwrap();
+    assert_ne!(repaired.generation_id(), Some(pair.generation));
+    assert_eq!(hits, 1);
+}
+
+#[test]
+fn catalog_rebuild_succeeds_without_a_readable_retirement_inventory() {
+    for missing_directory in [true, false] {
+        let pair = RevisablePair::new();
+        let directory = pair.dir();
+        let tantivy = directory.join("tantivy");
+        if missing_directory {
+            fs::remove_dir_all(tantivy).unwrap();
+        } else {
+            fs::write(tantivy.join(".managed.json"), "broken retirement inventory").unwrap();
+        }
+        let unowned = directory.join("unowned");
+        fs::write(&unowned, b"keep me").unwrap();
+
+        pair.write_source("# Fig\n\nFigrepairedgeneration\n");
+        pair.rebuild(|| Ok(())).unwrap();
+        let (repaired, hits) = pair.search("Figrepairedgeneration").unwrap();
+        assert_ne!(repaired.generation_id(), Some(pair.generation));
+        assert_eq!(hits, 1);
+        assert_eq!(fs::read(unowned).unwrap(), b"keep me");
+    }
+}
+
+#[test]
 fn catalog_rebuild_replaces_an_interrupted_revision_and_resumes_cleanup() {
     let pair = RevisablePair::new();
     let directory = pair.dir();
@@ -724,7 +855,6 @@ fn catalog_rebuild_replaces_an_interrupted_revision_and_resumes_cleanup() {
 }
 
 #[test]
-#[cfg(unix)]
 fn explicit_rebuild_recovers_local_rollback_journals() {
     const CHILD_METADATA: &str = "DOCSBASE_TEST_ABANDON_LOCAL_METADATA";
     const CHILD_SPILL: &str = "DOCSBASE_TEST_ABANDON_LOCAL_SPILL";
@@ -750,7 +880,6 @@ fn explicit_rebuild_recovers_local_rollback_journals() {
     }
 }
 
-#[cfg(unix)]
 fn check_local_rollback_journal(metadata_env: &str, spill_env: &str, spill: &str, header: [u8; 8]) {
     let env = Env::new();
     let request = env.request();
@@ -963,7 +1092,6 @@ fn retired_reclamation_requires_the_seal_while_payload_remains() {
 }
 
 #[test]
-#[cfg(unix)]
 fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
     let env = Env::new();
     let request = env.request();
@@ -1322,29 +1450,58 @@ fn publication_rechecks_a_local_base_and_rejects_a_stale_revision() {
 
 #[test]
 #[cfg(windows)]
-fn publication_without_a_directory_barrier_keeps_the_original_head() {
+fn publication_retries_after_a_native_directory_sharing_violation() {
     let env = Env::new();
+    fs::write(
+        env.source.path().join("guide.md"),
+        "# Peach\n\nPeachmigration\n",
+    )
+    .unwrap();
     let request = env.request();
     let staged = env.build(request).unwrap();
-    let error = publish_lexical_generation(
-        env.cache.path(),
-        request,
-        staged,
-        &settings::standalone().unwrap(),
-        limits(),
-        &Config::default(),
-    )
-    .unwrap_err();
+    let root = env.generation(staged.generation_id);
+    let blocked = native_fs::block_directory_sync_for_test(&root).unwrap();
+    let publish = || {
+        publish_lexical_generation(
+            env.cache.path(),
+            request,
+            staged,
+            &settings::standalone().unwrap(),
+            limits(),
+            &Config::default(),
+        )
+    };
+    let error = publish().unwrap_err();
     assert!(
-        error.to_string().contains("directory durability barrier"),
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
         "{error}"
     );
-    assert!(
-        !env.generation(staged.generation_id)
-            .join("seal.json")
-            .exists()
-    );
+    assert!(!root.join("seal.json").exists());
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
     env.assert_legacy_search();
+
+    drop(blocked);
+    let cache_blocked = native_fs::block_directory_sync_for_test(env.cache.path()).unwrap();
+    let error = publish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
+        "{error}"
+    );
+    assert_eq!(env.catalog_state().0, 1);
+    env.assert_legacy_search();
+    drop(cache_blocked);
+    let selected = publish().unwrap();
+    assert_eq!(selected.generation_id, Some(staged.generation_id));
+    assert_eq!(
+        env.catalog_state(),
+        (staged.generation_id, Some("active".into()))
+    );
+    let index = ReadIndex::open(&root.join("tantivy")).unwrap();
+    assert_eq!(index.search("Peachmigration", 5).unwrap().len(), 1);
 }
 
 #[test]
@@ -1354,17 +1511,11 @@ fn completed_pair_rejects_the_wrong_chunk_ids_even_at_equal_counts() {
     let root = env.generation(prepared.generation_id);
     let db = Connection::open(root.join("metadata.db")).unwrap();
     let index_dir = root.join("tantivy");
-    verify_chunk_pair(&db, prepared.project_id, &index_dir, limits()).unwrap();
-    let tight_limit = InspectionLimits {
-        max_metadata_bytes: size_of::<u64>(),
-        ..limits()
-    };
-    let error = verify_chunk_pair(&db, prepared.project_id, &index_dir, tight_limit).unwrap_err();
-    assert!(error.to_string().contains("metadata budget"), "{error}");
+    verify_chunk_pair(&db, prepared.project_id, &index_dir, || Ok(())).unwrap();
 
     let changed = db.execute("UPDATE chunks SET seq = seq + 1", []).unwrap();
     assert_eq!(changed, 1);
-    let error = verify_chunk_pair(&db, prepared.project_id, &index_dir, limits()).unwrap_err();
+    let error = verify_chunk_pair(&db, prepared.project_id, &index_dir, || Ok(())).unwrap_err();
     assert!(error.to_string().contains("chunk IDs"), "{error}");
     env.assert_legacy_search();
 }
@@ -1383,7 +1534,7 @@ fn completed_pair_requires_positions_for_phrase_search() {
         .expect("generated Tantivy positions");
     fs::remove_file(positions).unwrap();
 
-    assert!(verify_chunk_pair(&db, prepared.project_id, &index_dir, limits()).is_err());
+    assert!(verify_chunk_pair(&db, prepared.project_id, &index_dir, || Ok(())).is_err());
     env.assert_legacy_search();
 }
 
@@ -1624,22 +1775,26 @@ fn discarded_build_can_be_located_and_recovered_with_abandoned_registry_wal() {
 
 #[test]
 #[cfg(windows)]
-fn discard_without_a_qualified_directory_barrier_preserves_the_reservation() {
+fn discard_retries_after_a_native_directory_sharing_violation() {
     let env = Env::new();
     let request = env.request();
-    let prepared = env.build(request).unwrap();
-    let root = env.generation(prepared.generation_id);
-
-    let error = discard_lexical_generation(
-        env.cache.path(),
-        request,
-        prepared.generation_id,
-        &settings::standalone().unwrap(),
-        limits(),
-    )
-    .unwrap_err();
+    let staged = env.build(request).unwrap();
+    let root = env.generation(staged.generation_id);
+    let blocked = native_fs::block_directory_sync_for_test(root.parent().unwrap()).unwrap();
+    let discard = || {
+        discard_lexical_generation(
+            env.cache.path(),
+            request,
+            staged.generation_id,
+            &settings::standalone().unwrap(),
+            limits(),
+        )
+    };
+    let error = discard().unwrap_err();
     assert!(
-        error.to_string().contains("directory durability barrier"),
+        error
+            .to_string()
+            .contains("open generation directory for sync"),
         "{error}"
     );
     assert!(root.join(".build-owner").is_file());
@@ -1647,30 +1802,11 @@ fn discard_without_a_qualified_directory_barrier_preserves_the_reservation() {
     assert_eq!(env.catalog_state(), (1, Some("building".into())));
     env.assert_legacy_search();
 
-    // Windows cannot publish a local pair. Model a catalog moved from a
-    // supported installation to exercise the same durability gate on retire.
-    Connection::open(env.cache.path().join(DB_FILE))
-        .unwrap()
-        .execute(
-            "UPDATE project_generations SET phase='retired', seal_digest=?1 WHERE id=?2",
-            params![[1_u8; 32].as_slice(), prepared.generation_id],
-        )
-        .unwrap();
-    let error = reclaim_retired_lexical_generation(
-        env.cache.path(),
-        request,
-        prepared.generation_id,
-        &settings::standalone().unwrap(),
-        limits(),
-    )
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("directory durability barrier"),
-        "{error}"
-    );
-    assert!(root.join(".build-owner").is_file());
-    assert!(root.join("metadata.db").is_file());
-    assert_eq!(env.catalog_state(), (1, Some("retired".into())));
+    drop(blocked);
+    discard().unwrap();
+    assert!(!root.exists());
+    assert_eq!(env.catalog_state(), (1, None));
+    env.assert_legacy_search();
 }
 
 #[test]
@@ -2125,7 +2261,7 @@ fn a_private_catalog_pair_retains_preparation_until_a_later_worker_publishes() {
     };
     let build = OperationalBuild {
         request: env.request(),
-        interrupted: None,
+        replacement: None,
     };
     let mut prepare = || {
         prepare_operational_lexical_generation(
@@ -2207,7 +2343,7 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         env.cache.path(),
         OperationalBuild {
             request,
-            interrupted: None,
+            replacement: None,
         },
         &settings,
         limits(),
@@ -2235,7 +2371,7 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         env.cache.path(),
         OperationalBuild {
             request,
-            interrupted: None,
+            replacement: None,
         },
         &settings,
         limits(),

@@ -390,6 +390,7 @@ fn uninstall_lists_indexes_with_confirmation() {
     assert!(output.status.success(), "uninstall info must succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("indexed projects:"), "stdout: {stdout}");
+    assert!(stdout.contains("status indexed"), "stdout: {stdout}");
     assert!(
         stdout.contains(
             env.root()
@@ -420,7 +421,15 @@ fn uninstall_lists_indexes_with_confirmation() {
     assert!(!env.manifest().exists(), "manifest must be removed");
     assert!(!env.cache().exists(), "cache root must be removed");
     assert!(!env.launcher().exists(), "launcher must be removed");
-    assert!(!env.data().exists(), "empty data dir must be removed");
+    let remaining = fs::read_dir(env.data())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        ["locks"],
+        "only shared config locks are retained"
+    );
 }
 
 #[test]

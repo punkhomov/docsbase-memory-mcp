@@ -232,6 +232,11 @@ wal_attempts = 1
     )
     .unwrap();
     assert_eq!(env.run_json(&["index"])["project_id"], 1);
+    write_file(
+        env.root(),
+        "readme.md",
+        b"Changed storage contention fixture.",
+    );
 
     let registry = env.cache().join(docsbase_memory::store::DB_FILE);
     let conn = rusqlite::Connection::open(registry).unwrap();
@@ -419,6 +424,7 @@ fn search_readiness_rejects_other_errors_immediately() {
 #[test]
 fn search_refuses_pending_payload_and_recovers_after_completion() {
     let mut env = Env::new(&[("ready.md", &doc("readywidget"))]);
+    fs::write(env.global_config(), "# v4 pending-document fixture\n").unwrap();
     env.start_daemon();
     let mut registry_client = env.client();
     registry_client
@@ -479,6 +485,7 @@ fn project_config_applied_on_open() {
         ("aaa/a.md", &doc("alphawidget")),
         ("bbb/b.md", &doc("betawidget")),
     ]);
+    fs::write(env.global_config(), "# Legacy v1 config reload\n").unwrap();
     fs::write(env.project_config(), "ignores = [\"aaa/**\"]\n").expect("project config v1");
     env.start_daemon();
 
@@ -627,6 +634,7 @@ fn watcher_uses_reopened_config() {
         ("aaa/a.md", &doc("alphawidget")),
         ("bbb/b.md", &doc("betawidget")),
     ]);
+    fs::write(env.global_config(), "# Legacy v1 watcher reload\n").unwrap();
     fs::write(env.project_config(), "ignores = [\"aaa/**\"]\n").expect("project config v1");
     env.start_daemon();
 
@@ -775,6 +783,7 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
     let indexed = env.run_json(&["index"]);
     assert!(indexed["project_id"].is_i64());
+    assert_eq!(env.run_json(&["status"])["schema_version"], 5);
     assert!(
         !env.cache().join("vectors.db").exists(),
         "lexical v2 index must leave the vector database absent"
@@ -821,13 +830,119 @@ fn v2_config_drives_fresh_direct_index_and_daemon_search() {
     );
 }
 
-#[cfg(unix)]
+#[test]
+#[cfg(target_os = "linux")]
+fn v2_first_index_reports_non_unicode_filename_and_publishes_other_files() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let env = Env::new(&[("guide.md", "validsourcefilenamewidget")]);
+    let invalid = env
+        .root()
+        .join(std::ffi::OsStr::from_bytes(b"invalid-\xff.md"));
+    fs::write(invalid, "existing content in an unsupported filename").unwrap();
+
+    let indexed = env.run_json(&["index"]);
+    assert_eq!(indexed["stats"]["docs"], 1);
+    assert_eq!(indexed["stats"]["errors"], 1);
+    assert!(
+        indexed["stats"]["warnings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("UTF-8")
+    );
+    assert_eq!(
+        env.run_json(&["search", "validsourcefilenamewidget"])[0]["path"],
+        "guide.md"
+    );
+}
+
+#[test]
+fn v2_schema_observation_accepts_a_fresh_closed_catalog() {
+    use docsbase_memory::store::{Db, settings};
+
+    let env = Env::new(&[("guide.md", "schemaplanningwidget")]);
+    env.run_json(&["index"]);
+    let policy = settings::standalone().unwrap();
+    let facts = Db::inspect_readonly(env.cache(), &policy).unwrap();
+    assert!(
+        facts.artifacts[0]
+            .identity
+            .as_deref()
+            .unwrap()
+            .starts_with("sqlite-schema-v1:5:")
+    );
+    let assessment = settings::DbSpec::assess_schema(&facts).unwrap();
+    assert!(assessment.blockers.is_empty(), "{assessment:?}");
+    assert!(assessment.actions.is_empty(), "{assessment:?}");
+}
+
+#[test]
+fn v2_stopped_index_reuses_unchanged_generation() {
+    let env = Env::new(&[("guide.md", "unchangedcatalogwidget")]);
+    let indexed = env.run_json(&["index"]);
+    let id = indexed["project_id"].as_i64().unwrap();
+    let selected = || -> i64 {
+        let db =
+            rusqlite::Connection::open(env.cache().join(docsbase_memory::store::DB_FILE)).unwrap();
+        db.query_row(
+            "SELECT active_id FROM project_generation_head WHERE project_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let generation = selected();
+
+    let repeated = env.run_json(&["index"]);
+    assert_eq!(repeated["stats"]["docs"], 0);
+    assert_eq!(repeated["stats"]["skipped"], 1);
+    assert_eq!(selected(), generation);
+
+    let path = env.cache().join(format!(
+        "projects/{id}/generations/{generation}/metadata.db"
+    ));
+    let metadata = rusqlite::Connection::open(path).unwrap();
+    assert_eq!(metadata.execute("DELETE FROM chunks", []).unwrap(), 1);
+    drop(metadata);
+    let repaired = env.run_json(&["index"]);
+    assert_eq!(repaired["stats"]["docs"], 1);
+    let repaired_generation = selected();
+    assert!(repaired_generation > generation);
+
+    let tantivy = env.cache().join(format!(
+        "projects/{id}/generations/{repaired_generation}/tantivy"
+    ));
+    let positions = fs::read_dir(&tantivy)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "pos"))
+        .unwrap();
+    let mut bytes = fs::read(&positions).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&positions, bytes).unwrap();
+    let managed = tantivy.join(".managed.json");
+    let inventory = fs::read_to_string(&managed).unwrap();
+    let positions_name = positions.file_name().unwrap().to_str().unwrap();
+    let damaged_inventory =
+        inventory.replace(positions_name, &positions_name.replace(".pos", ".pad"));
+    assert_ne!(inventory, damaged_inventory);
+    assert_eq!(inventory.len(), damaged_inventory.len());
+    fs::write(managed, damaged_inventory).unwrap();
+
+    let repaired_postings = env.run_json(&["index"]);
+    assert_eq!(repaired_postings["stats"]["docs"], 1);
+    assert!(selected() > repaired_generation);
+    assert_eq!(
+        env.run_json(&["search", "unchangedcatalogwidget"])[0]["path"],
+        "guide.md"
+    );
+}
+
 fn seed_v5_registry(env: &Env) {
     let mut db = docsbase_memory::store::Db::open(env.cache()).unwrap();
     seed_v5_catalog(&mut db);
 }
 
-#[cfg(unix)]
 fn seed_v5_catalog(db: &mut docsbase_memory::store::Db) -> [u8; 16] {
     let epoch = [17; 16];
     // Fresh runtime initialization is covered separately. This seeds only the
@@ -995,7 +1110,6 @@ fn stopped_search_checks_the_v5_embedding_recipe_before_constructing_provider() 
 }
 
 #[test]
-#[cfg(unix)]
 fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
     let env = Env::new(&[("guide.md", "# Guide\n\nfirstgenerationpulsar\n")]);
     fs::write(env.global_config(), "config_version = 2\n").unwrap();
@@ -1070,7 +1184,9 @@ fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
     drop(lease);
     assert!(reader.try_write().is_ok());
     drop(reader);
-    assert_eq!(env.run_json(&["index"])["stats"]["docs"], 1);
+    let repeated = env.run_json(&["index"]);
+    assert_eq!(repeated["stats"]["docs"], 0);
+    assert_eq!(repeated["stats"]["skipped"], 1);
     assert!(!first_dir.exists());
     let registry =
         rusqlite::Connection::open(env.cache().join(docsbase_memory::store::DB_FILE)).unwrap();
@@ -1226,6 +1342,7 @@ fn v2_cli_index_uses_the_live_owner_and_returns_index_counters() {
     ]);
     fs::write(env.global_config(), "config_version = 2\n").unwrap();
     env.start_daemon();
+    assert_eq!(env.run_json(&["status"])["schema_version"], 5);
 
     let first = env.cmd().arg("index").output().unwrap();
     assert!(first.status.success(), "{first:?}");
@@ -1339,6 +1456,7 @@ fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(env.run_json(&["status"])["schema_version"], 4);
     env.start_daemon();
     write_file(
         env.cache(),
@@ -1361,6 +1479,7 @@ fn changed_config_version_refuses_cli_operations_against_stale_daemon() {
     };
     expect_refusal(&env);
     env.restart_daemon();
+    assert_eq!(env.run_json(&["status"])["schema_version"], 4);
     let out = env.cmd().args(["search", "quasar"]).output().unwrap();
     assert!(
         out.status.success(),
@@ -1534,6 +1653,16 @@ fn v2_lexical_weights_change_real_search_without_reindexing() {
     let reopened = env.run_json(&query);
     assert_eq!(reopened["hits"], baseline["hits"]);
     assert_eq!(reopened["meta"]["index_generation"], generation);
+
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[lexical]\ntitle_boost = 0.0\n",
+    )
+    .unwrap();
+    let index = env.run_json(&["index"]);
+    assert_eq!(index["stats"]["docs"], 0);
+    assert_eq!(index["stats"]["skipped"], 2);
+    assert_eq!(env.run_json(&query)["hits"], direct["hits"]);
 }
 
 #[test]

@@ -10,8 +10,10 @@ use tantivy::query::{BooleanQuery, ConstScoreQuery, Occur, QueryParser, TermSetQ
 use tantivy::schema::{
     Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
 };
+use tantivy::termdict::TermMerger;
 use tantivy::{
-    Index, IndexReader, IndexWriter, ReloadPolicy, Segment, SegmentReader, TantivyDocument, Term,
+    DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, Segment, SegmentReader, TERMINATED,
+    TantivyDocument, Term,
 };
 
 use super::lexical_settings::{self, LexicalCollection, LexicalSettings};
@@ -558,37 +560,104 @@ impl ReadIndex {
         Ok(())
     }
 
-    /// Compares stored IDs with sorted SQLite IDs under exclusive staging ownership.
-    pub(crate) fn verify_chunk_ids(dir: &Path, expected: &[u64]) -> Result<()> {
-        let (index, fields) = open_readable_index(dir)?;
-        let mut seen = Vec::new();
-        seen.try_reserve_exact(expected.len()).map_err(|error| {
-            Error::internal_with_source("allocate staged chunk verification", error)
-        })?;
-        seen.resize(expected.len(), false);
-        let mismatch = || Error::internal("staged SQLite and Tantivy chunk IDs do not match");
-        for segment in index.searchable_segments().map_err(tantivy_error)? {
-            let segment = open_searchable_segment(&segment)?;
-            let store = segment
-                .get_store_reader(0)
-                .map_err(|error| tantivy_error(error.into()))?;
-            for document in store.iter::<TantivyDocument>(segment.alive_bitset()) {
-                let document = document.map_err(tantivy_error)?;
-                let id = document
-                    .get_first(fields.chunk_id)
-                    .and_then(|value| value.as_u64())
-                    .ok_or_else(mismatch)?;
-                let doc = document
-                    .get_first(fields.doc_id)
-                    .and_then(|value| value.as_i64())
-                    .ok_or_else(mismatch)?;
-                let position = expected.binary_search(&id).map_err(|_| mismatch())?;
-                if chunk_id_parts(id).0 != doc || std::mem::replace(&mut seen[position], true) {
-                    return Err(mismatch());
+    /// Checks every active segment component, including lexical positions that
+    /// may remain unread while validating the ID fields.
+    pub(crate) fn verify_segment_checksums(
+        dir: &Path,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let (index, _) = open_readable_index(dir)?;
+        let directory = index.directory();
+        // Segment metadata identifies active files even if a damaged managed
+        // inventory omits one of them.
+        for segment in index.searchable_segment_metas().map_err(tantivy_error)? {
+            for &component in SegmentComponent::iterator() {
+                if component == SegmentComponent::Delete && !segment.has_deletes() {
+                    continue;
+                }
+                check()?;
+                let path = segment.relative_path(component);
+                if !directory
+                    .validate_checksum(&path)
+                    .map_err(|error| tantivy_error(error.into()))?
+                {
+                    return Err(Error::internal("Tantivy segment checksum mismatch"));
                 }
             }
         }
-        if seen.contains(&false) {
+        Ok(())
+    }
+
+    /// Compares live Tantivy documents with ordered SQLite chunk IDs under the
+    /// caller's pair lease. Working storage follows the segment count.
+    pub(crate) fn verify_chunk_ids(
+        dir: &Path,
+        mut expected: impl FnMut() -> Result<Option<u64>>,
+    ) -> Result<()> {
+        let (index, fields) = open_readable_index(dir)?;
+        let segments = index
+            .searchable_segments()
+            .map_err(tantivy_error)?
+            .iter()
+            .map(|segment| {
+                let reader = open_searchable_segment(segment)?;
+                let ids = reader
+                    .inverted_index(fields.chunk_id)
+                    .map_err(tantivy_error)?;
+                let store = reader
+                    .get_store_reader(1)
+                    .map_err(|error| tantivy_error(error.into()))?;
+                Ok((reader, ids, store))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let total: u64 = segments
+            .iter()
+            .map(|(reader, _, _)| u64::from(reader.num_docs()))
+            .sum();
+        let streams = segments
+            .iter()
+            .map(|(_, ids, _)| ids.terms().stream())
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|error| tantivy_error(error.into()))?;
+        let mut terms = TermMerger::new(streams);
+        let mismatch = || Error::internal("SQLite and Tantivy chunk IDs do not match");
+        let mut verified = 0u64;
+        while terms.advance() {
+            // Tantivy orders unsigned numeric keys by their big-endian bytes.
+            let id = u64::from_be_bytes(terms.key().try_into().map_err(|_| mismatch())?);
+            let mut found = false;
+            for (ordinal, info) in terms.current_segment_ords_and_term_infos() {
+                let (reader, ids, store) = segments.get(ordinal).ok_or_else(mismatch)?;
+                let mut postings = ids
+                    .read_postings_from_terminfo(&info, IndexRecordOption::Basic)
+                    .map_err(|error| tantivy_error(error.into()))?;
+                let mut doc = postings.doc();
+                while doc != TERMINATED {
+                    if !reader.is_deleted(doc) {
+                        if found || expected()? != Some(id) {
+                            return Err(mismatch());
+                        }
+                        let stored: TantivyDocument = store.get(doc).map_err(tantivy_error)?;
+                        if stored
+                            .get_first(fields.chunk_id)
+                            .and_then(|value| value.as_u64())
+                            != Some(id)
+                            || stored
+                                .get_first(fields.doc_id)
+                                .and_then(|value| value.as_i64())
+                                != Some(chunk_id_parts(id).0)
+                        {
+                            return Err(mismatch());
+                        }
+                        found = true;
+                        verified += 1;
+                    }
+                    doc = postings.advance();
+                }
+            }
+        }
+        // The live count also detects a Tantivy document missing the ID field.
+        if verified != total || expected()?.is_some() {
             return Err(mismatch());
         }
         Ok(())
@@ -1151,4 +1220,34 @@ mod tests {
         assert!(remove_dir_all_retry(dir, 20, Duration::ZERO, &|dir| script.remove(dir)).is_ok());
         assert_eq!(script.calls.get(), 1);
     }
+}
+#[test]
+fn chunk_id_verification_checks_live_postings_across_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut index = IndexHandle::open_or_create(dir.path()).unwrap();
+    let fields = index.search.fields;
+    let document = |doc| tantivy::doc!(fields.chunk_id => chunk_id(doc, 0), fields.doc_id => doc);
+    let writer = index.writer.as_ref().unwrap();
+    writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+    writer.add_document(document(1)).unwrap();
+    writer.add_document(document(2)).unwrap();
+    index.commit().unwrap();
+    index.mark_rebuilt().unwrap();
+
+    let writer = index.writer.as_ref().unwrap();
+    writer.delete_term(Term::from_field_u64(fields.chunk_id, chunk_id(2, 0)));
+    writer.add_document(document(3)).unwrap();
+    index.commit().unwrap();
+    let verify = || {
+        let mut expected = [chunk_id(1, 0), chunk_id(3, 0)].into_iter();
+        ReadIndex::verify_chunk_ids(dir.path(), || Ok(expected.next()))
+    };
+    verify().unwrap();
+
+    let writer = index.writer.as_ref().unwrap();
+    writer.delete_term(Term::from_field_u64(fields.chunk_id, chunk_id(3, 0)));
+    writer.add_document(document(1)).unwrap();
+    index.commit().unwrap();
+    let error = verify().unwrap_err();
+    assert!(error.to_string().contains("chunk IDs"), "{error}");
 }

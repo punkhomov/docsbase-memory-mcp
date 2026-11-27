@@ -464,18 +464,27 @@ fn list_projects(
     if !cache.join(crate::store::DB_FILE).exists() {
         return Vec::new();
     }
-    let Ok(db) = Db::open_readonly_with_settings(cache, settings) else {
+    let Ok(db) = Db::open_readonly_for_search(cache, settings) else {
         return vec![format!("(cannot read {})", cache.display())];
     };
     match registry::list_projects(&db) {
         Ok(projects) => projects
             .into_iter()
             .map(|project| {
+                let status = if db.has_generation_catalog() {
+                    match crate::store::project_index::local_watcher_project(&db, &project) {
+                        Ok(Some(selected)) => selected.status.as_str(),
+                        Ok(None) => project.status.as_str(),
+                        Err(_) => "unavailable",
+                    }
+                } else {
+                    project.status.as_str()
+                };
                 format!(
                     "{} ({}, status {})",
                     project.name,
                     project.canonical_root.display(),
-                    project.status.as_str()
+                    status
                 )
             })
             .collect(),

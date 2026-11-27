@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
@@ -219,42 +220,19 @@ fn native_watcher(
     cache: &Path,
     event_tx: std::sync::mpsc::SyncSender<Option<PathBuf>>,
     stop: Option<crate::hybrid::work::Cancellation>,
+    state: Option<WatchConfigCandidate>,
 ) -> Result<RecommendedWatcher> {
     let watch_cache = cache.to_path_buf();
     let watch_root = root.to_path_buf();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
-        let Ok(event) = result else {
-            eprintln!("warning: watcher event: {result:?}");
-            return;
-        };
-        if matches!(event.kind, EventKind::Access(_)) {
-            return;
-        }
-        if watch_debug() {
-            eprintln!("watch-debug: event {:?} {:?}", event.kind, event.paths);
-        }
-        for path in event.paths {
-            if crate::platform::paths::is_under(&path, &watch_cache)
-                || walk::is_pruned(&watch_root, &path)
-            {
-                continue;
-            }
-            let relevant = match std::fs::symlink_metadata(&path) {
-                Ok(meta) if meta.file_type().is_symlink() => false,
-                Ok(meta) => meta.is_dir() || walk::is_markdown(&path),
-                // Deleted paths may need exact or subtree purges (FR-16).
-                Err(_) => true,
-            };
-            if relevant {
-                let sent = match &stop {
-                    Some(stop) => send_cancellable(&event_tx, Some(path), stop).is_ok(),
-                    None => event_tx.send(Some(path)).is_ok(),
-                };
-                if !sent {
-                    return;
-                }
-            }
-        }
+        handle_native_event(
+            &watch_root,
+            &watch_cache,
+            &event_tx,
+            stop.as_ref(),
+            state.as_deref(),
+            result,
+        );
     })
     .map_err(|err| Error::internal_with_source("create watcher", err))?;
     watcher
@@ -264,6 +242,88 @@ fn native_watcher(
         })?;
 
     Ok(watcher)
+}
+
+fn handle_native_event(
+    root: &Path,
+    cache: &Path,
+    event_tx: &std::sync::mpsc::SyncSender<Option<PathBuf>>,
+    stop: Option<&crate::hybrid::work::Cancellation>,
+    state: Option<&WatchState>,
+    result: notify::Result<Event>,
+) {
+    let Ok(event) = result else {
+        if let Some(state) = state {
+            state.note_source_event();
+        }
+        eprintln!("warning: watcher event: {result:?}");
+        return;
+    };
+    if event.need_rescan() {
+        if let Some(state) = state {
+            state.note_source_event();
+        }
+        eprintln!(
+            "warning: watcher overflow for {}; run docsbase sync",
+            root.display()
+        );
+    }
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
+    if watch_debug() {
+        eprintln!("watch-debug: event {:?} {:?}", event.kind, event.paths);
+    }
+    for path in event.paths {
+        if crate::platform::paths::is_under(&path, cache) {
+            continue;
+        }
+        if walk::is_pruned(root, &path) {
+            if let Some(state) = state
+                && changes_walk_rules(root, &path)
+            {
+                state.note_source_event();
+            }
+            continue;
+        }
+        let relevant = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => false,
+            Ok(meta) => meta.is_dir() || walk::is_markdown(&path),
+            // Deleted paths may need exact or subtree purges (FR-16).
+            Err(_) => true,
+        };
+        if relevant {
+            // Observe before entering the bounded queue: the callback can
+            // already know of an edit while the writer is still excluded.
+            if let Some(state) = state {
+                state.note_source_event();
+            }
+            let sent = match stop {
+                Some(stop) => send_cancellable(event_tx, Some(path), stop).is_ok(),
+                None => event_tx.send(Some(path)).is_ok(),
+            };
+            if !sent {
+                return;
+            }
+        }
+    }
+}
+
+fn changes_walk_rules(root: &Path, path: &Path) -> bool {
+    if path
+        .strip_prefix(root)
+        .is_ok_and(|path| path == Path::new(".git/info/exclude"))
+    {
+        return true;
+    }
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| {
+            matches!(name, walk::IGNORE_FILE | ".gitignore" | ".ignore" | ".git")
+                && path
+                    .parent()
+                    .is_some_and(|parent| !walk::is_pruned(root, parent))
+        })
 }
 
 fn spawn_watcher_sink_owned(
@@ -300,7 +360,15 @@ fn spawn_watcher_sink_owned(
     #[cfg(not(test))]
     let use_native = true;
     let watcher = use_native
-        .then(|| native_watcher(&root, &cache, event_tx, caller.then(|| cancel.clone())))
+        .then(|| {
+            native_watcher(
+                &root,
+                &cache,
+                event_tx,
+                caller.then(|| cancel.clone()),
+                candidate.clone(),
+            )
+        })
         .transpose()?;
 
     // A caller-owned sender can still be rendezvousing after stop. Its native
@@ -431,6 +499,7 @@ fn forward_batches(
                 // Publication installs the candidate before scanning, then
                 // updates the current runtime before releasing the candidate.
                 let proposed = candidate
+                    .config
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .clone();
@@ -1238,7 +1307,23 @@ fn expand_dir_inner(filter: &mut IndexFilter, batch: &mut Batch, dir: &Path, dep
     }
 }
 
-pub(crate) type WatchConfigCandidate = Arc<Mutex<Option<Arc<Config>>>>;
+pub(crate) type WatchConfigCandidate = Arc<WatchState>;
+
+#[derive(Default)]
+pub(crate) struct WatchState {
+    config: Mutex<Option<Arc<Config>>>,
+    source_events: AtomicU64,
+}
+
+impl WatchState {
+    fn note_source_event(&self) {
+        self.source_events.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn source_watermark(&self) -> u64 {
+        self.source_events.load(Ordering::Acquire)
+    }
+}
 
 pub(crate) struct WatchConfigTransition {
     candidate: WatchConfigCandidate,
@@ -1247,7 +1332,10 @@ pub(crate) struct WatchConfigTransition {
 
 impl WatchConfigTransition {
     pub(crate) fn begin(candidate: &WatchConfigCandidate, config: Arc<Config>) -> Self {
-        *candidate.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
+        *candidate
+            .config
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
         Self {
             candidate: candidate.clone(),
             config,
@@ -1259,6 +1347,7 @@ impl Drop for WatchConfigTransition {
     fn drop(&mut self) {
         let mut candidate = self
             .candidate
+            .config
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if candidate
@@ -1432,6 +1521,13 @@ impl Watchers {
     #[cfg(all(test, feature = "hybrid-remote"))]
     pub(crate) fn deliver_test_path(&self, project: i64, path: PathBuf) {
         let sender = self.map()[&project].guard.retirement.wake.clone();
+        if let Some(shared) = self
+            .async_owner
+            .get()
+            .and_then(|owner| owner.shared.upgrade())
+        {
+            shared.watch_config_candidate(project).note_source_event();
+        }
         sender.try_send(Some(path)).unwrap();
     }
     #[cfg(test)]
@@ -1990,6 +2086,37 @@ mod runtime_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignore_changes_and_native_rescans_invalidate_the_source_survey() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let cache = root.join("cache");
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let state = WatchState::default();
+        let notify = |event| handle_native_event(root, &cache, &tx, None, Some(&state), Ok(event));
+
+        for name in [
+            ".gitignore",
+            "docs/.docsbaseignore",
+            ".ignore",
+            ".git/info/exclude",
+        ] {
+            let before = state.source_watermark();
+            notify(Event::new(EventKind::Any).add_path(root.join(name)));
+            assert_ne!(state.source_watermark(), before, "{name}");
+        }
+
+        let before = state.source_watermark();
+        notify(Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan));
+        assert_ne!(state.source_watermark(), before);
+
+        let before = state.source_watermark();
+        notify(Event::new(EventKind::Any).add_path(cache.join(".gitignore")));
+        notify(Event::new(EventKind::Any).add_path(root.join(".hidden/.docsbaseignore")));
+        assert_eq!(state.source_watermark(), before);
+        assert!(rx.try_recv().is_err());
+    }
     use crate::index::job::run_full;
     use crate::store::repo;
     use std::cell::Cell;

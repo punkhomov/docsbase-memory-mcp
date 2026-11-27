@@ -352,7 +352,7 @@ fn run_with_launch(
     run_with_admission(
         cache,
         &transport_policy,
-        launch.registry_schema(),
+        launch.admission_schema(),
         move |transport| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(workers)

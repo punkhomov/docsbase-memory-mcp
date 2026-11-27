@@ -2070,3 +2070,58 @@ synthetic events written under a temporary path alias. Both tests failed
 under an aliased TMPDIR on Linux and passed after using the same canonical
 paths as native delivery. Fresh fix review, all-target Clippy, formatting
 and the Linux cli-full suite passed. The corrections affect fixtures.
+
+## 2026-11-27 — CF11, Windows catalog publication
+
+Task CF11 Windows publication: complete (local implementation and independent
+review with fix rounds). Native CI acceptance remains pending.
+
+Ruling: local NTFS qualification uses the retained directory handle. The
+volume GUID probe runs before the filesystem query so a known unsupported
+share can keep the legacy format. If qualification fails, the schema is
+observed read-only before SQLite can perform write-side recovery. A transient
+failure on a fresh v5 candidate leaves the registry absent. Bootstrap flushes
+the namespace through the nearest Windows-managed profile or LocalAppData
+directory, or checks the full chain for other locations.
+
+Ruling: sealing flushes existing files with writable no-follow handles.
+Registry publication and watcher mutation acquire directory barriers before
+committing state. Reclaim closes the Windows reader file after claiming the
+inactive generation and keeps the preparation lease through cleanup. Native
+fixtures exercise sharing denial and retry, replacement under a reader lease,
+profile-path bootstrap, and the existing process-interruption recovery cases.
+
+Rust 1.100.0 Linux cli-full passed 1,923 tests. Lean offline, all-target and
+opt-in Linux Clippy, formatting, and Windows GNU cross-Clippy passed. Native
+Windows must confirm flush access and recovery behavior before merge.
+
+## 2026-11-27 — CF11a, fresh Shared v2 on the generation catalog
+
+Task CF11a Shared v2 bootstrap and reuse: complete (local implementation,
+fresh review and fix review). Native CI acceptance remains pending.
+
+Ruling: the normal daemon and stopped Index initialize v5 under the same
+SQLite transaction. The bound runtime uses the writer's committed epoch.
+An existing registry retains its format. A simultaneous local CLI/daemon
+start produced one epoch and one published head, with a searchable project.
+
+Ruling: repeated lexical Index and Shared Sync can retain the selected pair
+after validating recipes, source hashes, active segment checksums, and the
+streamed SQLite/Tantivy chunk identities. A changed source, a bad receipt,
+lost admission, or an observed event prevents stale success. A commit with
+an unverified outcome retains proposed runtime settings until the daemon
+can confirm the exact head and the matching Done row under the project lease.
+The test forces failed confirmation after both a real commit and a real
+rollback, and gates reconciliation while the project writer owns the lease.
+
+Ruling: first capture records per-file omissions. An incomplete replacement
+retains the old selection. Watcher retries repair pending revisions and
+SQLite rollback journals through the admitted Sync path. Explicit Index
+can replace a damaged Tantivy pair while preserving files outside the
+retirement proof. A Linux-only fixture exercises native non-UTF-8 filenames.
+
+Rust 1.100.0 Linux cli-full passed 1,935 tests, including the unchanged
+quality gate. Lean offline, all-target Clippy, Windows GNU cross-Clippy, and
+formatting passed locally. On a synthetic 10,000-file Linux corpus, debug Index took
+1.72 s for the first build and 0.28–0.30 s on three unchanged runs, each
+skipping 10,000 files and retaining generation 1.

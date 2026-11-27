@@ -224,6 +224,7 @@ fn stopped_catalog_index_preserves_vectors_of_a_legacy_head_under_pressure() {
         return;
     }
     let cache = crate::config::paths::cache_dir().unwrap();
+    crate::store::Db::open(&cache).unwrap().close().unwrap();
     let config = crate::config::paths::config_dir().unwrap();
     let target = std::env::current_dir().unwrap();
     std::fs::create_dir_all(&config).unwrap();
@@ -444,6 +445,8 @@ fn direct_command_error_and_unwind_wait_for_actual_native_terminal_retirement() 
     {
         return;
     }
+    let cache = crate::config::paths::cache_dir().unwrap();
+    crate::store::Db::open(&cache).unwrap().close().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let calls = crate::hybrid::openrouter::test_http::install(format!("http://{addr}"));

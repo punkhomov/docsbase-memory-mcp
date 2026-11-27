@@ -237,10 +237,15 @@ fn pagination_stable() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut visible = false;
     while Instant::now() < deadline {
-        let first_page_now = page(&mut client, 2, None);
-        if paths_of(&first_page_now).contains(&"d/00-new.md".to_owned()) {
-            visible = true;
-            break;
+        match client.call_tool("list_docs", json!({ "limit": 2 })) {
+            Ok(page) if paths_of(&page).iter().any(|path| path == "d/00-new.md") => {
+                visible = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(Error::Project { message, .. }) if message.starts_with("another writer holds ") => {
+            }
+            Err(error) => panic!("list_docs: {error}"),
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -296,6 +301,7 @@ fn list_docs_rejects_zero_limit() {
 #[test]
 fn neighbors_window() {
     let mut env = Env::new(&[("guide.md", GUIDE)]);
+    drop(docsbase_memory::store::Db::open(env.cache()).unwrap());
     env.start_daemon();
     index_project(&env);
     let mut client = env.bound();

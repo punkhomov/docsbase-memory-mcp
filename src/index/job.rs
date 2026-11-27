@@ -247,7 +247,17 @@ pub(crate) fn prepare_staged_metadata(
     config: &Config,
     capture: Option<&mut CaptureBudget<'_>>,
 ) -> Result<PreparedPlan> {
-    let mut prepared = capture_full_accounted(db, project, config, true, capture)?;
+    let entries = walk::walk(&project.canonical_root, config)?.map(|entry| {
+        let path = entry?;
+        if path.to_str().is_none() {
+            return Err(Error::Index {
+                path: Some(path),
+                message: "generation metadata requires a lossless UTF-8 path".into(),
+            });
+        }
+        Ok(path)
+    });
+    let mut prepared = capture_full_from_walk(db, project, config, true, capture, entries)?;
     super::outcome::run(
         db,
         project,
@@ -838,7 +848,19 @@ pub(crate) fn capture_full_accounted(
     project: &Project,
     config: &Config,
     recreated: bool,
+    capture: Option<&mut CaptureBudget<'_>>,
+) -> Result<PreparedPlan> {
+    let entries = walk::walk(&project.canonical_root, config)?;
+    capture_full_from_walk(db, project, config, recreated, capture, entries)
+}
+
+fn capture_full_from_walk(
+    db: &Db,
+    project: &Project,
+    config: &Config,
+    recreated: bool,
     mut capture: Option<&mut CaptureBudget<'_>>,
+    entries: impl Iterator<Item = Result<PathBuf>>,
 ) -> Result<PreparedPlan> {
     if let Some(budget) = capture.as_deref_mut() {
         budget.metadata(db, project.id)?;
@@ -861,7 +883,7 @@ pub(crate) fn capture_full_accounted(
 
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut walk_errors = 0_usize;
-    for entry in walk::walk(&project.canonical_root, config)? {
+    for entry in entries {
         match entry {
             Ok(path) => {
                 if let Some(budget) = capture.as_deref_mut() {

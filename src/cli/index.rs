@@ -196,7 +196,7 @@ pub(super) async fn run_with_operation(
                 let root = registry::project_root_for(&target, &owner.cache)?;
                 let config = Config::for_project(&owner.global, &root)?;
                 let store = VectorStore::reserve(&owner.cache, policy)?;
-                let create_catalog = generation::create_for_website(&owner.global, &config, &root);
+                let create_catalog = generation::initializes_catalog(&owner.global, &config, &root);
                 let registry_root = if create_catalog {
                     store.root()
                 } else {

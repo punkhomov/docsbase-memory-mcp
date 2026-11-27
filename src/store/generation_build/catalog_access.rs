@@ -5,20 +5,21 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::config::schema::Resolved;
+use crate::daemon::lifecycle;
 use crate::error::Result;
 use crate::store::project_index::observe_catalog_index;
 use crate::store::registry_inspect::{InspectionLimits, ObservedProjectIndex};
 use crate::store::settings::DbSettings;
 use crate::store::{Db, registry_inspect, repo};
 
-use super::interrupted::{self, InterruptedBase};
+use super::replacement::{self, ReplacementBase};
 use super::{admission, open_registry, recovery::open_recovery_registry, validate_epoch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CatalogAccess {
     Stopped,
     Operational,
-    Repair(InterruptedBase),
+    Repair(ReplacementBase),
 }
 
 impl CatalogAccess {
@@ -108,17 +109,17 @@ pub(crate) fn observe_replacement_base(
     epoch: [u8; 16],
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
-) -> Result<(Option<ObservedProjectIndex>, Option<InterruptedBase>)> {
+) -> Result<(Option<ObservedProjectIndex>, Option<ReplacementBase>)> {
     match observe_index_base(cache, project_id, epoch, settings, limits) {
         Ok(base) => return Ok((base, None)),
-        Err(error) if !cfg!(unix) => return Err(error),
+        Err(error) if lifecycle::is_lease_conflict(&error) => return Err(error),
         Err(_) => {}
     }
     let db = open_operational_reader(cache, settings, limits)?;
     validate_epoch(db.connection(), epoch)?;
-    let interrupted = interrupted::inspect_for_replacement(&db, project_id, limits)?;
+    let replacement = replacement::inspect_for_replacement(&db, project_id, limits)?;
     db.close()?;
-    if let Some(base) = interrupted {
+    if let Some(base) = replacement {
         return Ok((Some(base.index), Some(base)));
     }
     // SQLite may have rolled back a journal left before the intent committed.

@@ -41,16 +41,21 @@ pub(super) fn assess_schema(facts: &ArtifactFacts) -> Result<Assessment> {
                 Some(BlockerCode::ObservationUnavailable),
             ),
             ArtifactState::Ready => match fact.identity.as_deref().and_then(schema_version) {
-                Some(version) if version <= super::migrations::SCHEMA_VERSION => (
-                    ExpectedState::KnownIdentity(
-                        fact.identity
-                            .clone()
-                            .ok_or_else(|| invalid("missing schema identity"))?,
-                    ),
-                    (version < super::migrations::SCHEMA_VERSION)
-                        .then_some((Effect::MigrateSchema, Reason::SchemaVersionChanged)),
-                    None,
-                ),
+                Some(version)
+                    if version <= super::migrations::SCHEMA_VERSION
+                        || version == super::generation_catalog::SCHEMA_VERSION =>
+                {
+                    (
+                        ExpectedState::KnownIdentity(
+                            fact.identity
+                                .clone()
+                                .ok_or_else(|| invalid("missing schema identity"))?,
+                        ),
+                        (version < super::migrations::SCHEMA_VERSION)
+                            .then_some((Effect::MigrateSchema, Reason::SchemaVersionChanged)),
+                        None,
+                    )
+                }
                 _ => (
                     ExpectedState::Unknown,
                     None,

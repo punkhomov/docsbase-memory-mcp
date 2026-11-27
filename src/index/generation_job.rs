@@ -7,11 +7,15 @@ use crate::config::Config;
 use crate::config::schema::Resolved;
 use crate::error::Result;
 use crate::index::job::CaptureBudget;
+use crate::search::operation::SearchOperation;
 use crate::store::generation_build::{
-    LexicalBuildRequest, OperationalBuild, PreparedLexicalPublication, observe_replacement_base,
-    prepare_operational_lexical_generation,
+    BuildInputs, LexicalBuildRequest, OperationalBuild, PreparedLexicalPublication,
+    UnchangedGeneration, observe_replacement_base, prepare_operational_lexical_generation,
+    reuse_unchanged_generation,
 };
-use crate::store::{models::Project, settings::DbSettings};
+use crate::store::{
+    Db, models::Project, registry_inspect::ObservedProjectIndex, settings::DbSettings,
+};
 
 pub(crate) struct GenerationJob<'a> {
     pub(crate) cache: &'a Path,
@@ -28,31 +32,51 @@ impl GenerationJob<'_> {
     ) -> Result<PreparedLexicalPublication> {
         let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
-        let (base, interrupted) =
+        let (base, replacement) =
             observe_replacement_base(self.cache, project_id, self.epoch, self.settings, limits)?;
-        // Direct index and daemon Sync own the same project's lexical staging.
-        // The legacy key retains ownership across upgrades. The staged receipt
-        // and CAS bind the base and the validated effective index recipe.
-        let mut plan = blake3::Hasher::new_derive_key("docsbase.index.direct.lexical.v1");
-        plan.update(&self.epoch);
-        plan.update(&project_id.to_le_bytes());
-        let request = LexicalBuildRequest {
-            project_id,
-            epoch: self.epoch,
-            base,
-            plan_digest: *plan.finalize().as_bytes(),
-            reserved_disk_bytes: self.config.index_writer.staging_disk_bytes(),
-        };
         prepare_operational_lexical_generation(
             self.cache,
             OperationalBuild {
-                request,
-                interrupted,
+                request: self.request(base),
+                replacement,
             },
             self.settings,
             limits,
             Arc::clone(self.config),
             capture,
         )
+    }
+
+    pub(crate) fn reuse_unchanged<T>(
+        &self,
+        operation: &SearchOperation,
+        finish: impl FnOnce(&Db, UnchangedGeneration) -> Result<T>,
+    ) -> Result<Option<T>> {
+        reuse_unchanged_generation(
+            self.cache,
+            self.project,
+            BuildInputs {
+                request: self.request(None),
+                settings: self.settings,
+                limits: crate::config::observe::PlanningLimits::standard().registry,
+                config: self.config,
+            },
+            operation,
+            finish,
+        )
+    }
+
+    fn request(&self, base: Option<ObservedProjectIndex>) -> LexicalBuildRequest {
+        // Direct Index, daemon Sync, and reclamation share this ownership key.
+        let mut plan = blake3::Hasher::new_derive_key("docsbase.index.direct.lexical.v1");
+        plan.update(&self.epoch);
+        plan.update(&self.project.id.to_le_bytes());
+        LexicalBuildRequest {
+            project_id: self.project.id,
+            epoch: self.epoch,
+            base,
+            plan_digest: *plan.finalize().as_bytes(),
+            reserved_disk_bytes: self.config.index_writer.staging_disk_bytes(),
+        }
     }
 }
