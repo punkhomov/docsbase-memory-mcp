@@ -170,7 +170,7 @@ impl SyncEvidence {
             (Some(observed), Some(active)) if observed != active => observed < active,
             (Some(generation), Some(_)) => snapshot.outcome.as_ref().is_some_and(|current| {
                 identity == SyncAttribution::for_generation(current, generation)
-                    && stats == current.stats
+                    && (stats == current.stats || self.reused_generation(&stats, current))
             }),
             (None, None) => {
                 identity.attempt_id <= snapshot.attempt
@@ -182,6 +182,22 @@ impl SyncEvidence {
             }
             _ => false,
         }
+    }
+
+    fn reused_generation(&self, stats: &JobStats, outcome: &IndexOutcome) -> bool {
+        self.json()
+            .is_some_and(|json| json.get("reused_generation") == Some(&Value::Bool(true)))
+            && outcome
+                .stats
+                .docs
+                .checked_add(outcome.stats.skipped)
+                .is_some_and(|skipped| {
+                    *stats
+                        == JobStats {
+                            skipped,
+                            ..JobStats::default()
+                        }
+                })
     }
 }
 

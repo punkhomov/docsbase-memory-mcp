@@ -349,10 +349,7 @@ fn status_reports_sessions_watcher_versions() {
     let status = bound.call_tool("status", json!({})).expect("status");
     assert_eq!(status["build_id"], build_id());
     assert_eq!(status["protocol_version"], PROTOCOL_VERSION);
-    assert_eq!(
-        status["schema_version"],
-        docsbase_memory::store::migrations::SCHEMA_VERSION
-    );
+    assert_eq!(status["schema_version"], 5);
     assert!(
         status["sessions"].as_u64().unwrap_or(0) >= 1,
         "status: {status}"
@@ -745,14 +742,15 @@ fn watcher_recovers_from_a_commit_failure() {
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        // Until the retried batch finishes its rebuild the read side refuses
-        // the marked index with an explicit "needs to be rebuilt" error
-        // (T27); the recovery window is expected to close quickly.
+        // A failed commit can leave a legacy rebuild marker or a pending
+        // catalog revision. The retry must restore searchable data.
         match bound.call_tool("search_docs", json!({ "query": "sprockets" })) {
             Ok(hits) if !hits.as_array().expect("hits").is_empty() => break,
             Ok(_) => {}
             Err(err) => assert!(
-                search_visibility::temporarily_unavailable(&err),
+                search_visibility::temporarily_unavailable(&err)
+                    || matches!(&err, docsbase_memory::error::Error::Project { message, .. }
+                        if message == "generation metadata is unavailable (RecoveryRequired)"),
                 "only a project visibility transition may interrupt the healing window: {err}"
             ),
         }

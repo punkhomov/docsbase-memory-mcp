@@ -132,12 +132,29 @@ pub(crate) struct CatalogHead {
 impl CatalogHead {
     #[cfg(all(test, unix, feature = "hybrid-remote"))]
     pub(crate) fn from_selected_fixture(conn: &Connection, project_id: i64) -> Result<Self> {
+        Self::from_selected(conn, project_id)
+    }
+
+    pub(crate) fn from_observed_index(
+        conn: &Connection,
+        index: ObservedProjectIndex,
+    ) -> Result<Self> {
+        let head = Self::from_selected(conn, index.project_id)?;
+        if Some(head.epoch) != index.epoch || Some(head.generation) != index.generation_id {
+            return Err(admission(
+                "selected catalog generation changed before completion",
+            ));
+        }
+        Ok(head)
+    }
+
+    fn from_selected(conn: &Connection, project_id: i64) -> Result<Self> {
         let epoch = generation_catalog::read_epoch(conn).map_err(registry_unavailable)?;
         let head = generation_catalog::active_head(conn, project_id)
             .map_err(registry_unavailable)?
-            .ok_or_else(|| admission("fixture has no active head"))?;
+            .ok_or_else(|| admission("catalog project has no active head"))?;
         let Layout::Local { seal_digest } = head.layout else {
-            return Err(admission("fixture has no published local seal"));
+            return Err(admission("catalog project has no published local seal"));
         };
         Ok(Self {
             epoch,
@@ -244,7 +261,7 @@ pub(super) fn publish_prepared(
             return Err(admission("prepared generation was already published"));
         }
         let metadata = open_local_metadata(&dir, settings, limits)?;
-        verified_recipe(&metadata, &project, staged.content_revision, config)?;
+        verified_outcome(&metadata, &project, staged.content_revision, config, false)?;
         metadata
             .conn
             .close()
@@ -363,6 +380,7 @@ pub(super) fn verify_and_seal(
         limits,
         config,
         embedding_recipe,
+        access,
         ..
     } = *publication;
     let parent = dir
@@ -387,13 +405,28 @@ pub(super) fn verify_and_seal(
     if revision.manifest.is_some() {
         return Err(admission("prepared metadata already has a live revision"));
     }
-    let recipe = verified_recipe(&metadata, project, staged.content_revision, config)?;
-    verify_sources(&metadata, project, config)?;
+    let allow_warnings = access == CatalogAccess::Operational && request.base.is_none();
+    let outcome = verified_outcome(
+        &metadata,
+        project,
+        staged.content_revision,
+        config,
+        allow_warnings,
+    )?;
+    let coverage = if outcome.is_complete() {
+        SourceCoverage::Complete
+    } else {
+        SourceCoverage::Captured
+    };
+    match inspect_sources(&metadata, project, config, coverage, || Ok(()))? {
+        SourceMatch::Matches(_) => {}
+        SourceMatch::Changed(reason) => return Err(admission(reason)),
+    }
     verify_chunk_pair(
         metadata.connection(),
         project.id,
         &dir.join("tantivy"),
-        limits,
+        || Ok(()),
     )?;
     metadata
         .conn
@@ -416,7 +449,7 @@ pub(super) fn verify_and_seal(
         plan: blake3::Hash::from_bytes(request.plan_digest)
             .to_hex()
             .to_string(),
-        index_recipe: recipe,
+        index_recipe: outcome.recipe_id,
         embedding_recipe,
         files,
     };
@@ -440,22 +473,26 @@ pub(super) fn verify_and_seal(
     Ok(blake3::hash(&encoded))
 }
 
-fn verified_recipe(
+fn verified_outcome(
     metadata: &Db,
     project: &Project,
     revision: i64,
     config: &Config,
-) -> Result<String> {
+    allow_warnings: bool,
+) -> Result<outcome::IndexOutcome> {
     let indexed = outcome::read(metadata, project.id)?
-        .filter(outcome::IndexOutcome::is_complete)
-        .ok_or_else(|| admission("prepared metadata has no complete source survey"))?;
+        .filter(|indexed| {
+            indexed.scope == outcome::SurveyScope::FullSurvey
+                && (allow_warnings || indexed.is_complete())
+        })
+        .ok_or_else(|| admission("prepared metadata has no eligible source survey"))?;
     if indexed.canonical_root.as_str() != project.canonical_root.to_str().unwrap_or_default()
         || indexed.recipe_id != outcome::recipe_id(config)
         || indexed.index_generation != revision
     {
         return Err(admission("prepared generation uses different index inputs"));
     }
-    Ok(indexed.recipe_id)
+    Ok(indexed)
 }
 
 pub(super) fn open_local_metadata(
@@ -515,7 +552,27 @@ fn check_revision(
     Ok(revision)
 }
 
-fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<()> {
+#[derive(Clone, Copy)]
+pub(super) enum SourceCoverage {
+    Complete,
+    /// The job recorded coverage warnings. Verify all stored documents, with
+    /// no completeness claim for the omitted files.
+    Captured,
+}
+
+pub(super) enum SourceMatch {
+    Matches(usize),
+    Changed(&'static str),
+}
+
+pub(super) fn inspect_sources(
+    metadata: &Db,
+    project: &Project,
+    config: &Config,
+    coverage: SourceCoverage,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<SourceMatch> {
+    let complete = matches!(coverage, SourceCoverage::Complete);
     let conn = metadata.connection();
     let root = &project.canonical_root;
     if filesystem(
@@ -525,19 +582,11 @@ fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<(
     )? != *root
         || !root.is_dir()
     {
-        return Err(admission("generation source root changed"));
+        return Ok(SourceMatch::Changed("generation source root changed"));
     }
-    let expected: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM docs WHERE project_id = ?1",
-            [project.id],
-            |row| row.get(0),
-        )
-        .map_err(repo::db_error)?;
-    let expected = usize::try_from(expected)
-        .map_err(|_| admission("prepared source survey has an invalid document count"))?;
+    let expected = surveyed_document_count(conn, project.id)?;
     if expected > config.max_docs_per_project {
-        return Err(admission(
+        return Ok(SourceMatch::Changed(
             "prepared source survey exceeds the current document limit",
         ));
     }
@@ -550,25 +599,48 @@ fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<(
         .map_err(repo::db_error)?;
     let mut observed = 0usize;
     for item in walk::walk(root, config)? {
-        let path = item?;
-        if observed == expected {
-            return Err(admission(
+        check()?;
+        let path = match item {
+            Ok(path) => path,
+            Err(_) if !complete => continue,
+            Err(error) => return Err(error),
+        };
+        if complete && observed == expected {
+            return Ok(SourceMatch::Changed(
                 "source survey acquired new documents before publication",
             ));
         }
-        let canonical = filesystem(&path, "resolve surveyed document", fs::canonicalize(&path))?;
+        let canonical =
+            match filesystem(&path, "resolve surveyed document", fs::canonicalize(&path)) {
+                Ok(path) => path,
+                Err(_) if !complete => continue,
+                Err(error) => return Err(error),
+            };
         let relative = canonical
             .strip_prefix(root)
             .map(walk::portable_rel)
             .map_err(|_| admission("surveyed document left its registered root"))?;
-        let absolute = path
-            .to_str()
-            .ok_or_else(|| admission("surveyed document path is not lossless UTF-8"))?;
-        let hash: String = lookup
+        let Some(absolute) = path.to_str() else {
+            if !complete {
+                continue;
+            }
+            return Ok(SourceMatch::Changed(
+                "surveyed document path is not lossless UTF-8",
+            ));
+        };
+        let Some(hash) = lookup
             .query_row(params![project.id, relative, absolute], |row| row.get(0))
             .optional()
             .map_err(repo::db_error)?
-            .ok_or_else(|| admission("source path changed before generation publication"))?;
+        else {
+            if !complete {
+                continue;
+            }
+            return Ok(SourceMatch::Changed(
+                "source path changed before generation publication",
+            ));
+        };
+        let hash: String = hash;
         let source = filesystem(
             &path,
             "open surveyed document",
@@ -576,7 +648,9 @@ fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<(
         )?;
         let attributes = filesystem(&path, "inspect surveyed file", source.metadata())?;
         if !native_fs::is_regular_nofollow(&attributes) || attributes.len() > config.max_file_size {
-            return Err(admission("surveyed document exceeds its file policy"));
+            return Ok(SourceMatch::Changed(
+                "surveyed document exceeds its file policy",
+            ));
         }
         let mut hasher = blake3::Hasher::new();
         let mut bounded = source.take(config.max_file_size.saturating_add(1));
@@ -586,16 +660,30 @@ fn verify_sources(metadata: &Db, project: &Project, config: &Config) -> Result<(
             io::copy(&mut bounded, &mut hasher),
         )?;
         if bytes > config.max_file_size || hash != hasher.finalize().to_hex().as_str() {
-            return Err(admission(
+            return Ok(SourceMatch::Changed(
                 "source content changed before generation publication",
             ));
         }
         observed += 1;
     }
     if observed != expected {
-        return Err(admission("source survey lost documents before publication"));
+        return Ok(SourceMatch::Changed(
+            "source survey lost documents before publication",
+        ));
     }
-    Ok(())
+    Ok(SourceMatch::Matches(observed))
+}
+
+fn surveyed_document_count(conn: &Connection, project_id: i64) -> Result<usize> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM docs WHERE project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .map_err(repo::db_error)?;
+    usize::try_from(count)
+        .map_err(|_| admission("prepared source survey has an invalid document count"))
 }
 
 fn flush_generation_files(
@@ -844,9 +932,25 @@ fn prepare_retirement(
         return Err(admission("local base layout changed during publication"));
     };
     let path = project_dir.join("generations").join(head.id.to_string());
-    if let CatalogAccess::Repair(interrupted) = access {
-        super::interrupted::recheck(registry, cache, interrupted, settings, limits)?;
-        return Retirement::capture(&path, head.id, seal_digest, limits).map(Some);
+    if let CatalogAccess::Repair(replacement) = access {
+        super::replacement::recheck(registry, cache, replacement, settings, limits)?;
+        if !replacement.interrupted_write() {
+            // A damaged idle pair cannot extend its retirement inventory using
+            // mutable Tantivy files. Reclaim only from the published seal.
+            return Ok(None);
+        }
+        return match Retirement::capture(&path, head.id, seal_digest, limits) {
+            Ok(retirement) => Ok(Some(retirement)),
+            Err(error) => {
+                // Without a proven inventory reclamation can use only the
+                // original seal. Artifacts that disagree stay on disk.
+                eprintln!(
+                    "docsbase: generation {} retirement inventory unavailable: {error}",
+                    head.id
+                );
+                Ok(None)
+            }
+        };
     }
     let metadata = open_local_metadata(&path, settings, limits)?;
     let revision = check_revision(

@@ -33,6 +33,7 @@ use crate::hybrid::dense::DenseRequest;
 use crate::hybrid::dense::{AnnPolicy, BoundDenseRequest, DenseCache};
 use crate::hybrid::jobs as hybrid_jobs;
 use crate::hybrid::meta::AnnState;
+use crate::index::async_job::catalog_sync;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::transport::Stream;
@@ -142,6 +143,8 @@ pub(crate) struct ProjectCell {
     watch_candidate: crate::watch::WatchConfigCandidate,
     #[cfg(test)]
     preparation_observer: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    #[cfg(all(test, unix, feature = "hybrid-remote"))]
+    pub(crate) reused_commit_fault: Mutex<Option<catalog_sync::ReusedCommitFault>>,
 }
 
 impl ProjectCell {
@@ -217,6 +220,20 @@ impl ProjectCell {
         crate::watch::WatchConfigTransition::begin(&self.watch_candidate, config)
     }
 
+    pub(crate) fn source_watermark(&self) -> u64 {
+        self.watch_candidate.source_watermark()
+    }
+
+    pub(crate) fn check_source_watermark(&self, watermark: u64) -> Result<()> {
+        if self.source_watermark() != watermark {
+            return Err(Error::Project {
+                message: "project files changed during index verification".into(),
+                instruction: Some("retry index or sync".into()),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn try_catalog_reload(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
         match self.reload.try_lock() {
             Ok(guard) => Ok(guard),
@@ -266,7 +283,7 @@ impl<'a> CatalogConfigPublication<'a> {
 
     pub(crate) fn retain_unverified(
         &self,
-        head: CatalogHead,
+        proof: CatalogRuntimeProof,
         runtime: Arc<crate::watch::WatchRuntime>,
         watch_transition: Option<crate::watch::WatchConfigTransition>,
     ) {
@@ -276,7 +293,7 @@ impl<'a> CatalogConfigPublication<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         state.unverified = Some(UnverifiedRuntime {
-            head,
+            proof,
             runtime,
             _watch_transition: watch_transition,
         });
@@ -310,9 +327,24 @@ pub(crate) struct ProjectState {
 }
 
 struct UnverifiedRuntime {
-    head: CatalogHead,
+    proof: CatalogRuntimeProof,
     runtime: Arc<crate::watch::WatchRuntime>,
     _watch_transition: Option<crate::watch::WatchConfigTransition>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CatalogRuntimeProof {
+    Generation(CatalogHead),
+    Reused(catalog_sync::ReusedGenerationReceipt),
+}
+
+impl CatalogRuntimeProof {
+    fn is_committed(self, connection: &rusqlite::Connection) -> Result<bool> {
+        match self {
+            Self::Generation(head) => head.is_selected(connection),
+            Self::Reused(receipt) => receipt.is_committed(connection),
+        }
+    }
 }
 
 /// Explicit bootstrap ownership supplied before the daemon's first CPU/native work.
@@ -362,6 +394,35 @@ fn prepare_runtime_owners(
         )
     })
 }
+
+fn prepare_metadata_store(
+    cache: &Path,
+    settings: &Resolved<DbSettings>,
+    pool_settings: &Resolved<ReadPoolSettings>,
+    observed_epoch: Option<[u8; 16]>,
+    initialize_catalog: bool,
+) -> Result<(Db, ReadPool, Option<[u8; 16]>)> {
+    let db = if let Some(epoch) = observed_epoch {
+        crate::store::generation_build::open_index_registry(cache, settings, epoch)?
+    } else if initialize_catalog {
+        Db::open_for_index(cache, settings, true)?
+    } else {
+        Db::open_with_settings(cache, settings)?
+    };
+    // The writer chooses the schema under SQLite admission. A direct Index
+    // may have initialized the cache after the launch observation.
+    let catalog_epoch = db
+        .has_generation_catalog()
+        .then(|| db.generation_epoch())
+        .transpose()?;
+    let readers = if let Some(epoch) = catalog_epoch {
+        ReadPool::prepare_for_catalog(cache, settings, pool_settings, epoch)?
+    } else {
+        ReadPool::prepare(cache, settings, pool_settings)?
+    };
+    Ok((db, readers, catalog_epoch))
+}
+
 impl Shared {
     pub(super) const fn registry_schema(&self) -> u32 {
         if self.catalog_epoch.is_some() {
@@ -533,17 +594,15 @@ impl Shared {
             AnnPolicy::BuildOrLoad
         };
         let dense = DenseCache::for_config(ann_policy, cache, dense_settings, &global_config)?;
-        let (db, readers) = if let Some(epoch) = catalog_epoch {
-            (
-                crate::store::generation_build::open_index_registry(cache, settings, epoch)?,
-                ReadPool::prepare_for_catalog(cache, settings, pool_settings, epoch)?,
-            )
-        } else {
-            (
-                Db::open_with_settings(cache, settings)?,
-                ReadPool::prepare(cache, settings, pool_settings)?,
-            )
-        };
+        let (db, readers, catalog_epoch) = prepare_metadata_store(
+            cache,
+            settings,
+            pool_settings,
+            catalog_epoch,
+            // Library compatibility constructors can serve without a JobRoot.
+            // Their in-place Index writer still requires a legacy registry.
+            owners.is_some() && website.is_none() && global_config.vector_store.is_some(),
+        )?;
         let readers = Arc::new(readers);
         let orphans = crate::store::repo::fail_orphan_sync_jobs(db.connection())?;
         if orphans > 0 {
@@ -641,9 +700,22 @@ impl Shared {
         activity: Arc<Activity>,
     ) -> Result<crate::index::job::JobStats> {
         if self.catalog_epoch.is_some() {
-            return self
-                .run_catalog_watch(project, runtime, paths, operation, activity)
+            let result = self
+                .run_catalog_watch(
+                    project.clone(),
+                    runtime,
+                    paths,
+                    &operation,
+                    activity.clone(),
+                )
                 .await;
+            return match result {
+                Err(error) if crate::store::project_index::catalog_recovery_required(&error) => {
+                    self.recover_catalog_watch(project, &operation, activity)
+                        .await
+                }
+                result => result,
+            };
         }
         let service = self
             .jobs
@@ -701,7 +773,7 @@ impl Shared {
         project: crate::store::models::Project,
         runtime: Arc<crate::watch::WatchRuntime>,
         paths: Arc<crate::watch::WatchPayload>,
-        operation: crate::search::operation::SearchOperation,
+        operation: &crate::search::operation::SearchOperation,
         activity: Arc<Activity>,
     ) -> Result<crate::index::job::JobStats> {
         let service = self
@@ -714,13 +786,13 @@ impl Shared {
                     project,
                     runtime,
                     paths.clone(),
-                    &operation,
+                    operation,
                     activity,
                     service,
                 )
                 .await;
             if result.is_err() {
-                self.settle_watch_account(&paths, &operation).await?;
+                self.settle_watch_account(&paths, operation).await?;
             }
             return result;
         }
@@ -729,7 +801,7 @@ impl Shared {
         let account = paths.account.clone();
         let call = operation.clone();
         let result = service
-            .run_native(&self.workers, activity, &operation, move || {
+            .run_native(&self.workers, activity, operation, move || {
                 let slot = owner.check_catalog_watch(&project, &call)?;
                 let db = owner.open_work_registry()?;
                 let mut capture = crate::index::job::CaptureBudget {
@@ -759,9 +831,62 @@ impl Shared {
             })
             .await;
         if result.is_err() {
-            self.settle_watch_account(&paths, &operation).await?;
+            self.settle_watch_account(&paths, operation).await?;
         }
         result
+    }
+
+    async fn recover_catalog_watch(
+        self: &Arc<Self>,
+        project: Project,
+        operation: &crate::search::operation::SearchOperation,
+        activity: Arc<Activity>,
+    ) -> Result<crate::index::job::JobStats> {
+        let service = self
+            .jobs
+            .get()
+            .ok_or_else(|| Error::internal("watcher job owner absent"))?;
+        let epoch = self
+            .catalog_epoch
+            .ok_or_else(|| Error::internal("catalog watcher has no registry epoch"))?;
+        let permit = crate::hybrid::work::RemoteCall::new(operation.clone())
+            .wait(
+                &crate::hybrid::work::Cancellation::new(),
+                self.workers.control(),
+            )
+            .await?;
+        let shared = self.clone();
+        let call = operation.clone();
+        let capture = request::spawn(Some(permit), Some(activity.clone()), move || {
+            call.check()?;
+            registry::ensure_root_present(&project)?;
+            let revision = shared.project_slot(project.id);
+            let owner = revision
+                .catalog_sync
+                .try_own()
+                .ok_or_else(|| Error::Project {
+                    message: "another writer holds the project sync slot".into(),
+                    instruction: Some("wait for the running index to finish".into()),
+                })?;
+            prepare_catalog_project_sync(&shared, project, epoch, false, revision, owner)
+        });
+        let context = request::run(capture, Some(operation)).await?;
+        let revision = context.revision.clone();
+        let watermark = revision.source_watermark();
+        let (owner, _) = admit_catalog_sync(self, service, &activity, operation, context).await?;
+        match catalog_sync::execute(service, &self.workers, &activity, operation, owner).await {
+            Err(error)
+                if !lifecycle::is_lease_conflict(&error)
+                    && revision.source_watermark() != watermark =>
+            {
+                operation.check()?;
+                Err(Error::internal_with_source(
+                    "retry catalog recovery after a source change",
+                    error,
+                ))
+            }
+            result => result.map(|(stats, _)| stats),
+        }
     }
 
     async fn run_catalog_hybrid_watch(
@@ -1039,36 +1164,47 @@ impl Shared {
         }
         let reader = self.readers.try_acquire()?;
         let publication = slot.try_catalog_publication()?;
-        let head = slot
+        let proof = slot
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .unverified
             .as_ref()
-            .map(|candidate| candidate.head);
-        let Some(head) = head else {
+            .map(|candidate| candidate.proof);
+        let Some(proof) = proof else {
             return Ok(());
         };
-        // Keep the candidate available for another retry if the registry
-        // is still unreadable. Only an exact head can adopt this runtime.
-        let selected = head.is_selected(reader.connection())?;
-        let candidate = slot
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .unverified
-            .take();
+        let (candidate, retired) = lifecycle::with_existing_project_read_lease(
+            self.readers.cache_root(),
+            project_id,
+            || {
+                // Leave the candidate available if the lease or read fails.
+                // Keep the head stable through publication of the runtime.
+                let db_error = crate::store::repo::db_error;
+                let tx = reader
+                    .connection()
+                    .unchecked_transaction()
+                    .map_err(db_error)?;
+                let selected = proof.is_committed(&tx)?;
+                tx.commit().map_err(db_error)?;
+                let candidate = slot
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .unverified
+                    .take();
+                let retired = candidate.as_ref().filter(|_| selected).map(|candidate| {
+                    publication.install(
+                        candidate.runtime.config.clone(),
+                        candidate.runtime.stages.clone(),
+                    )
+                });
+                Ok((candidate, retired))
+            },
+        )?;
         drop(reader);
-        let retired = candidate.as_ref().and_then(|candidate| {
-            selected.then(|| {
-                publication.install(
-                    candidate.runtime.config.clone(),
-                    candidate.runtime.stages.clone(),
-                )
-            })
-        });
         let reload = publication.release_preparation();
-        if selected
+        if retired.is_some()
             && let Some(candidate) = &candidate
             && let Err(error) = self.watchers.revise_with_runtime(
                 &self.cache,
@@ -3030,11 +3166,56 @@ async fn start_catalog_sync(
         config: context.build.config.clone(),
         stages: context.build.stages.clone(),
     });
+    let (owner, acknowledgement) =
+        admit_catalog_sync(shared, service, &activity, &operation, context).await?;
+    let run = {
+        let service = service.clone();
+        let shared = shared.clone();
+        let operation = operation.clone();
+        let activity = activity.clone();
+        async move {
+            let (_, published) =
+                catalog_sync::execute(&service, &shared.workers, &activity, &operation, owner)
+                    .await?;
+            finish_index_watch(&shared, project_id, &operation, &activity).await;
+            if let Some(warm) = warm {
+                warm.schedule(&shared, &service, &operation, published);
+            }
+            Ok::<_, Error>(())
+        }
+    };
+    // The JobRoot owns the terminal envelope and native work even if the
+    // connection is dropped after acknowledgement.
+    if detached {
+        drop(tokio::spawn(run));
+        return Ok(acknowledgement);
+    }
+    run.await?;
+    let permit = crate::hybrid::work::RemoteCall::new(operation.clone())
+        .wait(
+            &crate::hybrid::work::Cancellation::new(),
+            shared.workers.control(),
+        )
+        .await?;
+    let shared = shared.clone();
+    let status = request::spawn(Some(permit), Some(activity), move || {
+        tools::sync_status(&shared.db(), &acknowledgement)
+    });
+    request::run(status, Some(&operation)).await
+}
+
+async fn admit_catalog_sync(
+    shared: &Shared,
+    service: &super::job_service::JobService,
+    activity: &Arc<Activity>,
+    operation: &crate::search::operation::SearchOperation,
+    context: catalog_sync::Context,
+) -> Result<(super::job_service::JobOwner, Value)> {
     let owner = service
         .admit_with_account(
             shared.workers.clone(),
             activity.clone(),
-            &operation,
+            operation,
             &shared.payload_budget,
             None,
         )
@@ -3044,38 +3225,12 @@ async fn start_catalog_sync(
         .phase(
             &shared.workers,
             activity.clone(),
-            &operation,
+            operation,
             owner,
             move |state| state.prepare_catalog_sync(context, &call),
         )
         .await?;
-    let acknowledgement = (**status).clone();
-    drop(status);
-    let service = service.clone();
-    let shared = shared.clone();
-    let run = async move {
-        let published = crate::index::async_job::catalog_sync::execute(
-            &service,
-            &shared.workers,
-            &activity,
-            &operation,
-            owner,
-        )
-        .await?;
-        finish_index_watch(&shared, project_id, &operation, &activity).await;
-        if let Some(warm) = warm {
-            warm.schedule(&shared, &service, &operation, published);
-        }
-        Ok::<_, Error>(())
-    };
-    // The JobRoot owns the terminal envelope and native work even if the
-    // connection is dropped after acknowledgement.
-    if detached {
-        drop(tokio::spawn(run));
-    } else {
-        run.await?;
-    }
-    Ok(acknowledgement)
+    Ok((owner, (**status).clone()))
 }
 
 struct CatalogAnnWarm {
@@ -3192,7 +3347,7 @@ fn capture_catalog_sync(
     args: &Value,
     epoch: [u8; 16],
     detached: bool,
-) -> Result<std::result::Result<crate::index::async_job::catalog_sync::Context, Value>> {
+) -> Result<std::result::Result<catalog_sync::Context, Value>> {
     let project = catalog_job_project(shared, session, args, detached)?;
     registry::ensure_root_present(&project)?;
     let refresh = !detached && args.get("refresh_config").and_then(Value::as_bool) == Some(true);
@@ -3215,6 +3370,17 @@ fn capture_catalog_sync(
             message: "project sync is starting or retiring; retry sync".into(),
         });
     };
+    prepare_catalog_project_sync(shared, project, epoch, refresh, revision, owner).map(Ok)
+}
+
+fn prepare_catalog_project_sync(
+    shared: &Shared,
+    project: Project,
+    epoch: [u8; 16],
+    refresh: bool,
+    revision: ProjectSlot,
+    owner: catalog_sync::Owner,
+) -> Result<catalog_sync::Context> {
     let active = shared.project_config(&project)?;
     let (config, stages) = if refresh {
         shared.stage_catalog_config(&project, &active)?
@@ -3237,7 +3403,7 @@ fn capture_catalog_sync(
     let source = shared.vector_source_for(project.id, &config);
     let refresh = if refresh {
         source.validate_root(&shared.cache)?;
-        Some(crate::index::async_job::catalog_sync::RuntimeUpdate {
+        Some(catalog_sync::RuntimeUpdate {
             active,
             watchers: Arc::clone(&shared.watchers),
             global_config: shared.global_config.clone(),
@@ -3251,8 +3417,8 @@ fn capture_catalog_sync(
     } else {
         None
     };
-    Ok(Ok(crate::index::async_job::catalog_sync::Context {
-        build: crate::index::async_job::catalog_sync::BuildContext {
+    Ok(catalog_sync::Context {
+        build: catalog_sync::BuildContext {
             cache: shared.cache.clone(),
             epoch,
             settings: shared.db_settings.clone(),
@@ -3266,7 +3432,8 @@ fn capture_catalog_sync(
         revision,
         owner,
         refresh,
-    }))
+        reuse_unchanged: shared.website.is_none(),
+    })
 }
 
 fn catalog_stage_model<'a>(config: &Config, stages: &'a HybridStages) -> Result<Option<&'a str>> {
@@ -3347,8 +3514,11 @@ fn catalog_job_project(
         None => session_cwd(shared, session)?,
     };
     let root = registry::project_root_for(&path, &shared.cache)?;
-    shared.config_for_root(&root)?;
     let mut db = shared.open_work_registry()?;
+    if let Some(project) = registry::find_by_root(db.connection(), &root)? {
+        return Ok(project);
+    }
+    shared.config_for_root(&root)?;
     registry::ensure_project(&mut db, &root)
 }
 

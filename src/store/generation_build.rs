@@ -18,6 +18,7 @@ use crate::index::{
 };
 use crate::platform::file_lease::ExclusiveFileLease;
 use crate::platform::fs as native_fs;
+use crate::search::operation::SearchOperation;
 
 use super::project_index::{
     LOCAL_REVISION_SCHEMA_SQL, LOCAL_SCHEMA_SQL, LOCAL_SCHEMA_VERSION, project_directory,
@@ -38,8 +39,8 @@ use catalog_access::CatalogAccess;
 use catalog_access::observe_index_base;
 pub(crate) use catalog_access::{observe_replacement_base, open_index_registry};
 
-mod interrupted;
-use interrupted::InterruptedBase;
+mod replacement;
+use replacement::ReplacementBase;
 
 mod publication;
 pub use publication::publish_lexical_generation;
@@ -297,7 +298,7 @@ pub(crate) fn prepare_operational_lexical_generation(
         native_fs::available_space,
         BuildPurpose::DirectIndex {
             capture,
-            interrupted: build.interrupted,
+            replacement: build.replacement,
         },
     )?;
     Ok(PreparedLexicalPublication {
@@ -310,22 +311,119 @@ pub(crate) fn prepare_operational_lexical_generation(
 #[derive(Clone, Copy)]
 pub(crate) struct OperationalBuild {
     pub(crate) request: LexicalBuildRequest,
-    pub(crate) interrupted: Option<InterruptedBase>,
+    pub(crate) replacement: Option<ReplacementBase>,
 }
 
 #[derive(Clone, Copy)]
-struct BuildInputs<'a> {
-    request: LexicalBuildRequest,
-    settings: &'a Resolved<DbSettings>,
-    limits: InspectionLimits,
-    config: &'a Config,
+pub(crate) struct BuildInputs<'a> {
+    pub(crate) request: LexicalBuildRequest,
+    pub(crate) settings: &'a Resolved<DbSettings>,
+    pub(crate) limits: InspectionLimits,
+    pub(crate) config: &'a Config,
+}
+
+pub(crate) struct UnchangedGeneration {
+    pub(crate) index: ObservedProjectIndex,
+    pub(crate) outcome: crate::index::outcome::IndexOutcome,
+    pub(crate) skipped: usize,
+}
+
+/// Verify an unchanged index while holding the same project lease as search.
+/// The caller can finish a job while the observed generation is still selected.
+pub(crate) fn reuse_unchanged_generation<T>(
+    cache: &Path,
+    project: &Project,
+    inputs: BuildInputs<'_>,
+    operation: &SearchOperation,
+    finish: impl FnOnce(&Db, UnchangedGeneration) -> Result<T>,
+) -> Result<Option<T>> {
+    let BuildInputs {
+        request,
+        settings,
+        limits,
+        config,
+    } = inputs;
+    let cache = filesystem(cache, "resolve cache", fs::canonicalize(cache))?;
+    registry_inspect::validate(&cache, limits)?;
+    admit_catalog_cache(&cache)?;
+    operation.check()?;
+    let db = open_index_registry(&cache, settings, request.epoch)?;
+    let head = generation_catalog::active_head(db.connection(), project.id)
+        .map_err(|reason| admission(format!("active generation unavailable ({reason:?})")))?;
+    if !head.is_some_and(|head| matches!(head.layout, generation_catalog::Layout::Local { .. })) {
+        return Ok(None);
+    }
+    let directory = project_directory(&cache, project.id);
+    if registry_inspect::check_directory(&directory).is_err() {
+        return Ok(None);
+    }
+    let _preparation = acquire_preparation_lease(&directory)?;
+    recovery::discard_index_attempt(&cache, &directory, request, settings, limits)?;
+    recovery::reclaim_index_pairs(&cache, &directory, request, settings, limits);
+
+    let result = super::project_index::with_catalog_pair(&db, project, |registry, local, index| {
+        let Some((local, (epoch, generation_id))) = local.as_ref().zip(index.catalog_generation())
+        else {
+            return Ok(Ok(None));
+        };
+        let Some(outcome) = crate::index::outcome::read(&local.db, project.id)?
+            .filter(crate::index::outcome::IndexOutcome::is_complete)
+        else {
+            return Ok(Ok(None));
+        };
+        if epoch != request.epoch
+            || local.index_recipe != crate::index::outcome::recipe_id(config)
+            || local.embedding_recipe.is_some()
+        {
+            return Ok(Ok(None));
+        }
+        let publication::SourceMatch::Matches(skipped) = publication::inspect_sources(
+            &local.db,
+            project,
+            config,
+            publication::SourceCoverage::Complete,
+            || operation.check(),
+        )?
+        else {
+            return Ok(Ok(None));
+        };
+        let tantivy = local.tantivy_dir()?;
+        ReadIndex::verify_segment_checksums(&tantivy, || operation.check())?;
+        verify_chunk_pair(&local.db.conn, project.id, &tantivy, || operation.check())?;
+        operation.check()?;
+        // Distinguish failure to establish proof from failure of the caller's
+        // completion action. Only the former can proceed to replacement.
+        Ok(finish(
+            registry,
+            UnchangedGeneration {
+                index: ObservedProjectIndex {
+                    project_id: project.id,
+                    epoch: Some(epoch),
+                    generation_id: Some(generation_id),
+                    content_revision: index.content_revision(),
+                    layout: ProjectIndexLayout::Local,
+                },
+                outcome,
+                skipped,
+            },
+        )
+        .map(Some))
+    });
+    if let Ok(finished) = result {
+        finished
+    } else {
+        // The normal rebuild path already handles damaged or interrupted
+        // pairs. Honoring cancellation here avoids starting a retry.
+        operation.check()?;
+        Ok(None)
+    }
 }
 
 enum BuildPurpose<'a, 'b> {
     Maintenance,
     DirectIndex {
         capture: &'a mut job::CaptureBudget<'b>,
-        interrupted: Option<InterruptedBase>,
+        replacement: Option<ReplacementBase>,
     },
 }
 
@@ -334,10 +432,10 @@ impl BuildPurpose<'_, '_> {
         match self {
             Self::Maintenance => CatalogAccess::Stopped,
             Self::DirectIndex {
-                interrupted: None, ..
+                replacement: None, ..
             } => CatalogAccess::Operational,
             Self::DirectIndex {
-                interrupted: Some(base),
+                replacement: Some(base),
                 ..
             } => CatalogAccess::Repair(*base),
         }
@@ -548,7 +646,7 @@ fn verify_base(
             let lock = lifecycle::lease_path(cache, request.project_id);
             lifecycle::with_read_lock(open_coordination_file(&lock, false)?, &lock, || {
                 access.read(cache, settings, limits, |conn| {
-                    interrupted::recheck(conn, cache, base, settings, limits)
+                    replacement::recheck(conn, cache, base, settings, limits)
                 })
             })?;
             Some(base.index)
@@ -786,8 +884,9 @@ fn build_pair(
         ExclusiveFileLease::try_acquire(lease_file),
     )?;
     let metadata = path.join("metadata.db");
-    let (revision, prepared) =
-        build_metadata(path, project, generation, settings, config, bytes, capture)?;
+    let operation = capture.as_ref().map(|capture| capture.operation);
+    let allow_warnings = capture.is_some() && inputs.request.base.is_none();
+    let (revision, prepared) = build_metadata(path, project, generation, inputs, bytes, capture)?;
     let metadata_bytes = filesystem(
         &metadata,
         "measure staged metadata",
@@ -807,9 +906,15 @@ fn build_pair(
     )?;
     drop(prepared);
     let db = publication::open_local_metadata(path, settings, limits)?;
-    verify_chunk_pair(db.connection(), project.id, &tantivy, limits)?;
+    verify_chunk_pair(db.connection(), project.id, &tantivy, || {
+        operation.map_or(Ok(()), SearchOperation::check)
+    })?;
     let outcome = crate::index::outcome::read(&db, project.id)?
-        .filter(|outcome| outcome.is_complete() && outcome.index_generation == revision)
+        .filter(|outcome| {
+            outcome.scope == crate::index::outcome::SurveyScope::FullSurvey
+                && (allow_warnings || outcome.is_complete())
+                && outcome.index_generation == revision
+        })
         .ok_or_else(|| admission("staged lexical outcome is incomplete"))?;
     db.conn
         .close()
@@ -821,11 +926,16 @@ fn build_metadata(
     path: &Path,
     project: &Project,
     generation: i64,
-    settings: &Resolved<DbSettings>,
-    config: &Config,
+    inputs: BuildInputs<'_>,
     bytes: u64,
     capture: Option<&mut job::CaptureBudget<'_>>,
 ) -> Result<(i64, job::PreparedPlan)> {
+    let BuildInputs {
+        request,
+        settings,
+        config,
+        ..
+    } = inputs;
     let metadata = path.join("metadata.db");
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
@@ -851,8 +961,21 @@ fn build_metadata(
         settings: settings.clone(),
         generation_catalog: false,
     };
+    let require_complete = capture.is_none() || request.base.is_some();
     let prepared = job::prepare_staged_metadata(&mut db, project, config, capture)?;
-    if prepared.stats.errors != 0 || repo::has_pending_docs(db.connection(), project.id)? {
+    if require_complete && prepared.stats.errors != 0 {
+        let detail = prepared
+            .stats
+            .warnings
+            .first()
+            .map_or_else(String::new, |warning| {
+                format!(" ({}: {})", warning.path, warning.message)
+            });
+        return Err(admission(format!(
+            "lexical generation has an incomplete source survey{detail}"
+        )));
+    }
+    if repo::has_pending_docs(db.connection(), project.id)? {
         return Err(admission(
             "lexical generation has an incomplete source survey",
         ));
@@ -932,57 +1055,36 @@ fn use_memory_temp_store(connection: &Connection) -> Result<()> {
         .map_err(repo::db_error)
 }
 
-// The caller owns the inactive pair for both reads. The comparison covers
-// every live stored Tantivy chunk, including duplicate IDs at equal counts.
+// The local pair is leased for both reads. This join order streams the
+// covering (doc_id, seq) index without sorting the corpus in SQLite.
 fn verify_chunk_pair(
     metadata: &Connection,
     project: i64,
     tantivy: &Path,
-    limits: InspectionLimits,
+    mut check: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     registry_inspect::check_tantivy_files(tantivy, None).map_err(|reason| {
         admission(format!("generation Tantivy files unavailable ({reason:?})"))
     })?;
-    let chunk_count: i64 = metadata
-        .query_row(
-            "SELECT count(*) FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE d.project_id = ?1",
-            [project],
-            |row| row.get(0),
-        )
-        .map_err(repo::db_error)?;
-    // Both buffers stay live during comparison. Reserve only the rows that
-    // exist, under the caller's metadata limit.
-    let count = usize::try_from(chunk_count)
-        .ok()
-        .filter(|count| {
-            *count <= limits.max_metadata_bytes / (size_of::<u64>() + size_of::<bool>())
-        })
-        .ok_or_else(|| admission("staged chunk ID verification exceeds the metadata budget"))?;
-    let mut expected = Vec::new();
-    expected
-        .try_reserve_exact(count)
-        .map_err(|error| Error::internal_with_source("allocate staged chunk IDs", error))?;
     let mut query = metadata
         .prepare(
-            "SELECT c.doc_id, c.seq FROM chunks c JOIN docs d ON d.id = c.doc_id
+            "SELECT c.doc_id, c.seq FROM chunks c CROSS JOIN docs d ON d.id = c.doc_id
          WHERE d.project_id = ?1 ORDER BY c.doc_id, c.seq",
         )
         .map_err(repo::db_error)?;
     let mut rows = query.query([project]).map_err(repo::db_error)?;
-    while let Some(row) = rows.next().map_err(repo::db_error)? {
+    ReadIndex::verify_chunk_ids(tantivy, || {
+        check()?;
+        let Some(row) = rows.next().map_err(repo::db_error)? else {
+            return Ok(None);
+        };
         let doc: u32 = row.get(0).map_err(repo::db_error)?;
         let seq: u32 = row.get(1).map_err(repo::db_error)?;
-        if doc == 0 || expected.len() == count {
+        if doc == 0 {
             return Err(admission("invalid staged SQLite chunk IDs"));
         }
-        expected.push(chunk_id(i64::from(doc), seq));
-    }
-    if expected.len() != count {
-        return Err(admission(
-            "staged SQLite chunk IDs changed during verification",
-        ));
-    }
-    ReadIndex::verify_chunk_ids(tantivy, &expected)
+        Ok(Some(chunk_id(i64::from(doc), seq)))
+    })
 }
 
 fn claim_path(parent: &Path, generation: i64) -> std::path::PathBuf {

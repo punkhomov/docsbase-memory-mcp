@@ -50,7 +50,9 @@ pub(crate) struct AdmittedLaunch {
 }
 
 impl AdmittedLaunch {
-    pub(crate) const fn registry_schema(&self) -> u32 {
+    // Admission compares incumbent state before startup can initialize a new
+    // catalog. Hello and daemon state use the schema selected by the writer.
+    pub(crate) const fn admission_schema(&self) -> u32 {
         if self.catalog_epoch.is_some() {
             crate::store::GENERATION_SCHEMA_VERSION
         } else {

@@ -202,7 +202,7 @@ pub(crate) fn project_by_id_in(conn: &Connection, id: i64) -> Result<Option<Proj
     row.map(to_project).transpose()
 }
 
-fn find_by_root(conn: &Connection, root: &Path) -> Result<Option<Project>> {
+pub(super) fn find_by_root(conn: &Connection, root: &Path) -> Result<Option<Project>> {
     let root = root.to_string_lossy();
     let row = conn
         .query_row(

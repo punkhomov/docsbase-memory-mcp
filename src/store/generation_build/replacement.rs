@@ -1,18 +1,21 @@
-//! Evidence for replacing a selected pair after an incomplete local update.
+//! Evidence for replacing a selected pair whose lexical data is unusable.
 
-use std::path::Path;
+use std::{io::ErrorKind, path::Path};
 
 use rusqlite::{Connection, OpenFlags};
+use tantivy::{TantivyError, directory::error::OpenReadError};
 
 use crate::config::schema::Resolved;
 use crate::daemon::{lifecycle, registry};
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::index::tantivy_index::{ReadIndex, TOKENIZER_VERSION_FILE};
 use crate::platform::fs as native_fs;
 use crate::store::generation_catalog::{self, Layout};
 use crate::store::generation_seal::GenerationSeal;
-use crate::store::project_index::project_directory;
+use crate::store::project_index::{project_directory, verify_local_outcome};
 use crate::store::registry_inspect::{
     self, InspectionLimits, LocalRevision, ObservedProjectIndex, ProjectIndexLayout,
+    UnavailableReason,
 };
 use crate::store::settings::DbSettings;
 use crate::store::{Db, repo};
@@ -21,17 +24,23 @@ use super::publication::{configure_publication_connection, open_local_metadata};
 use super::{admission, entry_exists, filesystem, open_coordination_file};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InterruptedBase {
+pub(crate) struct ReplacementBase {
     pub(crate) index: ObservedProjectIndex,
     seal: [u8; 32],
     revision: LocalRevision,
+}
+
+impl ReplacementBase {
+    pub(super) const fn interrupted_write(self) -> bool {
+        self.revision.pending
+    }
 }
 
 pub(super) fn inspect_for_replacement(
     registry: &Db,
     project_id: i64,
     limits: InspectionLimits,
-) -> Result<Option<InterruptedBase>> {
+) -> Result<Option<ReplacementBase>> {
     let cache = registry.cache_root();
     let lock = lifecycle::lease_path(cache, project_id);
     lifecycle::with_writer_lock(open_coordination_file(&lock, false)?, &lock, || {
@@ -49,7 +58,7 @@ pub(super) fn inspect_for_replacement(
 pub(super) fn recheck(
     connection: &Connection,
     cache: &Path,
-    expected: InterruptedBase,
+    expected: ReplacementBase,
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
 ) -> Result<()> {
@@ -76,7 +85,7 @@ fn inspect(
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
     recover_journal: bool,
-) -> Result<Option<InterruptedBase>> {
+) -> Result<Option<ReplacementBase>> {
     let epoch = generation_catalog::read_epoch(connection)
         .map_err(|reason| admission(format!("generation epoch unavailable ({reason:?})")))?;
     let Some(head) = generation_catalog::active_head(connection, project_id)
@@ -135,11 +144,16 @@ fn inspect(
                 .map_err(repo::db_error)?;
             tx.commit().map_err(repo::db_error)?;
         }
+        if !revision.pending {
+            verify_local_outcome(&metadata, &project, revision, &seal)?;
+        }
         metadata.close()?;
         registry_inspect::sidecars_absent(&directory.join("metadata.db")).map_err(|reason| {
             admission(format!("local generation journal unavailable ({reason:?})"))
         })?;
-        Ok(revision.pending.then_some(InterruptedBase {
+        let requires_replacement =
+            revision.pending || unusable_tantivy(&directory.join("tantivy"), revision, &seal)?;
+        Ok(requires_replacement.then_some(ReplacementBase {
             index: ObservedProjectIndex {
                 project_id,
                 epoch: Some(epoch),
@@ -151,6 +165,53 @@ fn inspect(
             revision,
         }))
     })
+}
+
+fn unusable_tantivy(path: &Path, revision: LocalRevision, seal: &GenerationSeal) -> Result<bool> {
+    if !entry_exists(path)? {
+        return Ok(true);
+    }
+    let proof = match revision.manifest {
+        Some(digest) => registry_inspect::check_revised_tantivy(path, &digest),
+        None => registry_inspect::check_tantivy_files(path, Some(&seal.files)),
+    };
+    match proof {
+        Err(UnavailableReason::Changed) => Ok(true),
+        Err(UnavailableReason::Io) if registry_inspect::check_directory(path).is_ok() => {
+            Ok(!entry_exists(&path.join("meta.json"))?
+                || !entry_exists(&path.join(TOKENIZER_VERSION_FILE))?)
+        }
+        Err(_) => Ok(false),
+        Ok(()) => match ReadIndex::check_health_with_project_lease(path) {
+            Ok(()) => Ok(false),
+            Err(Error::Project { .. }) => Ok(true),
+            Err(Error::Internal {
+                source: Some(source),
+                ..
+            }) => Ok(source
+                .downcast_ref::<TantivyError>()
+                .is_some_and(tantivy_requires_replacement)),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn tantivy_requires_replacement(error: &TantivyError) -> bool {
+    match error {
+        TantivyError::DataCorruption(_)
+        | TantivyError::SchemaError(_)
+        | TantivyError::OpenReadError(
+            OpenReadError::FileDoesNotExist(_) | OpenReadError::IncompatibleIndex(_),
+        ) => true,
+        TantivyError::OpenReadError(OpenReadError::IoError { io_error, .. })
+        | TantivyError::IoError(io_error) => {
+            matches!(
+                io_error.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::InvalidData
+            )
+        }
+        _ => false,
+    }
 }
 
 fn open_journal_for_recovery(

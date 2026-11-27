@@ -10,7 +10,11 @@ use crate::daemon::registry;
 use crate::daemon::settings::DaemonProfile;
 use crate::error::{Error, Result};
 use crate::index::async_job::catalog_sync::BuildContext;
-use crate::index::{generation_job::GenerationJob, job::CaptureBudget, outcome};
+use crate::index::{
+    generation_job::GenerationJob,
+    job::{CaptureBudget, JobStats},
+    outcome,
+};
 use crate::search::budget::PayloadBudget;
 use crate::search::operation::SearchOperation;
 use crate::store::Db;
@@ -18,16 +22,17 @@ use crate::store::models::Project;
 use crate::store::settings::DbSettings;
 use crate::vector_cache::{VectorCacheSource, VectorStore};
 
-/// The explicitly selected Website profile already requires one lexical
-/// project. It can create a fresh catalog before any daemon owns that cache.
-pub(super) fn create_for_website(global: &Config, project: &Config, root: &Path) -> bool {
-    let DaemonProfile::Website { project_root } = &global.daemon.profile else {
-        return false;
-    };
-    if !project_root.canonicalize().is_ok_and(|fixed| fixed == root) {
-        return false;
+/// Shared v2 can initialize an empty catalog. Website additionally requires
+/// the fixed project and lexical-only settings.
+pub(super) fn initializes_catalog(global: &Config, project: &Config, root: &Path) -> bool {
+    match &global.daemon.profile {
+        DaemonProfile::Shared => project.vector_store.is_some(),
+        DaemonProfile::Website { project_root } => {
+            project_root.canonicalize().is_ok_and(|fixed| fixed == root)
+                && lexical(global)
+                && lexical(project)
+        }
     }
-    lexical(global) && lexical(project)
 }
 
 pub(super) struct Target {
@@ -107,7 +112,6 @@ impl Target {
         let project_id = self.project.id;
         let recipe = outcome::recipe_id(&self.config);
         let config_dir = paths::config_dir()?;
-        let project_root = &self.project.canonical_root;
         let account = budget.reserve(0)?;
         let mut capture = CaptureBudget {
             account: &account,
@@ -122,25 +126,48 @@ impl Target {
             settings: &self.settings,
             config: &self.config,
         };
+        if let Some(stats) = job.reuse_unchanged(operation, |_, generation| {
+            self.with_current_recipe(&config_dir, &recipe, operation, || {
+                Ok(JobStats {
+                    skipped: generation.skipped,
+                    ..JobStats::default()
+                })
+            })
+        })? {
+            return Ok(serde_json::json!({ "project_id": project_id, "stats": stats }));
+        }
         let prepared = job.stage(&mut capture)?;
         operation.check()?;
         let stats = prepared.publish(|commit| {
-            paths::with_index_config_write_locks(
-                Some(&config_dir.join("config.toml")),
-                project_root,
-                || {
-                    operation.check()?;
-                    let current = Config::load_from(&config_dir, Some(project_root))?;
-                    if !lexical(&current) || outcome::recipe_id(&current) != recipe {
-                        return Err(admission(
-                            "project index configuration changed; retry index",
-                        ));
-                    }
-                    commit.commit(|| operation.check())
-                },
-            )
+            self.with_current_recipe(&config_dir, &recipe, operation, || {
+                commit.commit(|| operation.check())
+            })
         })?;
         Ok(serde_json::json!({ "project_id": project_id, "stats": stats }))
+    }
+
+    fn with_current_recipe<T>(
+        &self,
+        config_dir: &Path,
+        recipe: &str,
+        operation: &SearchOperation,
+        finish: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let project_root = &self.project.canonical_root;
+        paths::with_index_config_write_locks(
+            Some(&config_dir.join("config.toml")),
+            project_root,
+            || {
+                operation.check()?;
+                let current = Config::load_from(config_dir, Some(project_root))?;
+                if !lexical(&current) || outcome::recipe_id(&current) != recipe {
+                    return Err(admission(
+                        "project index configuration changed; retry index",
+                    ));
+                }
+                finish()
+            },
+        )
     }
 }
 

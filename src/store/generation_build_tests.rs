@@ -658,6 +658,112 @@ fn blocked_watcher_directory_keeps_the_selected_revision_searchable() {
 }
 
 #[test]
+fn incomplete_replacement_preserves_the_searchable_generation() {
+    let pair = RevisablePair::new();
+    let (before, hits) = pair.search("Applemigration").unwrap();
+    assert_eq!(hits, 1);
+    fs::write(pair.env.source.path().join("guide.md"), [0xff]).unwrap();
+
+    let error = pair.rebuild(|| Ok(())).unwrap_err();
+    assert!(error.to_string().contains("guide.md"), "{error}");
+    assert_eq!(pair.search("Applemigration").unwrap(), (before, 1));
+
+    pair.write_source("# Cherry\n\nCherryupdatedbatch\n");
+    pair.rebuild(|| Ok(())).unwrap();
+    let (after, hits) = pair.search("Cherryupdatedbatch").unwrap();
+    assert_ne!(after.generation_id(), before.generation_id());
+    assert_eq!(hits, 1);
+}
+
+#[test]
+fn catalog_rebuild_replaces_damaged_lexical_files_without_removing_unowned_files() {
+    let pair = RevisablePair::new();
+    let old = pair.search("Applemigration").unwrap().0;
+    let directory = pair.dir();
+    let tantivy = directory.join("tantivy");
+    fs::remove_file(tantivy.join("meta.json")).unwrap();
+    let unowned = tantivy.join("87654321876543218765432187654321.store");
+    fs::write(&unowned, b"unowned").unwrap();
+    let managed = tantivy.join(".managed.json");
+    let mut inventory: Vec<String> = serde_json::from_slice(&fs::read(&managed).unwrap()).unwrap();
+    inventory.push(unowned.file_name().unwrap().to_str().unwrap().to_owned());
+    fs::write(managed, serde_json::to_vec(&inventory).unwrap()).unwrap();
+    assert!(pair.search("Applemigration").is_err());
+    pair.write_source("# Fig\n\nFigrepairedgeneration\n");
+
+    let refused = pair
+        .rebuild(|| Err(admission("reject replacement")))
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("reject replacement"),
+        "{refused}"
+    );
+    let head = generation_catalog::active_head(pair.registry.connection(), pair.project.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(head.id), old.generation_id());
+    assert!(directory.join("metadata.db").is_file());
+
+    pair.rebuild(|| Ok(())).unwrap();
+    let (repaired, hits) = pair.search("Figrepairedgeneration").unwrap();
+    assert_ne!(repaired.generation_id(), old.generation_id());
+    assert_eq!(hits, 1);
+    assert!(
+        reclaim_retired_lexical_generation(
+            pair.env.cache.path(),
+            pair.request,
+            pair.generation,
+            &pair.policy,
+            limits(),
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&unowned).unwrap(), b"unowned");
+}
+
+#[test]
+fn catalog_rebuild_repairs_truncated_revised_positions() {
+    let pair = RevisablePair::new();
+    pair.write_source("# Fig\n\nFigrevisedgeneration\n");
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    let tantivy = pair.dir().join("tantivy");
+    let index = tantivy::Index::open_in_dir(&tantivy).unwrap();
+    let segments = index.searchable_segment_metas().unwrap();
+    let positions = segments[0].relative_path(tantivy::index::SegmentComponent::Positions);
+    drop(index);
+    fs::write(tantivy.join(positions), [0]).unwrap();
+
+    assert!(pair.search("Figrevisedgeneration").is_err());
+    pair.rebuild(|| Ok(())).unwrap();
+    let (repaired, hits) = pair.search("Figrevisedgeneration").unwrap();
+    assert_ne!(repaired.generation_id(), Some(pair.generation));
+    assert_eq!(hits, 1);
+}
+
+#[test]
+fn catalog_rebuild_succeeds_without_a_readable_retirement_inventory() {
+    for missing_directory in [true, false] {
+        let pair = RevisablePair::new();
+        let directory = pair.dir();
+        let tantivy = directory.join("tantivy");
+        if missing_directory {
+            fs::remove_dir_all(tantivy).unwrap();
+        } else {
+            fs::write(tantivy.join(".managed.json"), "broken retirement inventory").unwrap();
+        }
+        let unowned = directory.join("unowned");
+        fs::write(&unowned, b"keep me").unwrap();
+
+        pair.write_source("# Fig\n\nFigrepairedgeneration\n");
+        pair.rebuild(|| Ok(())).unwrap();
+        let (repaired, hits) = pair.search("Figrepairedgeneration").unwrap();
+        assert_ne!(repaired.generation_id(), Some(pair.generation));
+        assert_eq!(hits, 1);
+        assert_eq!(fs::read(unowned).unwrap(), b"keep me");
+    }
+}
+
+#[test]
 fn catalog_rebuild_replaces_an_interrupted_revision_and_resumes_cleanup() {
     let pair = RevisablePair::new();
     let directory = pair.dir();
@@ -1405,17 +1511,11 @@ fn completed_pair_rejects_the_wrong_chunk_ids_even_at_equal_counts() {
     let root = env.generation(prepared.generation_id);
     let db = Connection::open(root.join("metadata.db")).unwrap();
     let index_dir = root.join("tantivy");
-    verify_chunk_pair(&db, prepared.project_id, &index_dir, limits()).unwrap();
-    let tight_limit = InspectionLimits {
-        max_metadata_bytes: size_of::<u64>(),
-        ..limits()
-    };
-    let error = verify_chunk_pair(&db, prepared.project_id, &index_dir, tight_limit).unwrap_err();
-    assert!(error.to_string().contains("metadata budget"), "{error}");
+    verify_chunk_pair(&db, prepared.project_id, &index_dir, || Ok(())).unwrap();
 
     let changed = db.execute("UPDATE chunks SET seq = seq + 1", []).unwrap();
     assert_eq!(changed, 1);
-    let error = verify_chunk_pair(&db, prepared.project_id, &index_dir, limits()).unwrap_err();
+    let error = verify_chunk_pair(&db, prepared.project_id, &index_dir, || Ok(())).unwrap_err();
     assert!(error.to_string().contains("chunk IDs"), "{error}");
     env.assert_legacy_search();
 }
@@ -1434,7 +1534,7 @@ fn completed_pair_requires_positions_for_phrase_search() {
         .expect("generated Tantivy positions");
     fs::remove_file(positions).unwrap();
 
-    assert!(verify_chunk_pair(&db, prepared.project_id, &index_dir, limits()).is_err());
+    assert!(verify_chunk_pair(&db, prepared.project_id, &index_dir, || Ok(())).is_err());
     env.assert_legacy_search();
 }
 
@@ -2161,7 +2261,7 @@ fn a_private_catalog_pair_retains_preparation_until_a_later_worker_publishes() {
     };
     let build = OperationalBuild {
         request: env.request(),
-        interrupted: None,
+        replacement: None,
     };
     let mut prepare = || {
         prepare_operational_lexical_generation(
@@ -2243,7 +2343,7 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         env.cache.path(),
         OperationalBuild {
             request,
-            interrupted: None,
+            replacement: None,
         },
         &settings,
         limits(),
@@ -2271,7 +2371,7 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         env.cache.path(),
         OperationalBuild {
             request,
-            interrupted: None,
+            replacement: None,
         },
         &settings,
         limits(),

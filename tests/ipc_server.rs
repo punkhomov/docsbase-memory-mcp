@@ -395,7 +395,7 @@ fn daemon_search_honors_configured_payload_limit() {
     write_file(
         env.cache(),
         "config/config.toml",
-        b"[search]\nmax_request_payload_bytes = 1\nmax_retained_payload_bytes = 1\n",
+        b"config_version = 2\n[search]\nmax_request_payload_bytes = 1\nmax_retained_payload_bytes = 1\n",
     );
     env.start_daemon();
     let mut client = env.client();
@@ -535,18 +535,20 @@ fn lease_conflict_keeps_status() {
     let guard = lock.write().expect("hold lease");
 
     let mut client = env.client();
-    client.handshake(env.root()).expect("handshake");
-    let result = client.call_tool("index_project", serde_json::json!({}));
+    client.handshake_registry().expect("handshake");
+    let result = client.call_tool("index_project", serde_json::json!({"path": env.root()}));
     assert!(result.is_err(), "lease conflict must fail: {result:?}");
 
     let status = client
         .call_tool("status", serde_json::json!({}))
         .expect("status");
     assert_eq!(
-        status["projects"][0]["status"], "indexed",
-        "conflict must not flip status to error"
+        status["projects"][0]["status"], "indexing",
+        "registry status must describe the occupied project lease"
     );
     drop(guard);
+    let status = client.call_tool("status", serde_json::json!({})).unwrap();
+    assert_eq!(status["projects"][0]["status"], "indexed");
 }
 
 #[test]

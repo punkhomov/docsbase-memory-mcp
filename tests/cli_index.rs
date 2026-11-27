@@ -63,8 +63,20 @@ fn registers_and_indexes() {
     assert_eq!(json["project_id"], 1);
     assert_eq!(json["stats"]["docs"], 1);
     assert!(json["stats"]["chunks"].as_u64().expect("chunks") > 0);
-    assert!(env.cache.path().join("registry.db").exists());
-    assert!(env.cache.path().join("projects/1/tantivy").exists());
+    let registry = rusqlite::Connection::open(env.cache.path().join("registry.db")).unwrap();
+    let active: i64 = registry
+        .query_row(
+            "SELECT active_id FROM project_generation_head WHERE project_id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        env.cache
+            .path()
+            .join(format!("projects/1/generations/{active}/tantivy"))
+            .exists()
+    );
     assert!(env.cache.path().join("projects/1/.writer.lock").exists());
 }
 

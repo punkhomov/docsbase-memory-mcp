@@ -357,7 +357,10 @@ where
                         project.id,
                         head.id,
                     )
-                    .map_err(|reason| unavailable("generation metadata", reason))?;
+                    .map_err(|reason| match reason {
+                        UnavailableReason::RecoveryRequired => invalid_index(PENDING_REVISION),
+                        reason => unavailable("generation metadata", reason),
+                    })?;
                     if !revision.matches_seal(&seal, epoch, project.id, head.id) {
                         return Err(invalid_index(
                             "published generation seal does not match the selected metadata identity",
@@ -396,7 +399,7 @@ where
     }
 }
 
-fn verify_local_outcome(
+pub(super) fn verify_local_outcome(
     metadata: &Db,
     project: &Project,
     revision: registry_inspect::LocalRevision,
@@ -404,9 +407,9 @@ fn verify_local_outcome(
 ) -> Result<()> {
     let outcome = outcome::read(metadata, project.id).map_err(local_metadata_error)?;
     if !outcome.is_some_and(|outcome| {
-        // The seal proves original corpus coverage. An incremental outcome
-        // also reports per-path capture errors while committing valid edits.
-        (outcome.is_complete()
+        // A full survey can report per-file omissions. Revised pairs can
+        // also carry a later subset outcome from the incremental writer.
+        (outcome.scope == outcome::SurveyScope::FullSurvey
             || (revision.manifest.is_some() && outcome.scope == outcome::SurveyScope::Subset))
             && outcome.index_generation == revision.content_revision
             && project.canonical_root.to_str() == Some(outcome.canonical_root.as_str())
@@ -473,8 +476,10 @@ pub(super) fn observe_catalog_index(
 
 fn open_catalog_metadata(registry: &Db, directory: &Path, access: PairAccess) -> Result<Db> {
     let path = directory.join("metadata.db");
-    registry_inspect::sidecars_absent(&path)
-        .map_err(|reason| unavailable("generation metadata sidecars", reason))?;
+    registry_inspect::sidecars_absent(&path).map_err(|reason| match reason {
+        UnavailableReason::RecoveryRequired => invalid_index(UNSETTLED_METADATA),
+        reason => unavailable("generation metadata sidecars", reason),
+    })?;
     crate::platform::fs::check_single_link(&path)
         .map_err(|err| Error::internal_with_source("inspect generation metadata file", err))?;
     let settings = registry.settings().settings();
@@ -509,6 +514,14 @@ fn canonical_cache(cache: &Path) -> Result<PathBuf> {
     cache
         .canonicalize()
         .map_err(|error| Error::internal_with_source("resolve catalog cache root", error))
+}
+
+const PENDING_REVISION: &str = "generation metadata is unavailable (RecoveryRequired)";
+const UNSETTLED_METADATA: &str = "generation metadata sidecars is unavailable (RecoveryRequired)";
+
+pub(crate) fn catalog_recovery_required(error: &Error) -> bool {
+    matches!(error, Error::Project { message, .. }
+        if matches!(message.as_str(), PENDING_REVISION | UNSETTLED_METADATA))
 }
 
 fn unavailable(object: &str, reason: UnavailableReason) -> Error {

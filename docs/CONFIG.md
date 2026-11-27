@@ -1007,12 +1007,19 @@ the global profile above on a supported Unix filesystem or on writable
 local NTFS on Windows. A fresh Windows cache outside the user's profile
 and LocalAppData also needs permission to flush its parent directories.
 
-Shared can open an existing v5 catalog with lexical or hybrid settings on a
-supported Unix filesystem or on writable local NTFS on Windows. On Windows,
+Shared with v2 configuration initializes a fresh v5 catalog at startup or on
+the first stopped Index on supported Unix filesystems and writable local NTFS
+on Windows. An existing v4 catalog keeps its schema. On Windows,
 a cache on another filesystem or a network share can continue using v4.
 For publication from an unsupported cache location, move the v5 cache to a
 writable local NTFS directory while the daemon is stopped. Index and Sync
-prepare the replacement pair before switching the active head. With embeddings enabled, the watcher
+prepare the replacement pair before switching the active head. A complete
+lexical pair can be reused after a fresh scan confirms the same Markdown and
+index recipe. The first Index can publish verified files with warnings about
+omissions. A replacement requires a complete survey and keeps the selected
+generation if any source file could not be inspected. Website readiness stays
+partial until a complete survey succeeds. A watcher retry can rebuild a
+generation left pending by a failed commit. With embeddings enabled, the watcher
 prepares vectors before applying edits. After enabling or disabling
 embeddings or changing the embedding recipe, run `docsbase index` to
 publish a matching generation. Opening an indexed project can refill

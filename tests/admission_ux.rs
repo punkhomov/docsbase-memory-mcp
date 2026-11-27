@@ -349,6 +349,7 @@ fn conflict_log_fields() {
 #[test]
 fn rebuild_hint_on_schema_bump() {
     let mut env = Env::new(&[("README.md", DOC)]);
+    drop(docsbase_memory::store::Db::open(env.cache()).unwrap());
     env.index();
     env.start_daemon();
     let mut client = env.client();
@@ -392,6 +393,7 @@ fn rebuild_hint_on_schema_bump() {
 #[test]
 fn stale_schema_survives_file_edit() {
     let mut env = Env::new(&[("README.md", DOC)]);
+    drop(docsbase_memory::store::Db::open(env.cache()).unwrap());
     env.index();
     env.start_daemon();
     let mut client = env.client();

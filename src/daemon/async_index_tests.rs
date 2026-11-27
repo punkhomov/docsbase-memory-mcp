@@ -647,6 +647,137 @@ async fn retry_catalog_watch_after_runtime_reconciliation(
 
 #[test]
 #[cfg(unix)]
+fn shared_catalog_watcher_recovers_a_local_rollback_journal() {
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let doc = root_path.join("guide.md");
+    std::fs::write(&doc, "originaljournalwidget").unwrap();
+    let mut shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+    Arc::get_mut(&mut shared).unwrap().watchers = Arc::new(Watchers::new());
+    shared.watchers.use_manual_events();
+    run_catalog_daemon(&shared, async {
+        call_tool(&shared, None, "index_project", json!({"path": root_path}))
+            .await
+            .unwrap();
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let generation = shared
+            .db()
+            .connection()
+            .query_row(
+                "SELECT active_id FROM project_generation_head WHERE project_id=?1",
+                [project.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let directory = cache
+            .path()
+            .join(format!("projects/{}/generations/{generation}", project.id));
+        let metadata = rusqlite::Connection::open(directory.join("metadata.db")).unwrap();
+        metadata
+            .execute_batch(
+                "PRAGMA journal_mode=PERSIST; UPDATE generation_state SET mutation_pending=1;",
+            )
+            .unwrap();
+        drop(metadata);
+        assert!(directory.join("metadata.db-journal").is_file());
+
+        let (config, stages) = shared.project_runtime_for_search(&project).unwrap();
+        let source = shared.vector_source_for(project.id, &config);
+        let runtime = Arc::new(crate::watch::WatchRuntime::new(config, stages, source));
+        std::fs::write(&doc, "recoveredjournalwidget").unwrap();
+        let operation = shared.watch_operation().unwrap();
+        let paths = catalog_test_watch_paths(&shared, doc, &operation);
+        let stats = shared
+            .run_watch_batch(
+                project.clone(),
+                runtime,
+                paths,
+                operation,
+                shared.watch_activity(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.docs, 1);
+        assert!(!directory.join("metadata.db-journal").exists());
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "recoveredjournalwidget"),
+            1
+        );
+    });
+}
+
+#[test]
+#[cfg(unix)]
+fn reused_catalog_reconciles_only_a_committed_sync_receipt() {
+    for (fault, committed) in [
+        (catalog_sync::ReusedCommitFault::Commit, true),
+        (catalog_sync::ReusedCommitFault::Rollback, false),
+    ] {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "unchangedreceiptwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        run_catalog_daemon(&shared, async {
+            let args = json!({"path": root.path(), "refresh_config": true});
+            call_tool(&shared, None, "index_project", args.clone())
+                .await
+                .unwrap();
+            let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+            let slot = shared.project_slot(project.id);
+            let previous = shared.project_config(&project).unwrap();
+            let head =
+                CatalogHead::from_selected_fixture(shared.db().connection(), project.id).unwrap();
+            let config_file = root.path().join(".docsbase.toml");
+            std::fs::write(
+                &config_file,
+                "config_version = 2\n[lexical]\nlong_chunk_penalty = 0.125\n",
+            )
+            .unwrap();
+            let expected =
+                Config::for_project(&shared.global_config, &project.canonical_root).unwrap();
+            *slot.reused_commit_fault.lock().unwrap() = Some(fault);
+
+            let error = call_tool(&shared, None, "index_project", args)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("commit reused catalog index"),
+                "{error}"
+            );
+            assert!(
+                slot.preparation_lease(&previous).is_err(),
+                "uncertain runtime must wait for confirmation"
+            );
+            // Reconciliation uses the committed plan and ignores later edits.
+            std::fs::remove_file(config_file).unwrap();
+            lifecycle::with_writer_lease(&shared.cache, project.id, || {
+                let error = shared.project_runtime_for_search(&project).unwrap_err();
+                assert!(lifecycle::is_lease_conflict(&error), "{error}");
+                assert!(slot.state.lock().unwrap().unverified.is_some());
+                Ok(())
+            })
+            .unwrap();
+            let restored = shared.project_runtime_for_search(&project).unwrap().0;
+            assert!(slot.state.lock().unwrap().unverified.is_none());
+            if committed {
+                assert_eq!(*restored, expected);
+            } else {
+                assert!(Arc::ptr_eq(&restored, &previous));
+            }
+            assert!(head.is_selected(shared.db().connection()).unwrap());
+            assert_eq!(
+                selected_catalog_hits(&shared, &project, "unchangedreceiptwidget"),
+                1
+            );
+        });
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -693,7 +824,11 @@ fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
             let publication = slot.catalog_publication(&committed).unwrap();
             publication.install(previous.clone(), previous_stages.clone());
             let transition = slot.begin_watch_config_transition(committed.clone());
-            publication.retain_unverified(head, pending.clone(), Some(transition));
+            publication.retain_unverified(
+                CatalogRuntimeProof::Generation(head),
+                pending.clone(),
+                Some(transition),
+            );
         }
         assert!(slot.preparation_lease(&previous).is_err());
         // A source edit after the accepted commit must not replace its candidate.
@@ -833,6 +968,53 @@ fn catalog_test_embedder(
         ..HybridStages::default()
     }));
     config
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_index_reuse_refuses_an_event_after_the_source_survey() {
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("guide.md");
+    std::fs::write(&file, "catalogwatermarkprobe").unwrap();
+    let mut shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+    Arc::get_mut(&mut shared).unwrap().watchers = Arc::new(Watchers::new());
+    shared.watchers.use_manual_events();
+    run_catalog_daemon(&shared, async {
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        let project = registry::resolve_by_cwd(&shared.db(), root.path()).unwrap();
+        assert!(shared.watchers.watching(project.id));
+        let before =
+            CatalogHead::from_selected_fixture(shared.db().connection(), project.id).unwrap();
+
+        let slot = shared.project_slot(project.id);
+        let (observe, survey_done) = std::sync::mpsc::channel();
+        *slot.preparation_observer.lock().unwrap() = Some(observe);
+        let (entered, ready) = std::sync::mpsc::channel();
+        let owner = Arc::clone(&shared.watchers);
+        let path = file.canonicalize().unwrap();
+        let before_commit = std::thread::spawn(move || {
+            let _lease = slot.preparation.write().unwrap();
+            entered.send(()).unwrap();
+            survey_done.recv_timeout(Duration::from_secs(10)).unwrap();
+            owner.deliver_test_path(project.id, path);
+        });
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let result = call_tool(&shared, None, "index_project", args).await;
+        before_commit.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("files changed during index verification"),
+            "{error}"
+        );
+        assert!(before.is_selected(shared.db().connection()).unwrap());
+    });
 }
 
 #[test]

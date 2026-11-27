@@ -298,7 +298,7 @@ fn indexed_global_website_profile_starts_with_zero_owned_watchers() {
     std::fs::write(
         config.path().join("config.toml"),
         format!(
-            "[daemon]\nprofile={{mode='website',project_root={}}}\n",
+            "config_version = 2\n[daemon]\nprofile={{mode='website',project_root={}}}\n",
             toml::Value::String(root.path().to_string_lossy().into_owned())
         ),
     )
@@ -541,6 +541,7 @@ impl ProfileEnv {
             root: tempfile::tempdir().unwrap(),
             config: tempfile::tempdir().unwrap(),
         };
+        drop(docsbase_memory::store::Db::open(env.cache.path()).unwrap());
         std::fs::write(env.root.path().join("guide.md"), "originalwidget").unwrap();
         let output = cli(env.cache.path(), env.config.path())
             .arg("index")

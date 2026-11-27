@@ -174,6 +174,7 @@ fn second_daemon_refused() {
 #[test]
 fn lock_recovered_after_kill() {
     let env = Env::new();
+    let state_file = env.cache().join("state/daemon.json");
     let mut child = env
         .cli()
         .args(["serve", "--detached", "--grace-ms", "1000"])
@@ -181,7 +182,7 @@ fn lock_recovered_after_kill() {
         .expect("spawn daemon");
     assert!(
         wait_until(Duration::from_secs(10), || {
-            platform::exists(&platform::daemon_endpoint(env.cache()))
+            platform::exists(&platform::daemon_endpoint(env.cache())) && state_file.exists()
         }),
         "socket must appear"
     );
@@ -189,12 +190,9 @@ fn lock_recovered_after_kill() {
     child.kill().expect("kill -9");
     child.wait().expect("reap");
 
-    let lease = Lease::acquire(
-        env.cache(),
-        &build_id(),
-        docsbase_memory::store::migrations::SCHEMA_VERSION,
-    )
-    .expect("recover lock");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(state_file).unwrap()).unwrap();
+    let schema = u32::try_from(state["schema_version"].as_u64().unwrap()).unwrap();
+    let lease = Lease::acquire(env.cache(), &build_id(), schema).expect("recover lock");
     drop(lease);
 
     ensure_daemon_with(env.cache(), Some(&daemon_bin())).expect("fresh daemon starts");

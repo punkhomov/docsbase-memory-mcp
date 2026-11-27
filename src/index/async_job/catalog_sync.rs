@@ -8,7 +8,7 @@ use crate::config::paths::with_index_config_write_locks;
 use crate::config::schema::Resolved;
 use crate::daemon::{
     readiness::SyncAttribution,
-    server::{CatalogConfigPublication, ProjectCell, ProjectState},
+    server::{CatalogConfigPublication, CatalogRuntimeProof, ProjectCell, ProjectState},
     tools,
 };
 use crate::error::{Error, Result};
@@ -23,7 +23,7 @@ use crate::index::{
 use crate::search::budget::PayloadBudget;
 use crate::store::{
     generation_build::{
-        CatalogCommit, LexicalCommit, PreparedLexicalPublication, open_index_registry,
+        CatalogCommit, CatalogHead, LexicalCommit, PreparedLexicalPublication, open_index_registry,
     },
     models::SyncState,
     registry_inspect::ObservedProjectIndex,
@@ -54,11 +54,24 @@ pub(crate) struct BuildContext {
     pub(crate) pin_ttl: Duration,
 }
 
+impl BuildContext {
+    fn generation_job(&self) -> GenerationJob<'_> {
+        GenerationJob {
+            cache: &self.cache,
+            project: &self.project,
+            epoch: self.epoch,
+            settings: &self.settings,
+            config: &self.config,
+        }
+    }
+}
+
 pub(crate) struct Context {
     pub(crate) build: BuildContext,
     pub(crate) revision: Arc<ProjectCell>,
     pub(crate) owner: Owner,
     pub(crate) refresh: Option<RuntimeUpdate>,
+    pub(crate) reuse_unchanged: bool,
 }
 
 pub(crate) struct RuntimeUpdate {
@@ -87,6 +100,19 @@ impl RuntimeUpdate {
             }
             publish()
         })
+    }
+
+    fn revise_watcher(&self, context: &BuildContext) {
+        if let Err(error) = self.watchers.revise_with_runtime(
+            &context.cache,
+            context.project.id,
+            self.watch_runtime.clone(),
+        ) {
+            eprintln!(
+                "warning: cannot revise watcher for project {}: {error}",
+                context.project.id
+            );
+        }
     }
 }
 
@@ -152,6 +178,34 @@ struct SyncPublication {
     revision: Arc<ProjectCell>,
     _owner: Owner,
     refresh: Option<RuntimeUpdate>,
+    reuse_unchanged: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReusedGenerationReceipt {
+    head: CatalogHead,
+    project_id: i64,
+    job_id: i64,
+    stats_digest: blake3::Hash,
+}
+
+impl ReusedGenerationReceipt {
+    pub(crate) fn is_committed(self, connection: &rusqlite::Connection) -> Result<bool> {
+        Ok(self.head.is_selected(connection)?
+            && repo::sync_job(connection, self.job_id)?.is_some_and(|job| {
+                job.project_id == self.project_id
+                    && job.state == SyncState::Done
+                    && job
+                        .stats_json
+                        .is_some_and(|stats| blake3::hash(stats.as_bytes()) == self.stats_digest)
+            }))
+    }
+}
+
+#[cfg(all(test, unix, feature = "hybrid-remote"))]
+pub(crate) enum ReusedCommitFault {
+    Commit,
+    Rollback,
 }
 
 impl SyncPublication {
@@ -159,6 +213,11 @@ impl SyncPublication {
         self.refresh
             .as_ref()
             .map_or(config, |update| &update.active)
+    }
+
+    fn admit_publication(&self, operation: &SearchOperation, watermark: u64) -> Result<()> {
+        operation.check()?;
+        self.revision.check_source_watermark(watermark)
     }
 }
 
@@ -193,6 +252,7 @@ impl IndexState {
             revision,
             owner,
             refresh,
+            reuse_unchanged,
         } = context;
         let db = open_index_registry(&build.cache, &build.settings, build.epoch)?;
         // Context holds the sole native owner slot through retirement. Any
@@ -215,6 +275,7 @@ impl IndexState {
             revision,
             _owner: owner,
             refresh,
+            reuse_unchanged,
         });
         self.catalog_job = Some(CatalogJob::new(build, publication));
         repo::mark_sync_running(db.connection(), id)?;
@@ -231,16 +292,8 @@ pub(crate) async fn execute(
     activity: &Arc<Activity>,
     operation: &SearchOperation,
     owner: JobOwner,
-) -> Result<ObservedProjectIndex> {
-    drive(
-        service,
-        workers,
-        activity,
-        operation,
-        owner,
-        |(_, index)| *index,
-    )
-    .await
+) -> Result<(JobStats, ObservedProjectIndex)> {
+    drive(service, workers, activity, operation, owner, Clone::clone).await
 }
 
 pub(crate) async fn index_direct(
@@ -292,6 +345,9 @@ async fn drive<T>(
                 .catalog_job
                 .as_mut()
                 .ok_or_else(|| Error::internal("catalog sync owner missing"))?;
+            if let Some(unchanged) = sync.reuse_unchanged(&call)? {
+                return Ok(Some(unchanged));
+            }
             if sync.stage(&call, account)? {
                 Ok(None)
             } else {
@@ -331,11 +387,160 @@ impl CatalogJob {
         }
     }
 
+    fn reuse_unchanged(
+        &self,
+        operation: &SearchOperation,
+    ) -> Result<Option<(JobStats, ObservedProjectIndex)>> {
+        let Publication::Sync(sync) = &self.publication else {
+            return Ok(None);
+        };
+        let config = &self.context.config;
+        if !sync.reuse_unchanged || self.context.stages.embedder.is_some() {
+            return Ok(None);
+        }
+        let watermark = sync.revision.source_watermark();
+        let reused =
+            self.context
+                .generation_job()
+                .reuse_unchanged(operation, |registry, generation| {
+                    let finish = || {
+                        let id = generation.index.generation_id.ok_or_else(|| {
+                            Error::internal("reused catalog generation has no ID")
+                        })?;
+                        let stats = JobStats {
+                            skipped: generation.skipped,
+                            ..JobStats::default()
+                        };
+                        let encoded = catalog_success_record(
+                            &stats,
+                            SyncAttribution::for_generation(&generation.outcome, id),
+                            true,
+                        )?;
+                        let record =
+                            |runtime: Option<(&CatalogConfigPublication<'_>, &RuntimeUpdate)>| {
+                                self.commit_reused_record(
+                                    registry,
+                                    sync,
+                                    generation.index,
+                                    &encoded,
+                                    || sync.admit_publication(operation, watermark),
+                                    |receipt| {
+                                        if let Some((publication, update)) = runtime {
+                                            publication.retain_unverified(
+                                                CatalogRuntimeProof::Reused(receipt),
+                                                update.watch_runtime.clone(),
+                                                None,
+                                            );
+                                        }
+                                    },
+                                )
+                            };
+                        let retired = if let Some(update) = sync
+                            .refresh
+                            .as_ref()
+                            .filter(|update| !Arc::ptr_eq(&update.active, config))
+                        {
+                            let publication = sync.revision.catalog_publication(&update.active)?;
+                            record(Some((&publication, update)))?;
+                            let retired =
+                                publication.install(config.clone(), self.context.stages.clone());
+                            let _reload = publication.release_preparation();
+                            update.revise_watcher(&self.context);
+                            Some(retired)
+                        } else {
+                            let _reload = sync.revision.try_catalog_reload()?;
+                            let _settings = sync.revision.preparation_lease(config)?;
+                            record(None)?;
+                            None
+                        };
+                        Ok((stats, generation.index, retired))
+                    };
+                    if let Some(update) = &sync.refresh {
+                        update.with_current_sources(&self.context, operation, finish)
+                    } else {
+                        finish()
+                    }
+                })?;
+        Ok(reused.map(|(stats, index, _retired)| (stats, index)))
+    }
+
+    fn commit_reused_record(
+        &self,
+        registry: &crate::store::Db,
+        sync: &SyncPublication,
+        index: ObservedProjectIndex,
+        encoded: &str,
+        admit: impl Fn() -> Result<()>,
+        on_unverified: impl FnOnce(ReusedGenerationReceipt),
+    ) -> Result<()> {
+        admit()?;
+        let receipt = ReusedGenerationReceipt {
+            head: CatalogHead::from_observed_index(registry.connection(), index)?,
+            project_id: index.project_id,
+            job_id: sync.id,
+            stats_digest: blake3::hash(encoded.as_bytes()),
+        };
+        let tx = rusqlite::Transaction::new_unchecked(
+            registry.connection(),
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .map_err(repo::db_error)?;
+        repo::finish_sync_job(&tx, sync.id, SyncState::Done, Some(encoded))?;
+        // The write-lock wait can consume the original deadline. Check again
+        // while recording the outcome is still reversible.
+        admit()?;
+        #[cfg(all(test, unix, feature = "hybrid-remote"))]
+        let fault = sync.revision.reused_commit_fault.lock().unwrap().take();
+        #[cfg(all(test, unix, feature = "hybrid-remote"))]
+        let commit = match &fault {
+            None => tx.commit(),
+            Some(fault) => {
+                match fault {
+                    ReusedCommitFault::Commit => tx.commit(),
+                    ReusedCommitFault::Rollback => tx.rollback(),
+                }
+                .map_err(repo::db_error)?;
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                    Some("injected reuse COMMIT response failure".into()),
+                ))
+            }
+        };
+        #[cfg(not(all(test, unix, feature = "hybrid-remote")))]
+        let commit = tx.commit();
+        if let Err(error) = commit {
+            let context = &self.context;
+            let verify = || {
+                open_index_registry(&context.cache, &context.settings, context.epoch)
+                    .and_then(|db| receipt.is_committed(db.connection()))
+            };
+            #[cfg(all(test, unix, feature = "hybrid-remote"))]
+            let confirmed = if fault.is_some() {
+                Err(Error::internal("injected reuse receipt read failure"))
+            } else {
+                verify()
+            };
+            #[cfg(not(all(test, unix, feature = "hybrid-remote")))]
+            let confirmed = verify();
+            let detail = match confirmed {
+                Ok(true) => return Ok(()),
+                Ok(false) => "completion record was not committed".into(),
+                Err(verification) => {
+                    on_unverified(receipt);
+                    format!("completion record could not be verified: {verification}")
+                }
+            };
+            return Err(Error::internal_with_source(
+                format!("commit reused catalog index ({detail})"),
+                error,
+            ));
+        }
+        Ok(())
+    }
+
     fn stage(&mut self, operation: &SearchOperation, account: &PayloadPermit) -> Result<bool> {
         let BuildContext {
             cache,
-            epoch,
-            settings,
             project,
             config,
             ..
@@ -346,15 +551,8 @@ impl CatalogJob {
             #[cfg(test)]
             observed: None,
         };
-        let job = GenerationJob {
-            cache,
-            project,
-            epoch: *epoch,
-            settings,
-            config,
-        };
         drop(self.publication.preparation_lease(config)?);
-        let prepared = job.stage(&mut capture)?;
+        let prepared = self.context.generation_job().stage(&mut capture)?;
         if let Some(embedder) = &self.context.stages.embedder {
             if embedder.model_id().len() as u64 > EmbeddingRecipe::MAX_MODEL_BYTES {
                 return Err(Error::Admission {
@@ -567,13 +765,14 @@ impl CatalogJob {
                         sync.revision
                             .begin_watch_config_transition(self.context.config.clone())
                     });
+                let watermark = sync.revision.source_watermark();
                 prepared.publish_with_embedding(recipe, |commit| {
                     let finalize = || {
                         self.commit_sync(
                             sync,
                             commit,
                             &outcome,
-                            operation,
+                            || sync.admit_publication(operation, watermark),
                             &mut retired,
                             &mut watch_transition,
                         )
@@ -590,13 +789,13 @@ impl CatalogJob {
 
     fn vector_verification(
         &self,
-        operation: &SearchOperation,
+        check: impl FnOnce() -> Result<()>,
     ) -> Result<Option<PinVerification<'_>>> {
         self.embedding
             .as_ref()
             .map(|embedding| {
                 embedding.pin.renew()?;
-                operation.check()?;
+                check()?;
                 embedding.pin.prepare_verification(embedding.dimension)
             })
             .transpose()
@@ -624,7 +823,7 @@ impl CatalogJob {
                         .into(),
                 });
             }
-            let verification = self.vector_verification(operation)?;
+            let verification = self.vector_verification(|| operation.check())?;
             commit.commit_with(
                 || {
                     operation.check()?;
@@ -644,13 +843,13 @@ impl CatalogJob {
         sync: &SyncPublication,
         commit: LexicalCommit<'_>,
         outcome: &crate::index::outcome::IndexOutcome,
-        operation: &SearchOperation,
+        admit: impl Fn() -> Result<()>,
         retired: &mut Option<ProjectState>,
         watch_transition: &mut Option<crate::watch::WatchConfigTransition>,
     ) -> Result<ObservedProjectIndex> {
-        operation.check()?;
+        admit()?;
         let context = &self.context;
-        let verification = self.vector_verification(operation)?;
+        let verification = self.vector_verification(&admit)?;
         let active = sync.active_config(&context.config);
         let (publication, unchanged) = if Arc::ptr_eq(active, &context.config) {
             // A first publication must not race a re-open that saw no head.
@@ -664,30 +863,23 @@ impl CatalogJob {
         };
         let result = commit.commit_with(
             || {
-                operation.check()?;
+                admit()?;
                 verification
-                    .map(|proof| proof.hold_verified(|| operation.check()))
+                    .map(|proof| proof.hold_verified(&admit))
                     .transpose()
             },
             |conn, published| {
                 let id = published
                     .generation_id
                     .ok_or_else(|| Error::internal("published catalog sync generation missing"))?;
-                let mut record = serde_json::to_value(&outcome.stats).map_err(|error| {
-                    Error::internal_with_source("encode catalog sync counters", error)
-                })?;
-                record["index_outcome"] =
-                    serde_json::to_value(SyncAttribution::for_generation(outcome, id)).map_err(
-                        |error| Error::internal_with_source("encode catalog sync identity", error),
-                    )?;
-                repo::finish_sync_job(
-                    conn,
-                    sync.id,
-                    SyncState::Done,
-                    Some(&encoded_record(&record)?),
-                )
+                let record = catalog_success_record(
+                    &outcome.stats,
+                    SyncAttribution::for_generation(outcome, id),
+                    false,
+                )?;
+                repo::finish_sync_job(conn, sync.id, SyncState::Done, Some(&record))
             },
-            || operation.check(),
+            &admit,
             |result| {
                 if let Some(publication) = &publication {
                     match result {
@@ -699,7 +891,7 @@ impl CatalogJob {
                         CatalogCommit::Unverified(head) => {
                             if let Some(update) = &sync.refresh {
                                 publication.retain_unverified(
-                                    head,
+                                    CatalogRuntimeProof::Generation(head),
                                     update.watch_runtime.clone(),
                                     watch_transition.take(),
                                 );
@@ -715,16 +907,8 @@ impl CatalogJob {
         let _reload = publication.map(CatalogConfigPublication::release_preparation);
         if retired.is_some()
             && let Some(update) = &sync.refresh
-            && let Err(error) = update.watchers.revise_with_runtime(
-                &context.cache,
-                context.project.id,
-                update.watch_runtime.clone(),
-            )
         {
-            eprintln!(
-                "warning: cannot revise watcher for project {}: {error}",
-                context.project.id
-            );
+            update.revise_watcher(context);
         }
         result
     }
@@ -779,6 +963,21 @@ pub(super) fn capture_base_pin(
         pin.track(&crate::vector_cache::chunk_hash(text))
     })?;
     Ok(Some(pin))
+}
+
+fn catalog_success_record(
+    stats: &JobStats,
+    attribution: SyncAttribution,
+    reused_generation: bool,
+) -> Result<String> {
+    let mut record = serde_json::to_value(stats)
+        .map_err(|error| Error::internal_with_source("encode catalog index counters", error))?;
+    record["index_outcome"] = serde_json::to_value(attribution)
+        .map_err(|error| Error::internal_with_source("encode catalog index identity", error))?;
+    if reused_generation {
+        record["reused_generation"] = Value::Bool(true);
+    }
+    encoded_record(&record)
 }
 
 fn encoded_record(record: &Value) -> Result<String> {
