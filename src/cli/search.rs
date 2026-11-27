@@ -93,7 +93,7 @@ pub fn run_with_mode(query: &str, options: &Options, mode: QueryMode) -> anyhow:
     run_started(options.args(query, mode), None, std::time::Instant::now())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hybrid-remote"))]
 pub(crate) fn run_with_settings(
     query: &str,
     options: &Options,

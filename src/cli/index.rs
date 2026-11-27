@@ -27,7 +27,7 @@ pub fn run(path: Option<&Path>) -> anyhow::Result<()> {
     run_captured(path, config.into_settings(), settings, started)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hybrid-remote"))]
 pub(crate) fn run_with_settings(
     path: Option<&Path>,
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,

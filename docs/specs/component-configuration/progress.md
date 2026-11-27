@@ -2476,3 +2476,15 @@ Ruling: an absent runtime is a checked revision. Initial runtime installation
 takes the same preparation guard. Selected head, exact sources and runtime
 preconditions still fence publication. Linux PTY acceptance observed both a
 declined startup plan with the original head and approved publication.
+
+Task CF14-feature-compat: complete (optional local-pool entrypoint and
+remote-only test helpers are compiled by their consumers). Clippy passed
+for the individual local and remote build configurations. The Sync history
+fixture accounts for terminal receipts preceding physical owner retirement.
+
+CF14 remains partial. The launcher applies new caller policy on the next
+invocation, while applicable daemon settings still compare as one published
+runtime. The installer admission loop and stale Tantivy directory removal
+retain their fixed retry budgets (I48 and I21). The inventory still needs to
+classify remaining fixed administrative and metadata-read limits before
+SC-5 can be asserted.

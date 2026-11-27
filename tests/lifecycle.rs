@@ -557,11 +557,33 @@ fn configured_sync_history_retains_the_newest_receipts_on_both_registries() {
         let mut receipts = db.prepare("SELECT id FROM sync_jobs ORDER BY id").unwrap();
         let mut jobs = Vec::new();
         for _ in 0..4 {
-            let reply = client
-                .call_tool("sync_start", serde_json::json!({}))
-                .unwrap();
-            let id = reply["job_id"].as_i64().unwrap();
-            assert!(jobs.last().is_none_or(|previous| id > *previous));
+            let mut id = None;
+            assert!(wait_until(Duration::from_secs(5), || {
+                match client.call_tool("sync_start", serde_json::json!({})) {
+                    Ok(reply) => {
+                        let candidate = reply["job_id"].as_i64().unwrap();
+                        if jobs.last() == Some(&candidate) {
+                            // V5 can return the terminal receipt while its native
+                            // owner still holds the admission permit.
+                            assert_eq!(reply["state"], "done");
+                        } else {
+                            assert!(jobs.last().is_none_or(|previous| candidate > *previous));
+                            id = Some(candidate);
+                        }
+                        id.is_some()
+                    }
+                    Err(error) => {
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("project sync is starting or retiring"),
+                            "{error}"
+                        );
+                        false
+                    }
+                }
+            }));
+            let id = id.unwrap();
             jobs.push(id);
             assert!(wait_until(Duration::from_secs(5), || {
                 let reply = client

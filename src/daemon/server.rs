@@ -4442,6 +4442,13 @@ fn runtime_status(shared: &Shared, registry_db: &Db, metadata: &Db) -> Result<Va
     extend_runtime_status(shared, status)
 }
 
+#[cfg_attr(
+    not(feature = "hybrid-remote"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "remote status serialization is fallible"
+    )
+)]
 fn extend_runtime_status(shared: &Shared, mut status: Value) -> Result<Value> {
     let mut execution = shared.workers.snapshot();
     if let (Some(target), Some(payload)) = (

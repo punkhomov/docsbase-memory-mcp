@@ -19,6 +19,7 @@ impl CpuPool {
         }
     }
 
+    #[cfg(any(feature = "hybrid-local", test))]
     pub(crate) fn install<T: Send>(&self, work: impl FnOnce() -> T + Send) -> Result<T> {
         Ok(self.acquire()?.install(work))
     }
