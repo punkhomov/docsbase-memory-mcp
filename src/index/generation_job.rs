@@ -1,14 +1,15 @@
 //! Shared preparation for admitted lexical index jobs against an installed v5 catalog.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::config::schema::Resolved;
 use crate::error::Result;
-use crate::index::job::{CaptureBudget, JobStats};
+use crate::index::job::CaptureBudget;
 use crate::store::generation_build::{
     LexicalBuildRequest, OperationalBuild, PreparedLexicalPublication, observe_replacement_base,
-    with_prepared_lexical_generation,
+    prepare_operational_lexical_generation,
 };
 use crate::store::{models::Project, settings::DbSettings};
 
@@ -17,15 +18,14 @@ pub(crate) struct GenerationJob<'a> {
     pub(crate) project: &'a Project,
     pub(crate) epoch: [u8; 16],
     pub(crate) settings: &'a Resolved<DbSettings>,
-    pub(crate) config: &'a Config,
+    pub(crate) config: &'a Arc<Config>,
 }
 
 impl GenerationJob<'_> {
-    pub(crate) fn prepare(
+    pub(crate) fn stage(
         &self,
         capture: &mut CaptureBudget<'_>,
-        finalize: impl FnOnce(PreparedLexicalPublication<'_>) -> Result<JobStats>,
-    ) -> Result<JobStats> {
+    ) -> Result<PreparedLexicalPublication> {
         let limits = crate::config::observe::PlanningLimits::standard().registry;
         let project_id = self.project.id;
         let (base, interrupted) =
@@ -43,7 +43,7 @@ impl GenerationJob<'_> {
             plan_digest: *plan.finalize().as_bytes(),
             reserved_disk_bytes: self.config.index_writer.staging_disk_bytes(),
         };
-        with_prepared_lexical_generation(
+        prepare_operational_lexical_generation(
             self.cache,
             OperationalBuild {
                 request,
@@ -51,9 +51,8 @@ impl GenerationJob<'_> {
             },
             self.settings,
             limits,
-            self.config,
+            Arc::clone(self.config),
             capture,
-            finalize,
         )
     }
 }

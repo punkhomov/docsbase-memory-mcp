@@ -1818,3 +1818,255 @@ Unix file alias probe. The change uses the platform filesystem seam for the
 native probe. Fix review, the boundary test, the full suite, lean offline,
 all-target Clippy and formatting passed on Rust 1.100.0. The Shared default
 requires hybrid and native Windows publication.
+
+## 2026-11-26 — CF11c, snapshot плотного поиска
+
+Task CF11c dense snapshot identity: complete (in-process dense ownership,
+selected metadata path, local verification and fresh review). The full
+published identity follows the metadata, cold flight, digest and resident
+entry through ANN completion. The v4 API still supplies the legacy identity.
+
+Ruling: two real file pairs have the same content revision and different
+vectors. The old scalar key returned the first pair's vectors after the
+replacement. A deterministic paused loader now checks that separate flights
+each return their own vectors and the older completion preserves the new
+entry. Physical workers retain their existing resource charges.
+
+## 2026-11-26 — CF11c, сохранённые ANN-графы v5
+
+Task CF11c persisted ANN identity: complete (catalog path and metadata,
+pinning and retention, local verification, fresh review and fix review).
+A real catalog fixture builds both graphs through DenseCache and opens
+each with a fresh load-only cache. Equal local revisions select separate
+physical generations and the test checks the graph scores.
+
+Ruling: native HNSW fixtures check wrong-head metadata, release of an
+obsolete mapped graph and retention of the last two of three revisions
+of one head. The legacy ANN suite and all-target Clippy passed.
+
+minor (deferred): the installation-wide disk target still evicts by
+modification time. An older head whose build finishes late can survive
+that sweep longer than an unpinned newer graph. Exact identity makes
+a later lookup reload or rebuild the graph for its own head.
+
+## 2026-11-26 — CF11b/c, владение подготовленной парой
+
+Task CF11b owned preparation: complete (transferable preparation lease,
+captured config and settings, real store tests, fresh review). Direct
+Index and daemon Sync use the staged value for the existing publication
+CAS. Maintenance receives the checked receipt after the preparation
+lease retires.
+
+Ruling: the prepared pair holds the project lease and excludes another
+builder. The test keeps the old active pair searchable, publishes the
+staged pair on another native thread and reacquires the lease. The
+selected pair then has the nondefault ignore recipe and only its
+accepted changed content. Failed or abandoned stages retain normal
+recovery ownership. The next phase uses the staged value for bounded
+embedding reads between native workers.
+
+## 2026-11-26 — CF11c, async-подготовка векторов каталога
+
+Task CF11c staged vectors for Index and Sync: complete (catalog job owner,
+bounded native phases, pre-CAS vector proof, fresh review and fix reviews).
+
+Ruling: the real Index route uses a gated hermetic provider against two
+SQLite/Tantivy pairs. During provider wait, the test takes the native
+background slot and the old project's writer lease, then searches the
+still selected old pair. An invalid provider batch preserves that pair.
+The retry reuses the valid earlier batch. Overwriting one retained vector
+during a later provider wait refuses publication. A further retry
+repairs the missing vector and selects the new pair.
+
+Ruling: cache lookup and the publication scan filter by expected
+dimension, storage type and byte length before reading vector payload.
+Nonfinite values are misses for preparation and fail the final proof.
+The vector writer and catalog writer use try-lock admission. Vector
+verification runs before the registry write transaction and holds its
+guard through the catalog commit. Cancellation is checked before fresh
+waits and before commit. The full cli-full suite, all-target Clippy and
+lean offline passed on Rust 1.100.0. The command test was repeated after
+bounding the last fixture wait. Shared hybrid remains gated while the
+remaining consumers and active state protection are implemented.
+
+## 2026-11-26 — CF11d, сохранение векторов выбранного поколения
+
+Task CF11d protect active vectors during same-recipe preparation: complete
+(native and cache ownership, regressions, fresh review and fix reviews).
+A stage with a readable base pins its old recipe's keys before storing
+candidate vectors. The active hash scan uses bounded row memory and an
+unordered SQL plan. A stage and a watcher share the native preparation
+lease. The project reader lease remains separate.
+
+Ruling: with a two-entry cache and a 32 MiB job budget, actual daemon
+Index can preserve the old vector, retain the first valid candidate and
+refuse the second. The old lexical head stays searchable. The test
+checks the two candidate keys after retirement. The watcher test
+reproduces mutation despite a held preparation lease, then checks
+retry, continued reads and one successful edit after release.
+All 24 catalog tests, 19 server profile tests and formatting passed.
+
+## 2026-11-26 — CF11c, публикация Shared runtime вместе с индексом
+
+Task CF11c catalog runtime publication: complete (explicit refresh, source
+revalidation, exact-head reconciliation, watcher handoff, and fresh review).
+
+Ruling: the actual connected Index fixture forces deferred SQLite constraint
+failure on COMMIT. The active Config and stages retain their Arc identity and
+the old index remains searchable. A retry adopts the new ignore recipe with
+the new head. A captured candidate whose project file changes before
+publication is refused under the existing config write locks. The restored
+recipe can be opened normally after a daemon restart.
+
+Ruling: an inconclusive COMMIT reread retains the candidate for exact epoch,
+head and seal confirmation. Config, search and watcher resolve it under
+project authority. A regression emulates the inconclusive runtime boundary
+over real published files and verifies that the same watcher payload can be
+retried under the accepted runtime. During transition the producer retains
+events accepted by either recipe. Common ignored notifications remain outside
+the raw capture budget. Retired stages are dropped after native leases.
+
+Ruling: 29 catalog tests, 30 config-runtime cases, all 19 server-profile
+cases, the legacy forwarding test, lean offline, all-target Clippy and
+formatting passed. Persisted embedding recipe admission and configured
+Shared hybrid still require integration.
+
+## 2026-11-26 — CF11c, provenance эмбеддинга опубликованной пары
+
+Task CF11c sealed embedding recipe: complete (digest in the native seal,
+query and warm proof, model-specific base protection, fresh review and fixes).
+
+Ruling: a real daemon job publishes vectors using a hermetic provider.
+After restart, a different model is refused before query embedding and
+before ANN warm capture. The original model uses the selected local
+metadata and returns the indexed document. The seal contains the digest
+and omits the raw key. Stopped CLI search refuses a lexical local
+generation before opening a configured embedding provider. A migrated
+legacy head still uses the existing content-addressed cache contract.
+
+Ruling: a constrained rebuild writes with a different model from the
+active pair. Its first vector fits. The second is refused while the old
+model's vector and index stay usable. Candidate lookup after restart
+uses the covering vector index to seek per model and charges the matched
+key before copying it. SQL projects no vector bytes.
+
+Ruling: 31 catalog tests, stopped CLI and profile integration, lean offline,
+all-target Clippy and formatting passed. The warm observer accepts only
+the selected model. Automatic warm scheduling and coverage remain for the
+Shared hybrid activation work.
+
+minor (deferred): ordinary reopen compares the configured cache key with
+the seal. Recheck the key of its actual built stage before installing it
+when enabling configured Shared hybrid. The shipped provider factories
+derive the same key and query admission already checks the actual stage.
+
+## 2026-11-26 — CF11c, диагностика Shared v5
+
+Task CF11c catalog vector coverage and ANN diagnostics: complete (route
+regressions, fresh review, fix reviews, Rust 1.100.0 verification).
+
+Ruling: `status` and `panel_projects` observe coverage from the selected
+metadata pair. The fixture verifies matching and mismatched model keys,
+config-only observation without constructing a stage, distinct duplicate
+chunks, and admission when the payload allowance is exhausted. The cache IO
+starts after the metadata and project leases are released.
+
+Ruling: resident graph dimensions and last-search outcomes are qualified by
+the selected pair, its content revision, embedding key and ANN build recipe.
+A runtime revision guard spans a bound outcome write. The fixture verifies
+the real search's outcome and its retirement after publishing another head.
+Automatic warming and resident-graph acceptance continue in the same Shared
+hybrid work. All 830 runnable cli-full library tests, all-target Clippy,
+lean offline and formatting passed.
+
+## 2026-11-26 — CF11c, прогрев ANN после Index и Sync
+
+Task CF11c catalog ANN warm: complete (Shared routes, bounded CPU admission,
+shutdown and publication proof, fresh review and fix review).
+
+Ruling: actual Index returns with a paused ANN builder, then `status` shows
+two resident graph vectors before a search. A recipe-only reopen removes
+the old graph from diagnostics and keeps the index revision. Detached Sync
+returns its running acknowledgement and warms the new three-vector graph.
+The fixture admits only one background worker with zero pending entries.
+No query embedding is used in the fixture.
+
+Ruling: scheduling reserves the existing native background lane before
+creating its coordinator. It carries the accepted project and runtime
+identity, releases metadata before the cold flight, and cancels on job-root
+shutdown. ANN construction retains Activity through worker retirement. Full
+cli-full, all-target Clippy, lean offline and formatting passed.
+
+minor (deferred): the paused route fixture proves acknowledgement independence
+but does not sample Activity after isolating both earlier native retirements.
+The common graph lifetime is also exercised by the existing retained ANN
+handoff test.
+
+## 2026-11-26 — CF11c, прямой hybrid Index в v5
+
+Task CF11c stopped hybrid catalog Index: complete (direct entry point,
+shared embedding phases, source and vector proof, fresh review and fixes).
+
+Ruling: the configured CLI fixture uses the real async HTTP provider adapter
+on loopback. A malformed vector response keeps the selected generation and
+reports the provider schema error. A project config edit during another
+embedding request refuses publication. Restoring the config reuses the valid
+cached vector and serves the document for a dense-only match through stopped
+RRF search. Direct indexing keeps its existing result shape and terminal
+resource ownership. Completed worker errors no longer cancel the parent call.
+
+Ruling: the shared index/editor guard serializes directory aliases and
+retains the literal key for older editors using that spelling. The regression
+contends on both cases before the config exists. Stopped Website rejects hybrid
+before creating a registry row. On Linux, cli-full, all-target Clippy, lean
+offline and formatting passed. Native PR checks follow Shared hybrid integration.
+
+## 2026-11-27 — CF11d, incremental hybrid watcher on v5
+
+Task CF11d hybrid watcher: complete (route regressions, full Linux cli-full,
+all-target Clippy, lean offline, formatting and fresh fix review).
+
+Ruling: candidate vectors are prepared before mutating the selected pair.
+Provider failure retains the old revision and vectors, including when the
+persisted cache already exceeds its configured capacity. The write first
+tries admission without eviction and pins the selected pair before an LRU
+retry. Pin release alone does not trigger eviction. A valid edit advances
+the content revision, a no-op keeps it, and identical text reuses its vector.
+
+minor (deferred): the route fixture resubmits the batch directly. Native
+watcher delivery and coalescing remain part of Shared hybrid acceptance.
+
+## 2026-11-27 — CF11c/CF11d, configured Shared hybrid on v5
+
+Task CF11c/CF11d configured Shared hybrid: complete (main entry-point
+acceptance, fresh task and integrated reviews, and fix review).
+
+Ruling: a configured v2 Shared instance on an existing Unix v5 registry
+executes Index, detached Sync, native watcher edits and a dense-only query
+with a hermetic OpenRouter transport. Sync reuses the existing vector.
+Startup restores a watcher after installing the async job owner. A cold
+recipe change, including disabling embeddings, requires an explicit Index;
+a failed Index cannot make later registration accept an incompatible seal.
+
+Ruling: open-time refill coalesces on the project and obeys existing logical
+admission and byte limits. It checks the runtime and selected pair for
+capture and storage. The fixture holds inference while another open and a
+native watcher run, then confirms the late vector is discarded. Cache-only
+repair restores dense and scoped hits without a new content revision or Sync
+row. The exact resident path keeps its byte admission even with partial
+coverage. Stopped Index preserves an active legacy layout's usable vector
+under pressure. Stopped status and list read the selected v5 pair.
+
+Ruling: Rust 1.100.0 Linux cli-full (including unchanged search gates), lean
+offline, all-target and opt-in Clippy, formatting, vendor integrity, Cargo age
+and CI observer checks passed locally. Native PR checks follow this commit.
+
+Task CF11d native acceptance fixture corrections: complete (PR #209).
+Ruling: Linux CI exposed a retained vector lease when the fixture reused
+one async runtime across restarts. Isolated pressure tests reproduced
+9 failures in 20 runs. Each incarnation now owns its runtime as in the
+daemon entry point, and 20/20 pressure runs passed. macOS CI exposed two
+synthetic events written under a temporary path alias. Both tests failed
+under an aliased TMPDIR on Linux and passed after using the same canonical
+paths as native delivery. Fresh fix review, all-target Clippy, formatting
+and the Linux cli-full suite passed. The corrections affect fixtures.

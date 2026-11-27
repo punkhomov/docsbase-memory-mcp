@@ -12,24 +12,8 @@ use crate::store::{DB_FILE, Db};
 /// # Errors
 /// Returns [`Error::Project`] when the registry is missing or the cwd is not
 /// covered by a registered root (C8).
-pub(crate) fn read_project_with_settings(
+pub(crate) fn read_project_for_index(
     settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-) -> Result<(Db, Project)> {
-    read_project_using(settings, Db::open_readonly_with_settings)
-}
-
-pub(crate) fn read_project_for_search(
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-) -> Result<(Db, Project)> {
-    read_project_using(settings, Db::open_readonly_for_search)
-}
-
-fn read_project_using(
-    settings: &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    open: impl FnOnce(
-        &std::path::Path,
-        &crate::config::schema::Resolved<crate::store::settings::DbSettings>,
-    ) -> Result<Db>,
 ) -> Result<(Db, Project)> {
     let cache = paths::cache_dir()?;
     if !cache.join(DB_FILE).exists() {
@@ -38,7 +22,7 @@ fn read_project_using(
             instruction: Some("run `docsbase index` in your project".to_owned()),
         });
     }
-    let db = open(&cache, settings)?;
+    let db = Db::open_readonly_for_search(&cache, settings)?;
     let cwd = std::env::current_dir().map_err(|err| {
         Error::internal_with_source(format!("resolve current directory: {err}"), err)
     })?;
@@ -83,7 +67,12 @@ pub(crate) fn status_with_settings_in(
         );
         return Ok(());
     }
-    let db = Db::open_readonly_with_settings(&cache, settings)?;
+    let db = Db::open_readonly_for_search(&cache, settings)?;
+    if db.has_generation_catalog() {
+        let value = crate::daemon::tools::stopped_catalog_status(&db)?;
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
     // Direct mode has no daemon: sessions/fd/threads are not applicable.
     // Direct mode reloads the config every run, so there is no stale snapshot
     // to warn about (OQ-6).
@@ -189,8 +178,23 @@ pub(crate) fn list_with_settings_in(
         let value = if let Some(value) = daemon_value {
             value
         } else {
-            let (db, project) = read_project_with_settings(settings)?;
-            let value = crate::daemon::tools::list_docs(&db, &project, &args)?;
+            let (db, project) = read_project_for_index(settings)?;
+            let value = if db.has_generation_catalog() {
+                crate::store::project_index::with_catalog_pair(
+                    &db,
+                    &project,
+                    |registry, local, _| {
+                        let metadata = local.as_ref().map_or(registry, |local| &local.db);
+                        let current =
+                            registry::project_by_id(metadata, project.id)?.ok_or_else(|| {
+                                Error::internal("selected generation has no project metadata")
+                            })?;
+                        crate::daemon::tools::list_docs(metadata, &current, &args)
+                    },
+                )?
+            } else {
+                crate::daemon::tools::list_docs(&db, &project, &args)?
+            };
             project_name.get_or_insert_with(|| project.name.clone());
             value
         };

@@ -116,6 +116,29 @@ impl WorkerAdmission {
         result
     }
 
+    pub(crate) fn reserve_background(
+        &self,
+        operation: &SearchOperation,
+    ) -> Result<LaneReservation> {
+        operation.check()?;
+        self.shutdown.check()?;
+        self.background.reserve()
+    }
+
+    pub(crate) async fn background_reserved(
+        &self,
+        operation: &SearchOperation,
+        reservation: LaneReservation,
+    ) -> Result<OwnedSemaphorePermit> {
+        reservation
+            .acquire(
+                operation.deadline(),
+                operation.cancellation(),
+                &self.shutdown,
+            )
+            .await
+    }
+
     // Only JobRoot's already registered terminal authority can call this lane.
     pub(crate) fn terminal(&self) -> Result<OwnedSemaphorePermit> {
         Arc::clone(&self.terminal)

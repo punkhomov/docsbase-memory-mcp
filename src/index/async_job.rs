@@ -48,7 +48,9 @@ fn acquire_writer_lease(cache: &std::path::Path, project: i64) -> Result<Exclusi
     })
 }
 
+pub(crate) mod catalog_backfill;
 pub(crate) mod catalog_sync;
+pub(crate) mod catalog_watch;
 
 pub(crate) use super::job::JobInput;
 
@@ -80,7 +82,9 @@ pub(crate) struct JobContext {
 
 // Explicit native/data before guards: also preserves ordering if terminal publication unwinds.
 pub(crate) struct IndexState {
-    catalog_sync: Option<catalog_sync::CatalogSync>,
+    catalog_backfill: Option<catalog_backfill::CatalogBackfill>,
+    catalog_job: Option<catalog_sync::CatalogJob>,
+    catalog_watch: Option<catalog_watch::CatalogWatch>,
     index: Option<IndexHandle>,
     #[cfg(test)]
     retirement_observer: Option<crate::daemon::job_service::RetirementObserver>,
@@ -110,7 +114,9 @@ pub(crate) struct IndexState {
 impl IndexState {
     pub(crate) fn empty(account: Arc<PayloadPermit>) -> Self {
         Self {
-            catalog_sync: None,
+            catalog_backfill: None,
+            catalog_job: None,
+            catalog_watch: None,
             index: None,
             #[cfg(test)]
             retirement_observer: None,
@@ -294,30 +300,15 @@ impl IndexState {
         };
         self.scope = scope;
         if let Some(embedder) = &context.stages.embedder {
-            self.dimension = crate::hybrid::dense::model_dim(embedder.model_id())
-                .or_else(|| {
-                    context
-                        .config
-                        .hybrid_cfg
-                        .embedding
-                        .as_ref()
-                        .map(|cfg| cfg.dimensions as usize)
-                })
-                .filter(|dim| *dim > 0)
-                .ok_or_else(|| Error::internal("embedding stage has no captured dimension"))?;
-            let (rows, longest): (i64, i64) = db.connection().query_row("SELECT COUNT(*), COALESCE(MAX(length(CAST(c.text AS BLOB))),0) FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1", [context.project.id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(repo::db_error)?;
-            let count = usize::try_from(rows)
-                .ok()
-                .and_then(|rows| {
-                    self.plan
-                        .as_ref()
-                        .and_then(|plan| rows.checked_add(plan.chunk_count()))
-                })
+            self.dimension = embedding_dimension(&context.config, embedder.as_ref())?;
+            let (rows, longest) = embedding_shape(db, context.project.id)?;
+            let count = self
+                .plan
+                .as_ref()
+                .and_then(|plan| rows.checked_add(plan.chunk_count()))
                 .ok_or_else(|| Error::Admission {
                     message: "job hash tracking count overflow".into(),
                 })?;
-            let longest = usize::try_from(longest)
-                .map_err(|_| Error::internal("invalid backfill text length"))?;
             let policy = &context.config.remote;
             let captured_peak = self
                 .plan
@@ -427,34 +418,13 @@ impl IndexState {
                     message: "project generation changed before backfill".into(),
                 });
             }
-            let mut statement = db.connection().prepare("SELECT c.doc_id,c.seq,length(CAST(c.text AS BLOB)),c.text FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1 AND (c.doc_id,c.seq)>(?2,?3) ORDER BY c.doc_id,c.seq LIMIT ?4").map_err(repo::db_error)?;
-            let mut rows = statement
-                .query(rusqlite::params![
-                    context.project.id,
-                    self.backfill_cursor.0,
-                    self.backfill_cursor.1,
-                    i64::try_from(policy.embed_batch_texts)
-                        .map_err(|_| Error::internal("batch count overflow"))?
-                ])
-                .map_err(repo::db_error)?;
-            let mut texts = Vec::new();
-            let mut bytes = 0_usize;
-            while let Some(row) = rows.next().map_err(repo::db_error)? {
-                let length: i64 = row.get(2).map_err(repo::db_error)?;
-                let length = usize::try_from(length)
-                    .map_err(|_| Error::internal("backfill text length invalid"))?;
-                if !texts.is_empty() && bytes.saturating_add(length) > policy.embed_batch_bytes {
-                    break;
-                }
-                operation.check()?;
-                texts.push(row.get::<_, String>(3).map_err(repo::db_error)?);
-                bytes = bytes.saturating_add(length);
-                self.backfill_cursor = (
-                    row.get(0).map_err(repo::db_error)?,
-                    row.get(1).map_err(repo::db_error)?,
-                );
-            }
-            texts
+            embedding_texts(
+                db,
+                context.project.id,
+                &mut self.backfill_cursor,
+                policy,
+                operation,
+            )?
         } else {
             self.plan
                 .as_ref()
@@ -479,6 +449,7 @@ impl IndexState {
             &context.cache,
             embedder.model_id(),
             texts,
+            None,
         )?))
     }
     pub(crate) fn acknowledgement(&self) -> Result<serde_json::Value> {
@@ -489,8 +460,11 @@ impl IndexState {
         crate::daemon::tools::sync_status(db, &serde_json::json!({"job_id":self.sync_id}))
     }
     fn terminal(&mut self) -> Result<serde_json::Value> {
-        if let Some(sync) = &self.catalog_sync {
-            return sync.terminal(self.error.as_deref());
+        if let Some(job) = &self.catalog_job {
+            return job.terminal(self.error.as_deref());
+        }
+        if self.catalog_watch.is_some() || self.catalog_backfill.is_some() {
+            return Ok(serde_json::Value::Null);
         }
         let Some(context) = &self.context else {
             return Err(Error::Admission {
@@ -651,6 +625,79 @@ impl IndexState {
     }
 }
 
+fn embedding_dimension(
+    config: &Config,
+    embedder: &dyn crate::vector_cache::Embedder,
+) -> Result<usize> {
+    crate::hybrid::dense::model_dim(embedder.model_id())
+        .or_else(|| {
+            config
+                .hybrid_cfg
+                .embedding
+                .as_ref()
+                .map(|cfg| cfg.dimensions as usize)
+        })
+        .filter(|dim| *dim > 0)
+        .ok_or_else(|| Error::internal("embedding stage has no captured dimension"))
+}
+
+fn embedding_shape(db: &Db, project: i64) -> Result<(usize, usize)> {
+    let (rows, longest): (i64, i64) = db
+        .connection()
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(length(CAST(c.text AS BLOB))), 0)
+         FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1",
+            [project],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(repo::db_error)?;
+    Ok((
+        usize::try_from(rows).map_err(|_| Error::internal("invalid embedding chunk count"))?,
+        usize::try_from(longest).map_err(|_| Error::internal("invalid embedding text length"))?,
+    ))
+}
+
+fn embedding_texts(
+    db: &Db,
+    project: i64,
+    cursor: &mut (i64, i64),
+    policy: &crate::hybrid::remote_settings::RemoteSettings,
+    operation: &SearchOperation,
+) -> Result<Vec<String>> {
+    let mut statement = db.connection().prepare("SELECT c.doc_id,c.seq,length(CAST(c.text AS BLOB)),c.text FROM chunks c JOIN docs d ON d.id=c.doc_id WHERE d.project_id=?1 AND (c.doc_id,c.seq)>(?2,?3) ORDER BY c.doc_id,c.seq LIMIT ?4").map_err(repo::db_error)?;
+    let mut rows = statement
+        .query(rusqlite::params![
+            project,
+            cursor.0,
+            cursor.1,
+            i64::try_from(policy.embed_batch_texts)
+                .map_err(|_| Error::internal("batch count overflow"))?
+        ])
+        .map_err(repo::db_error)?;
+    let mut texts = Vec::new();
+    let mut bytes = 0_usize;
+    while let Some(row) = rows.next().map_err(repo::db_error)? {
+        let length: i64 = row.get(2).map_err(repo::db_error)?;
+        let length =
+            usize::try_from(length).map_err(|_| Error::internal("backfill text length invalid"))?;
+        if !texts.is_empty() && bytes.saturating_add(length) > policy.embed_batch_bytes {
+            break;
+        }
+        operation.check()?;
+        texts.push(row.get::<_, String>(3).map_err(repo::db_error)?);
+        bytes = bytes.saturating_add(length);
+        *cursor = (
+            row.get(0).map_err(repo::db_error)?,
+            row.get(1).map_err(repo::db_error)?,
+        );
+    }
+    Ok(texts)
+}
+
+const fn pin_tracking_bytes(count: usize) -> Option<u64> {
+    (count as u64).checked_mul(1024)
+}
+
 // Includes oversized new/old atomic text, worst-case 6-byte JSON escapes,
 // concurrent Rig bytes/Value/final String growth and the live input clones.
 fn embedding_workspace(
@@ -668,11 +715,7 @@ fn embedding_workspace(
                 .and_then(|n| n.checked_mul(8))
                 .and_then(|vectors| bytes.checked_add(vectors))
         })
-        .and_then(|bytes| {
-            (count as u64)
-                .checked_mul(1024)
-                .and_then(|hashes| bytes.checked_add(hashes))
-        })
+        .and_then(|bytes| pin_tracking_bytes(count).and_then(|hashes| bytes.checked_add(hashes)))
         .ok_or_else(|| Error::Admission {
             message: "job embedding workspace overflow".into(),
         })
@@ -819,6 +862,15 @@ async fn embed_batches(
         let call = operation.clone();
         let (next, packet) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
+                if let Some(job) = &mut state.catalog_backfill {
+                    return job.batch_packet(&call, state.account.clone());
+                }
+                if let Some(job) = &mut state.catalog_job {
+                    return job.batch_packet(&call, state.account.clone());
+                }
+                if let Some(job) = &mut state.catalog_watch {
+                    return job.batch_packet(&call, state.account.clone());
+                }
                 let batch = state.batch(backfill, &call)?;
                 let context = state
                     .context
@@ -847,6 +899,25 @@ async fn embed_batches(
         let (next, written) = service
             .phase(workers, activity.clone(), operation, owner, move |state| {
                 call.check()?;
+                let batch = packet
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| Error::internal("embedding batch absent"))?;
+                if let Some(job) = &state.catalog_job {
+                    return job.store(batch, &vectors);
+                }
+                if state.catalog_backfill.is_some() || state.catalog_watch.is_some() {
+                    let account = state
+                        .account
+                        .as_deref()
+                        .ok_or_else(|| Error::internal("catalog payload account missing"))?;
+                    if let Some(job) = &mut state.catalog_backfill {
+                        return job.store(batch, &vectors, &call, account);
+                    }
+                    if let Some(job) = &mut state.catalog_watch {
+                        return job.store(batch, &vectors, &call, account);
+                    }
+                }
                 let context = state
                     .context
                     .as_ref()
@@ -864,12 +935,10 @@ async fn embed_batches(
                         .as_ref()
                         .ok_or_else(|| Error::internal("embedding stage absent"))?
                         .model_id(),
-                    packet
-                        .0
-                        .as_ref()
-                        .ok_or_else(|| Error::internal("embedding batch absent"))?,
+                    batch,
                     &vectors,
                     state.dimension,
+                    crate::vector_cache::WriteCapacity::AllowPinnedOverflow,
                 )?;
                 if let Some(pin) = &state.pin {
                     pin.renew()?;

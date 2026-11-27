@@ -13,7 +13,7 @@ use crate::hybrid::HybridStages;
 use crate::hybrid::Ranking;
 use crate::hybrid::blocking;
 use crate::hybrid::config::DEFAULT_RERANK_WINDOW;
-use crate::hybrid::dense::{self, DenseCache, DenseRequest, DenseRows};
+use crate::hybrid::dense::{self, BoundDenseRequest, DenseCache, DenseRows};
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::jobs::{self as hybrid_jobs, Coverage};
 use crate::hybrid::meta::{
@@ -143,6 +143,17 @@ fn dense_candidates<Guard>(
     // is a pure function of both, so this cannot change the answer
     // (`search-cost` FR-1/FR-3).
     let model_id = embedder.model_id();
+    let record = |state, reason| {
+        let _revision = if query.index.catalog_generation().is_some() {
+            let Ok(guard) = admit() else {
+                return;
+            };
+            Some(guard)
+        } else {
+            None
+        };
+        dense.record_bound_outcome(query.index, model_id, state, reason);
+    };
     let fresh;
     let vector = if let Some(vector) = query.vector {
         vector
@@ -151,28 +162,28 @@ fn dense_candidates<Guard>(
         &fresh
     };
     operation.check()?;
+    let stream =
+        |hashes| stream_hashes(context, query.index, model_id, hashes, vector, query.fetch);
     if context
         .ann_search
         .is_some_and(|settings| query.fetch > settings.ef_max())
     {
         let metadata = in_read_phase(context, source, admit, |reader, index| {
             require_search_index(index, Some(query.index))?;
-            DenseMetadata::capture(&reader, project.id)
+            DenseMetadata::capture_bound(context.cache, reader.connection(), index)
         })?;
         operation.check()?;
         degrade(degraded, Degraded::ExactFallback);
-        dense.record_outcome(
-            project.id,
+        record(
             AnnState::Fallback,
             Some("ANN window exceeds the configured ef_max"),
         );
-        return stream_hashes(context, model_id, metadata.chunks(), vector, query.fetch);
+        return stream(metadata.chunks());
     }
-    let rows = dense.get_with_metadata_admitted(
-        DenseRequest {
+    let rows = dense.get_bound_with_metadata_admitted(
+        BoundDenseRequest {
             cache_root: context.cache,
-            project_id: project.id,
-            generation: query.index.content_revision(),
+            index: query.index,
             model_id,
         },
         operation.cancellation(),
@@ -183,40 +194,34 @@ fn dense_candidates<Guard>(
     let fetch = query.fetch;
     match rows {
         DenseRows::Ready(index) => {
-            dense.record_outcome(project.id, AnnState::Ready, None);
+            record(AnnState::Ready, None);
             dense::top_k(vector, index.rows(), fetch)
         }
-        DenseRows::Ann(ann) => {
-            search_graph(context, source, query, model_id, vector, &ann, degraded)
-        }
+        DenseRows::Ann(ann) => search_graph(
+            context,
+            source,
+            query,
+            (model_id, vector),
+            &ann,
+            degraded,
+            record,
+        ),
         DenseRows::TooLarge(hashes) => {
             // Above the resident cap by design: exact streaming is the answer,
             // not an error.
             degrade(degraded, Degraded::ExactFallback);
-            dense.record_outcome(
-                project.id,
-                AnnState::TooLarge,
-                Some("above the resident cap"),
-            );
-            stream_hashes(context, model_id, &hashes, vector, fetch)
+            record(AnnState::TooLarge, Some("above the resident cap"));
+            stream(&hashes)
         }
         DenseRows::Building(building) => {
             degrade(degraded, Degraded::AnnBuilding);
-            dense.record_outcome(
-                project.id,
-                AnnState::Building,
-                Some("background build in flight"),
-            );
-            stream_hashes(context, model_id, &building.hashes, vector, fetch)
+            record(AnnState::Building, Some("background build in flight"));
+            stream(&building.hashes)
         }
         DenseRows::Failed(failed) => {
             degrade(degraded, Degraded::AnnError);
-            dense.record_outcome(
-                project.id,
-                AnnState::Fallback,
-                Some("the last build failed"),
-            );
-            stream_hashes(context, model_id, &failed.hashes, vector, fetch)
+            record(AnnState::Fallback, Some("the last build failed"));
+            stream(&failed.hashes)
         }
     }
 }
@@ -225,17 +230,12 @@ fn search_graph(
     context: &SearchContext<'_>,
     source: MetadataSource<'_>,
     query: DenseQuery<'_>,
-    model_id: &str,
-    vector: &[f32],
+    (model_id, vector): (&str, &[f32]),
     ann: &crate::hybrid::ann::AnnIndex,
     degraded: &mut Vec<Degraded>,
+    record: impl Fn(AnnState, Option<&'static str>),
 ) -> Result<Vec<(u64, f32)>> {
-    let SearchContext {
-        dense,
-        project,
-        operation,
-        ..
-    } = context;
+    let operation = &context.operation;
     let fetch = query.fetch;
     let hits = match context.ann_search {
         Some(settings) => ann.search_with_settings(vector, fetch, &settings),
@@ -245,7 +245,7 @@ fn search_graph(
         Ok(hits) if hits.len() >= fetch => {
             #[cfg(debug_assertions)]
             ANN_SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            dense.record_outcome(project.id, AnnState::Ready, None);
+            record(AnnState::Ready, None);
             Ok(hits)
         }
         Ok(hits) => {
@@ -254,8 +254,7 @@ fn search_graph(
                 hits.len()
             );
             degrade(degraded, Degraded::AnnInsufficient);
-            dense.record_outcome(
-                project.id,
+            record(
                 AnnState::Fallback,
                 Some("ann returned fewer candidates than the window"),
             );
@@ -265,7 +264,7 @@ fn search_graph(
         Err(err) => {
             eprintln!("warning: ann search failed: {err}; falling back to exact");
             degrade(degraded, Degraded::AnnError);
-            dense.record_outcome(project.id, AnnState::Fallback, Some("ann search failed"));
+            record(AnnState::Fallback, Some("ann search failed"));
             operation.check()?;
             stream_exact(context, source, query.index, model_id, vector, fetch)
         }
@@ -320,6 +319,7 @@ fn scoped_dense<Guard>(
         .vector_source(context.project.id)
         .connect(context.cache)?;
     let mut top = dense::TopK::new(vector, query.fetch)?;
+    let dimension = query.index.catalog_generation().map(|_| vector.len());
     for documents in scope.documents().chunks(repo::BATCH_KEYS) {
         let mut after = (0_i64, 0_u32);
         loop {
@@ -343,13 +343,18 @@ fn scoped_dense<Guard>(
             if let Some((id, _)) = hashes.chunks.last() {
                 after = chunk_id_parts(*id);
             }
-            cache.visit_page(embedder.model_id(), &hashes.chunks, |id, vector| {
-                context.operation.check()?;
-                if let Some(vector) = vector {
-                    top.push(id, vector)?;
-                }
-                Ok(())
-            })?;
+            cache.visit_page(
+                embedder.model_id(),
+                &hashes.chunks,
+                dimension,
+                |id, vector| {
+                    context.operation.check()?;
+                    if let Some(vector) = vector {
+                        top.push(id, vector)?;
+                    }
+                    Ok(())
+                },
+            )?;
             if !hashes.more {
                 break;
             }
@@ -367,11 +372,12 @@ fn stream_exact(
     fetch: usize,
 ) -> Result<Vec<(u64, f32)>> {
     let metadata = capture_dense(source, context.project, index)?;
-    stream_hashes(context, model_id, metadata.chunks(), vector, fetch)
+    stream_hashes(context, index, model_id, metadata.chunks(), vector, fetch)
 }
 
 fn stream_hashes(
     context: &SearchContext<'_>,
+    index: ProjectIndex,
     model_id: &str,
     hashes: &[(u64, String)],
     vector: &[f32],
@@ -381,13 +387,18 @@ fn stream_hashes(
         .dense
         .vector_source(context.project.id)
         .connect(context.cache)?;
-    let rows = hashes
-        .iter()
-        .filter_map(move |(chunk_id, hash)| match cache.get(model_id, hash) {
+    let dimension = index.catalog_generation().map(|_| vector.len());
+    let rows = hashes.iter().filter_map(move |(chunk_id, hash)| {
+        let value = match dimension {
+            Some(dimension) => cache.get_for_dimension(model_id, hash, dimension),
+            None => cache.get(model_id, hash),
+        };
+        match value {
             Ok(Some(vector)) => Some(Ok((*chunk_id, vector))),
             Ok(None) => None,
             Err(err) => Some(Err(err)),
-        });
+        }
+    });
     dense::top_k_iter(vector, rows, fetch)
 }
 
@@ -567,16 +578,7 @@ pub(super) fn start_search<Guard>(
         .vector_source(context.project.id)
         .validate_root(context.cache)?;
     let catalog = source.has_generation_catalog();
-    if catalog {
-        if context.stages.ranking == Ranking::Rrf
-            || context.stages.embedder.is_some()
-            || context.stages.reranker.is_some()
-        {
-            return Err(Error::Admission {
-                message: "published v5 generations require lexical search".into(),
-            });
-        }
-    } else {
+    if !catalog {
         ensure_indexed(context.project)?;
     }
     let arguments = parse_search_args(args)?;
@@ -588,7 +590,7 @@ pub(super) fn start_search<Guard>(
             return Ok(SearchStart::Complete(Value::Array(Vec::new())));
         }
         return in_read_phase(context, source, &admit, |reader, index| {
-            verify_index_recipe(&reader, settings.config)?;
+            verify_index_recipe(&reader, settings.config, context.stages)?;
             if !arguments.explain {
                 return Ok(Value::Array(Vec::new()));
             }
@@ -871,9 +873,17 @@ pub(super) fn capture_dense(
     index: ProjectIndex,
 ) -> Result<DenseMetadata> {
     let reader = source.try_acquire()?;
-    lifecycle::with_project_read_lease(source.cache_root(), project.id, || {
-        snapshot_info(&reader, project, Some(index))?;
-        DenseMetadata::capture(&reader, project.id)
+    let root = source.cache_root();
+    if reader.has_generation_catalog() {
+        return with_catalog_pair(reader, project, |registry, local, current| {
+            require_search_index(current, Some(index))?;
+            let reader = ProjectReader::new(registry, local);
+            DenseMetadata::capture_bound(root, reader.connection(), current)
+        });
+    }
+    lifecycle::with_project_read_lease(root, project.id, || {
+        let current = snapshot_info(&reader, project, Some(index))?;
+        DenseMetadata::capture_bound(root, reader.connection(), current)
     })
 }
 
@@ -895,7 +905,7 @@ fn lexical_snapshot<Guard>(
 ) -> Result<LexicalSnapshot> {
     in_read_phase(context, source, admit, |reader, index| {
         let started = std::time::Instant::now();
-        verify_index_recipe(&reader, settings.config)?;
+        verify_index_recipe(&reader, settings.config, context.stages)?;
         let transaction = reader
             .connection()
             .unchecked_transaction()
@@ -936,7 +946,16 @@ fn lexical_snapshot<Guard>(
     })
 }
 
-fn verify_index_recipe(reader: &ProjectReader<'_>, config: Option<&Config>) -> Result<()> {
+fn verify_index_recipe(
+    reader: &ProjectReader<'_>,
+    config: Option<&Config>,
+    stages: &HybridStages,
+) -> Result<()> {
+    if stages.ranking == Ranking::Rrf
+        && let Some(embedder) = &stages.embedder
+    {
+        reader.require_embedding(embedder.model_id())?;
+    }
     let Some(sealed) = reader.index_recipe() else {
         return Ok(());
     };
@@ -1211,18 +1230,21 @@ fn query_cache_json(dense: Option<&DenseCache>) -> Value {
 pub(super) fn ann_state(dense: Option<&DenseCache>, project_id: i64, hybrid_on: bool) -> Value {
     let Some(dense) = dense else {
         // CLI direct mode: the outcome record lives in the daemon process.
-        return json!({
-            "state": AnnState::Unknown.as_str(),
-            "vectors": Value::Null,
-            "estimated_bytes": Value::Null,
-            "reason": "daemon not running",
-        });
+        return ann_state_json((AnnState::Unknown, Some("daemon not running")), None);
     };
-    let snapshot = dense.ann_snapshot(project_id);
+    ann_state_json(
+        classified_ann_state(dense, project_id, hybrid_on),
+        dense.ann_snapshot(project_id),
+    )
+}
+
+pub(super) fn ann_state_json(
+    (state, reason): (AnnState, Option<&'static str>),
+    snapshot: Option<(usize, u64)>,
+) -> Value {
     let (vectors, bytes) = snapshot.map_or((Value::Null, Value::Null), |(count, bytes)| {
         (json!(count), json!(bytes))
     });
-    let (state, reason) = classified_ann_state(dense, project_id, hybrid_on);
     json!({
         "state": state.as_str(),
         "vectors": vectors,
@@ -1237,7 +1259,15 @@ pub(super) fn classified_ann_state(
     project_id: i64,
     hybrid_on: bool,
 ) -> (AnnState, Option<&'static str>) {
-    match dense.outcome(project_id) {
+    classify_ann_outcome(dense, dense.outcome(project_id), hybrid_on)
+}
+
+pub(super) fn classify_ann_outcome(
+    dense: &DenseCache,
+    outcome: Option<crate::hybrid::meta::AnnOutcome>,
+    hybrid_on: bool,
+) -> (AnnState, Option<&'static str>) {
+    match outcome {
         Some(outcome) if outcome.is_stale_after(dense.limits().ann_lifetimes.outcome_ttl()) => (
             AnnState::Stale,
             Some("last search is older than configured TTL"),
@@ -1954,6 +1984,47 @@ pub fn status(
         coverage,
         dense,
     )
+}
+
+pub(crate) fn stopped_catalog_status(db: &Db) -> Result<Value> {
+    use crate::store::project_index::{CatalogProjectInfo, catalog_project_info};
+
+    let mut entries = Vec::new();
+    let empty = repo::ProjectCounts { docs: 0, chunks: 0 };
+    for mut registered in registry::list_projects(db)? {
+        let selected = catalog_project_info(db, &registered, |_, _, _, _| ());
+        let (project, counts, revision, unavailable) = match selected {
+            Ok(Some(CatalogProjectInfo {
+                project,
+                counts,
+                index,
+                details: (),
+            })) => (project, counts, index.content_revision(), None),
+            Ok(None) => {
+                registered.status = ProjectStatus::NotIndexed;
+                (registered, empty, 0, None)
+            }
+            Err(error) if lifecycle::is_lease_conflict(&error) => {
+                registered.status = ProjectStatus::Indexing;
+                (registered, empty, 0, None)
+            }
+            Err(error @ Error::Project { .. }) => {
+                registered.status = ProjectStatus::Error;
+                (registered, empty, 0, Some(error.to_string()))
+            }
+            Err(error) => return Err(error),
+        };
+        let mut entry = project_entry_with_counts(db, &project, counts, Some(false), true)?;
+        entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
+        entry["index_generation"] = json!(revision);
+        entry["embed_coverage"] = Value::Null;
+        entry["ann"] = ann_state(None, project.id, false);
+        if let Some(error) = unavailable {
+            entry["last_error"] = json!(error);
+        }
+        entries.push(entry);
+    }
+    status_document(db, &entries, &Stats::default(), 0, None, None)
 }
 
 // The caller filters identities before any project/runtime/coverage callback.

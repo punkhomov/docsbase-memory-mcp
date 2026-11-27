@@ -22,6 +22,7 @@ use crate::store::registry_inspect::{
 use crate::store::settings::{DbSettings, DbSpec};
 use crate::store::{
     DB_FILE, Db,
+    generation_catalog::{self, Layout},
     generation_seal::{GenerationSeal, SEAL_FORMAT},
     migrations,
     project_index::project_directory,
@@ -92,6 +93,7 @@ pub fn publish_lexical_generation(
                 settings,
                 limits,
                 config,
+                embedding_recipe: None,
                 access: CatalogAccess::Stopped,
             },
             |ready| ready.commit(|| Ok(())),
@@ -107,6 +109,7 @@ pub(super) struct StagedPublication<'a> {
     pub(super) settings: &'a Resolved<DbSettings>,
     pub(super) limits: InspectionLimits,
     pub(super) config: &'a Config,
+    pub(super) embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
     pub(super) access: CatalogAccess,
 }
 
@@ -118,21 +121,65 @@ pub(crate) struct LexicalCommit<'a> {
     current: ObservedProjectIndex,
 }
 
-impl LexicalCommit<'_> {
-    pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
-        self.commit_with(|_, _| Ok(()), admit)
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogHead {
+    epoch: [u8; 16],
+    project_id: i64,
+    generation: i64,
+    seal: [u8; 32],
+}
+
+impl CatalogHead {
+    #[cfg(all(test, unix, feature = "hybrid-remote"))]
+    pub(crate) fn from_selected_fixture(conn: &Connection, project_id: i64) -> Result<Self> {
+        let epoch = generation_catalog::read_epoch(conn).map_err(registry_unavailable)?;
+        let head = generation_catalog::active_head(conn, project_id)
+            .map_err(registry_unavailable)?
+            .ok_or_else(|| admission("fixture has no active head"))?;
+        let Layout::Local { seal_digest } = head.layout else {
+            return Err(admission("fixture has no published local seal"));
+        };
+        Ok(Self {
+            epoch,
+            project_id,
+            generation: head.id,
+            seal: seal_digest,
+        })
     }
 
-    pub(crate) fn commit_with(
+    pub(crate) fn is_selected(self, conn: &Connection) -> Result<bool> {
+        validate_epoch(conn, self.epoch)?;
+        let head =
+            generation_catalog::active_head(conn, self.project_id).map_err(registry_unavailable)?;
+        Ok(head.is_some_and(|head| {
+            head.id == self.generation
+                && matches!(head.layout, Layout::Local { seal_digest } if seal_digest == self.seal)
+        }))
+    }
+}
+
+pub(crate) enum CatalogCommit {
+    Committed,
+    Unverified(CatalogHead),
+}
+
+impl LexicalCommit<'_> {
+    pub(crate) fn commit(self, admit: impl FnOnce() -> Result<()>) -> Result<ObservedProjectIndex> {
+        self.commit_with(|| Ok(()), |_, _| Ok(()), admit, |_| {})
+    }
+
+    pub(crate) fn commit_with<Admission>(
         self,
+        hold: impl FnOnce() -> Result<Admission>,
         record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
         admit: impl FnOnce() -> Result<()>,
+        after_commit: impl FnOnce(CatalogCommit),
     ) -> Result<ObservedProjectIndex> {
         let writer_lock = lifecycle::lease_path(self.publication.cache, self.project.id);
         lifecycle::with_writer_lock(
             open_coordination_file(&writer_lock, false)?,
             &writer_lock,
-            || commit_head(&self, record, admit),
+            || commit_head(&self, hold, record, admit, after_commit),
         )?;
         Ok(self.current)
     }
@@ -151,6 +198,7 @@ pub(super) fn publish_prepared(
         limits,
         config,
         access,
+        ..
     } = publication;
     let dir = project_dir
         .join("generations")
@@ -210,7 +258,7 @@ pub(super) fn publish_prepared(
     let seal = lifecycle::with_read_lock(
         open_coordination_file(&read_lock, false)?,
         &read_lock,
-        || verify_and_seal(&dir, request, staged, &project, settings, limits, config),
+        || verify_and_seal(&dir, &publication, &project),
     )?;
     finalize(LexicalCommit {
         publication,
@@ -305,13 +353,18 @@ fn candidate_is_active(
 
 pub(super) fn verify_and_seal(
     dir: &Path,
-    request: LexicalBuildRequest,
-    staged: PreparedLexicalGeneration,
+    publication: &StagedPublication<'_>,
     project: &Project,
-    settings: &Resolved<DbSettings>,
-    limits: InspectionLimits,
-    config: &Config,
 ) -> Result<blake3::Hash> {
+    let StagedPublication {
+        request,
+        staged,
+        settings,
+        limits,
+        config,
+        embedding_recipe,
+        ..
+    } = *publication;
     let parent = dir
         .parent()
         .ok_or_else(|| admission("invalid generation directory"))?;
@@ -364,6 +417,7 @@ pub(super) fn verify_and_seal(
             .to_hex()
             .to_string(),
         index_recipe: recipe,
+        embedding_recipe,
         files,
     };
     let encoded = serde_json::to_vec(&seal)
@@ -611,10 +665,12 @@ fn write_seal(path: &Path, bytes: &[u8]) -> Result<()> {
     filesystem(path, "sync generation seal", file.sync_all())
 }
 
-fn commit_head(
+fn commit_head<Admission>(
     commit: &LexicalCommit<'_>,
+    hold: impl FnOnce() -> Result<Admission>,
     record: impl FnOnce(&Connection, ObservedProjectIndex) -> Result<()>,
     admit: impl FnOnce() -> Result<()>,
+    after_commit: impl FnOnce(CatalogCommit),
 ) -> Result<()> {
     let StagedPublication {
         cache,
@@ -635,6 +691,9 @@ fn commit_head(
         .pragma_update(None, "synchronous", "EXTRA")
         .map_err(repo::db_error)?;
     let retirement = prepare_retirement(connection, &commit.publication)?;
+    // Verify external artifacts before excluding the other registry writers.
+    // Keep the returned proof alive until the catalog transaction settles.
+    let artifact_guard = hold()?;
     let tx = registry.begin_write()?;
     validate_catalog(&tx, request)?;
     let registered = registry::project_by_id_in(&tx, project.id)?
@@ -697,17 +756,49 @@ fn commit_head(
     record(&tx, commit.current)?;
     // All validation and SQL writes are still reversible at this boundary.
     admit()?;
-    tx.commit().map_err(|error| {
-        crate::error::Error::internal_with_source(
-            "commit generation catalog (publication result may be indeterminate)",
-            error,
-        )
-    })?;
+    if let Err(error) = tx.commit() {
+        // Reopen the registry under the same project writer authority. The
+        // failed SQLite connection may not be able to observe its own result.
+        drop(registry);
+        let head = CatalogHead {
+            epoch: request.epoch,
+            project_id: request.project_id,
+            generation: staged.generation_id,
+            seal: *seal.as_bytes(),
+        };
+        let selected = access.read(cache, settings, limits, |conn| head.is_selected(conn));
+        drop(artifact_guard);
+        return Err(reconcile_commit_error(error, selected, head, after_commit));
+    }
+    // The head is visible after COMMIT. Runtime publication must happen
+    // under the same project authority even if a later durability step fails.
+    drop(artifact_guard);
+    after_commit(CatalogCommit::Committed);
     registry
         .conn
         .close()
         .map_err(|(_, err)| repo::db_error(err))?;
     sync_directory(cache)
+}
+
+fn reconcile_commit_error(
+    error: rusqlite::Error,
+    selected: Result<bool>,
+    head: CatalogHead,
+    after_commit: impl FnOnce(CatalogCommit),
+) -> crate::error::Error {
+    let state = match selected {
+        Ok(true) => {
+            after_commit(CatalogCommit::Committed);
+            "new head observed after commit error".into()
+        }
+        Ok(false) => "new head was not committed".into(),
+        Err(inspect) => {
+            after_commit(CatalogCommit::Unverified(head));
+            format!("commit result could not be determined: {inspect}")
+        }
+    };
+    crate::error::Error::internal_with_source(format!("commit generation catalog ({state})"), error)
 }
 
 /// Under the project writer lease, before starting the shared registry write

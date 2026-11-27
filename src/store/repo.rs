@@ -266,6 +266,30 @@ pub fn chunk_texts(conn: &Connection, project_id: i64) -> Result<Vec<String>> {
         .map_err(db_error)
 }
 
+/// Scan one text at a time without a `SQLite` sort or an owned text copy.
+pub(crate) fn visit_chunk_texts(
+    conn: &Connection,
+    project_id: i64,
+    mut visit: impl FnMut(&str) -> Result<()>,
+) -> Result<()> {
+    let mut select = conn
+        .prepare(
+            "SELECT c.text FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE d.project_id = ?1",
+        )
+        .map_err(db_error)?;
+    let mut rows = select.query([project_id]).map_err(db_error)?;
+    while let Some(row) = rows.next().map_err(db_error)? {
+        let text = row
+            .get_ref(0)
+            .map_err(db_error)?
+            .as_str()
+            .map_err(|err| Error::internal_with_source("read indexed chunk text", err))?;
+        visit(text)?;
+    }
+    Ok(())
+}
+
 /// Text of one chunk (rerank documents, FR-11).
 ///
 /// # Errors
@@ -654,6 +678,17 @@ pub fn project_counts(conn: &Connection, project_id: i64) -> Result<ProjectCount
                 chunks: row.get(1)?,
             })
         },
+    )
+    .map_err(db_error)
+}
+
+/// Counts up to the caller's eligibility sentinel without scanning a larger corpus.
+pub(crate) fn count_chunks_up_to(conn: &Connection, project_id: i64, limit: i64) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM docs d JOIN chunks c ON c.doc_id = d.id
+         WHERE d.project_id = ?1 LIMIT ?2)",
+        params![project_id, limit],
+        |row| row.get(0),
     )
     .map_err(db_error)
 }

@@ -1004,3 +1004,14 @@ pair. A rejected build leaves
 the old head available. A later index retries cleanup of its retired local pairs once their readers
 release them. A fresh lexical Website deployment can initialize v5 through
 the global profile above.
+
+On a supported Unix filesystem, Shared can open an existing v5 catalog with
+lexical or hybrid settings. Index and Sync prepare the replacement pair
+before switching the active head. With embeddings enabled, the watcher
+prepares vectors before applying edits. After enabling or disabling
+embeddings or changing the embedding recipe, run `docsbase index` to
+publish a matching generation. Opening an indexed project can refill
+missing vectors without rewriting the index. The coverage counter reports
+persisted cache keys. Search and refill also validate the vector payload.
+Stopped `docsbase status` and `docsbase list` report the selected generation's
+metadata.

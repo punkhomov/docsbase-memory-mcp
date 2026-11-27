@@ -7,19 +7,20 @@ use crate::config::Config;
 use crate::config::paths;
 use crate::config::schema::Resolved;
 use crate::daemon::registry;
+use crate::daemon::settings::DaemonProfile;
 use crate::error::{Error, Result};
+use crate::index::async_job::catalog_sync::BuildContext;
 use crate::index::{generation_job::GenerationJob, job::CaptureBudget, outcome};
 use crate::search::budget::PayloadBudget;
 use crate::search::operation::SearchOperation;
 use crate::store::Db;
 use crate::store::models::Project;
 use crate::store::settings::DbSettings;
+use crate::vector_cache::{VectorCacheSource, VectorStore};
 
 /// The explicitly selected Website profile already requires one lexical
 /// project. It can create a fresh catalog before any daemon owns that cache.
 pub(super) fn create_for_website(global: &Config, project: &Config, root: &Path) -> bool {
-    use crate::daemon::settings::DaemonProfile;
-
     let DaemonProfile::Website { project_root } = &global.daemon.profile else {
         return false;
     };
@@ -43,14 +44,22 @@ impl Target {
         root: &Path,
         config: Config,
         settings: Resolved<DbSettings>,
+        profile: &DaemonProfile,
     ) -> Result<Self> {
         if !cfg!(unix) {
             return Err(admission(
                 "this platform has no qualified generation publication barrier",
             ));
         }
-        if !lexical(&config) {
-            return Err(admission("v5 index requires lexical project configuration"));
+        if config.vector_store.is_none() {
+            return Err(admission(
+                "v5 index requires version 2 project configuration",
+            ));
+        }
+        if matches!(profile, DaemonProfile::Website { .. }) && !lexical(&config) {
+            return Err(admission(
+                "website profile requires lexical-only global and project policy",
+            ));
         }
         let cache = db.cache_root().canonicalize().map_err(|error| {
             Error::internal_with_source("resolve generation registry cache", error)
@@ -67,6 +76,31 @@ impl Target {
             config: Arc::new(config),
             settings,
         })
+    }
+
+    pub(super) fn into_direct_index(
+        self,
+        owner: &super::super::command::Context,
+        store: VectorStore,
+    ) -> Result<super::DirectIndex> {
+        if lexical(&self.config) {
+            return Ok(super::DirectIndex::Generation(self));
+        }
+        let config_dir = paths::config_dir()?;
+        let stages = Arc::new(owner.stages(&self.config)?);
+        let pin_ttl = self.config.dense.ann_lifetimes.backfill_pin_ttl();
+        let build = BuildContext {
+            cache: self.cache,
+            epoch: self.epoch,
+            project: self.project,
+            config: self.config,
+            settings: self.settings,
+            stages,
+            active_model: None,
+            source: VectorCacheSource::Owned(store),
+            pin_ttl,
+        };
+        Ok(super::DirectIndex::HybridGeneration(build, config_dir))
     }
 
     pub(super) fn index(
@@ -93,10 +127,13 @@ impl Target {
             settings: &self.settings,
             config: &self.config,
         };
-        let stats = job.prepare(&mut capture, |prepared| {
-            operation.check()?;
-            prepared.publish(|commit| {
-                with_config_guards(&config_dir, project_root, || {
+        let prepared = job.stage(&mut capture)?;
+        operation.check()?;
+        let stats = prepared.publish(|commit| {
+            paths::with_index_config_write_locks(
+                Some(&config_dir.join("config.toml")),
+                project_root,
+                || {
                     operation.check()?;
                     let current = Config::load_from(&config_dir, Some(project_root))?;
                     if !lexical(&current) || outcome::recipe_id(&current) != recipe {
@@ -105,8 +142,8 @@ impl Target {
                         ));
                     }
                     commit.commit(|| operation.check())
-                })
-            })
+                },
+            )
         })?;
         Ok(serde_json::json!({ "project_id": project_id, "stats": stats }))
     }
@@ -114,20 +151,6 @@ impl Target {
 
 fn lexical(config: &Config) -> bool {
     config.vector_store.is_some() && !config.hybrid && !config.hybrid_cfg.enabled
-}
-
-fn with_config_guards<T>(
-    config_dir: &Path,
-    root: &Path,
-    work: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    paths::with_config_write_lock(&config_dir.join("config.toml"), || {
-        paths::with_config_write_lock(&root.join(".docsbase.toml"), || Ok(work()?))
-    })
-    .map_err(|error| match error.downcast::<Error>() {
-        Ok(error) => error,
-        Err(error) => admission(format!("could not lock the index configuration: {error}")),
-    })
 }
 
 fn admission(message: impl Into<String>) -> Error {

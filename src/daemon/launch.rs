@@ -68,15 +68,6 @@ pub(crate) fn lexical_only(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn catalog_lexical_only(config: &Config) -> Result<()> {
-    if config.hybrid || config.hybrid_cfg.enabled {
-        return Err(Error::Admission {
-            message: "v5 registry requires lexical-only global and project policy".to_owned(),
-        });
-    }
-    Ok(())
-}
-
 impl LaunchConfig {
     pub(crate) fn admit(
         self,
@@ -94,7 +85,6 @@ impl LaunchConfig {
                         crate::store::Db::open_readonly_for_admission(cache, settings, true)
                     && db.has_generation_catalog()
                 {
-                    catalog_lexical_only(config)?;
                     catalog_epoch = Some(db.generation_epoch()?);
                 }
                 None

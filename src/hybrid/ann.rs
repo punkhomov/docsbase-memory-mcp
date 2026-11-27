@@ -14,7 +14,7 @@ use hnsw_rs::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::hybrid::ann_settings::{AnnBuildSettings, AnnSearchSettings, PERSISTED_LAYERS};
-use crate::hybrid::ann_store::{AnnKey, AnnSlot, AnnSlotPin, AnnStore};
+use crate::hybrid::ann_store::{AnnArtifact, AnnKey, AnnSlot, AnnSlotPin, AnnStore};
 
 // FR-5/SC-4 convert `hnsw_rs` panics into `Error::Internal` through
 // `catch_unwind`, which only works while unwinding is enabled. With
@@ -237,6 +237,15 @@ impl AnnIndex {
     /// # Errors
     /// The index is not built, its shape differs from the key, or publication fails.
     pub fn dump(&self, store: &AnnStore, key: &AnnKey) -> Result<AnnSlot> {
+        self.dump_artifact(store, key.into())
+    }
+
+    pub(crate) fn dump_artifact(
+        &self,
+        store: &AnnStore,
+        artifact: AnnArtifact<'_>,
+    ) -> Result<AnnSlot> {
+        let key = artifact.key;
         let Kind::Built(hnsw) = &self.kind else {
             return Err(Error::internal("ann dump requires a built index"));
         };
@@ -245,7 +254,7 @@ impl AnnIndex {
                 "ANN key shape does not match the built graph",
             ));
         }
-        store.persist_dump_with_settings(key, self.build_settings, |dir| {
+        store.persist_artifact(artifact, self.build_settings, |dir| {
             let basename = run_unwind(|| hnsw.file_dump(dir, "index"))?
                 .map_err(|err| Error::internal(format!("ann file_dump: {err}")))?;
             Ok(basename)

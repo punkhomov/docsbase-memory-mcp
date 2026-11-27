@@ -18,7 +18,7 @@ use super::registry_inspect::{
 use super::{Db, migrations, repo};
 
 mod update;
-pub(crate) use update::apply_lexical_batch;
+pub(crate) use update::{PreparedWatch, apply_lexical_batch};
 
 pub(super) const SEALED_LOCAL_SCHEMA_VERSION: u32 = 1;
 pub(super) const LOCAL_SCHEMA_VERSION: u32 = 2;
@@ -27,14 +27,14 @@ pub(super) const LOCAL_REVISION_SCHEMA_SQL: &str =
     include_str!("registry_inspect/revision_schema.sql");
 
 /// Identifies one revision of a project's existing SQLite/Tantivy pair.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ProjectIndex {
     project_id: i64,
     content_revision: i64,
     generation: Option<Generation>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Generation {
     epoch: [u8; 16],
     id: i64,
@@ -56,12 +56,38 @@ impl ProjectIndex {
         })
     }
 
+    pub(crate) const fn project_id(self) -> i64 {
+        self.project_id
+    }
+
+    /// Order published snapshots of the same project within one installation.
+    /// An epoch change requires stopped maintenance and has no numeric order.
+    pub(crate) fn is_after(self, other: Self) -> bool {
+        if self.project_id != other.project_id {
+            return false;
+        }
+        match (self.generation, other.generation) {
+            (Some(current), Some(previous)) => {
+                current.epoch == previous.epoch
+                    && (current.id, self.content_revision) > (previous.id, other.content_revision)
+            }
+            (None, None) => self.content_revision > other.content_revision,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+        }
+    }
+
     pub(crate) const fn content_revision(self) -> i64 {
         self.content_revision
     }
 
     pub(crate) fn generation_id(self) -> Option<i64> {
         self.generation.map(|generation| generation.id)
+    }
+
+    pub(crate) fn catalog_generation(self) -> Option<([u8; 16], i64)> {
+        self.generation
+            .map(|generation| (generation.epoch, generation.id))
     }
 
     pub(crate) fn chunk_binding(self) -> Option<crate::search::chunk_ref::ChunkBinding> {
@@ -91,6 +117,7 @@ impl ProjectIndex {
 pub(crate) struct LocalMetadata {
     pub(crate) db: Db,
     pub(crate) index_recipe: String,
+    pub(crate) embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
     tantivy: PathBuf,
     publication: TantivyPublication,
 }
@@ -98,6 +125,57 @@ pub(crate) struct LocalMetadata {
 enum TantivyPublication {
     Sealed(Vec<(String, u64)>),
     Revised([u8; 32]),
+}
+
+pub(crate) fn require_catalog_embedding(
+    local: Option<&LocalMetadata>,
+    model_id: &str,
+) -> Result<()> {
+    require_catalog_recipe(
+        local,
+        Some(crate::vector_cache::EmbeddingRecipe::for_model(model_id)),
+    )
+}
+
+fn require_catalog_recipe(
+    local: Option<&LocalMetadata>,
+    recipe: Option<crate::vector_cache::EmbeddingRecipe>,
+) -> Result<()> {
+    // A migrated legacy head still uses the v4 content-addressed cache
+    // contract. A local head must prove the recipe selected at publication.
+    if let Some(local) = local
+        && local.embedding_recipe != recipe
+    {
+        return Err(Error::Project {
+            message: "published embedding recipe does not match the configured settings".into(),
+            instruction: Some(
+                "run index to publish a generation for the current embedding settings".into(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// An unindexed project or a legacy head has no local embedding seal.
+pub(crate) fn require_selected_catalog_embedding<R>(
+    registry: R,
+    project: &Project,
+    model: Option<&str>,
+) -> Result<()>
+where
+    R: Deref<Target = Db>,
+{
+    let head = generation_catalog::active_head(registry.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?;
+    if head.is_some_and(|head| matches!(head.layout, Layout::Local { .. })) {
+        with_catalog_pair(registry, project, |_, local, _| {
+            require_catalog_recipe(
+                local.as_ref(),
+                model.map(crate::vector_cache::EmbeddingRecipe::for_model),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 impl LocalMetadata {
@@ -129,6 +207,29 @@ where
     with_catalog_pair_using(registry, project, PairAccess::Read(None), read)
 }
 
+/// Whether a config proposing a different recipe needs a new head.
+pub(crate) fn catalog_needs_index_for<R>(
+    registry: R,
+    project: &Project,
+    recipe: &str,
+    embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
+) -> Result<bool>
+where
+    R: Deref<Target = Db>,
+{
+    let head = generation_catalog::active_head(registry.connection(), project.id)
+        .map_err(|reason| unavailable("active generation", reason))?;
+    match head.map(|head| head.layout) {
+        None => Ok(false),
+        Some(Layout::Legacy) => Ok(true),
+        Some(Layout::Local { .. }) => with_catalog_pair(registry, project, |_, local, _| {
+            Ok(local.is_none_or(|local| {
+                local.index_recipe != recipe || local.embedding_recipe != embedding_recipe
+            }))
+        }),
+    }
+}
+
 /// A watcher can update a selected local pair. Read registration status
 /// from that pair because a new v5 project has no index rows in the registry.
 pub(crate) fn local_watcher_project(registry: &Db, project: &Project) -> Result<Option<Project>> {
@@ -143,38 +244,41 @@ pub(crate) fn local_watcher_project(registry: &Db, project: &Project) -> Result<
     })
 }
 
-pub(crate) struct CatalogProjectInfo {
+pub(crate) struct CatalogProjectInfo<T> {
     pub(crate) project: Project,
     pub(crate) counts: repo::ProjectCounts,
-    pub(crate) revision: i64,
+    pub(crate) index: ProjectIndex,
+    pub(crate) details: T,
 }
 
-pub(crate) fn catalog_project_info(
+pub(crate) fn catalog_project_info<T>(
     registry: &Db,
     project: &Project,
-) -> Result<Option<CatalogProjectInfo>> {
+    observe: impl FnOnce(&Db, Option<&LocalMetadata>, ProjectIndex, repo::ProjectCounts) -> T,
+) -> Result<Option<CatalogProjectInfo<T>>> {
     let head = generation_catalog::active_head(registry.connection(), project.id)
         .map_err(|reason| unavailable("active generation", reason))?;
     if head.is_none() {
         return Ok(None);
     }
     with_catalog_pair(registry, project, |registry, local, index| {
-        let summarize = |metadata: &Db| {
+        let summarize = |metadata: &Db, local: Option<&LocalMetadata>| {
             let registered = registry::project_by_id(metadata, project.id)?
                 .ok_or_else(|| invalid_index("selected generation has no project metadata"))?;
             let counts = repo::project_counts(metadata.connection(), project.id)?;
             Ok(Some(CatalogProjectInfo {
                 project: registered,
                 counts,
-                revision: index.content_revision(),
+                index,
+                details: observe(metadata, local, index, counts),
             }))
         };
         match local.as_ref() {
             Some(local) => {
                 local.tantivy_dir()?;
-                summarize(&local.db).map_err(local_metadata_error)
+                summarize(&local.db, Some(local)).map_err(local_metadata_error)
             }
-            None => summarize(registry),
+            None => summarize(registry, None),
         }
     })
 }
@@ -183,6 +287,7 @@ pub(crate) fn catalog_project_info(
 enum PairAccess {
     Read(Option<InspectionLimits>),
     Write,
+    PreparedWrite,
 }
 
 fn with_catalog_pair_using<R, T>(
@@ -267,6 +372,7 @@ where
                     let local = LocalMetadata {
                         db: metadata,
                         index_recipe: seal.index_recipe,
+                        embedding_recipe: seal.embedding_recipe,
                         tantivy: generation_dir.join("tantivy"),
                         publication: match revision.manifest {
                             Some(digest) => TantivyPublication::Revised(digest),
@@ -282,7 +388,11 @@ where
         .map_err(|reason| unavailable("project lease", reason))?;
     match access {
         PairAccess::Read(_) => lifecycle::with_read_lock(file, &writer, work),
-        PairAccess::Write => lifecycle::with_writer_lock(file, &writer, work),
+        PairAccess::PreparedWrite => lifecycle::with_writer_lock(file, &writer, work),
+        PairAccess::Write => {
+            let _preparation = super::generation_build::acquire_preparation_lease(&directory)?;
+            lifecycle::with_writer_lock(file, &writer, work)
+        }
     }
 }
 
@@ -370,7 +480,7 @@ fn open_catalog_metadata(registry: &Db, directory: &Path, access: PairAccess) ->
     let settings = registry.settings().settings();
     let (flags, timeout) = match access {
         PairAccess::Read(_) => (OpenFlags::SQLITE_OPEN_READ_ONLY, settings.read_busy_timeout),
-        PairAccess::Write => (
+        PairAccess::Write | PairAccess::PreparedWrite => (
             OpenFlags::SQLITE_OPEN_READ_WRITE,
             settings.write_busy_timeout,
         ),

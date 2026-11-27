@@ -132,6 +132,10 @@ impl Drop for JobOwner {
 }
 
 impl JobService {
+    pub(crate) fn shutdown_token(&self) -> Cancellation {
+        self.inner.close.clone()
+    }
+
     pub(crate) fn retain_watchers(
         &self,
         watchers: Arc<crate::watch::Watchers>,

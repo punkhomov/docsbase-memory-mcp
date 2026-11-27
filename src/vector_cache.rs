@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 
 mod job_pin;
 mod owner;
-pub(crate) use job_pin::JobPinAuthority;
+pub(crate) use job_pin::{JobPinAuthority, PinVerification};
 pub mod settings;
 mod source;
 pub use owner::VectorStore;
@@ -30,8 +30,48 @@ mod job_pin_tests;
 #[path = "vector_cache_batch_tests.rs"]
 mod batch_tests;
 
+/// Versioned, non-secret identity of the document-vector cache key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct EmbeddingRecipe([u8; 32]);
+
+impl EmbeddingRecipe {
+    /// Room for the largest bounded config input and its provider's cache-key
+    /// decoration (provider, dimension and normalization).
+    pub(crate) const MAX_MODEL_BYTES: u64 = 2 * crate::limits::MAX_STATE_BYTES;
+
+    pub(crate) fn for_model(model_id: &str) -> Self {
+        Self(blake3::derive_key(
+            "docsbase.catalog.embedding.v1",
+            model_id.as_bytes(),
+        ))
+    }
+}
+
 /// Separate `SQLite` file in the cache root; one cache per machine user.
 pub const VECTOR_DB_FILE: &str = "vectors.db";
+const SELECT_VECTOR: &str = "SELECT dim, vector FROM vector_cache
+    WHERE model_id = ?1 AND chunk_hash = ?2
+      AND (?3 IS NULL OR (dim = ?3 AND typeof(vector) = 'blob'
+                          AND length(vector) = 4 * ?3))";
+
+const COUNT_PRESENT_SELECT: &str =
+    "SELECT COUNT(*) FROM vector_cache WHERE model_id = ?1 AND chunk_hash IN (";
+
+/// Includes Rust key storage, the generated statement and argument buffers,
+/// and the copies of each key bound to SQLite. The model bind is charged
+/// with its retained key by the caller.
+pub(crate) fn count_present_workspace(keys: usize) -> usize {
+    if keys == 0 {
+        return 0;
+    }
+    let per_key = 2 * 64
+        + size_of::<String>()
+        + size_of::<&str>()
+        + size_of::<&dyn rusqlite::ToSql>()
+        + 2 * "?, ".len();
+    COUNT_PRESENT_SELECT.len() + 1 + size_of::<&dyn rusqlite::ToSql>() + keys * per_key
+}
 
 /// Cache size bounds; eviction drops the least recently used rows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +119,11 @@ pub trait Embedder: Send + Sync {
 /// Stable content key of one chunk (blake3, hex).
 #[must_use]
 pub fn chunk_hash(text: &str) -> String {
-    blake3::hash(text.as_bytes()).to_hex().to_string()
+    chunk_digest(text).to_hex().to_string()
+}
+
+pub(crate) fn chunk_digest(text: &str) -> blake3::Hash {
+    blake3::hash(text.as_bytes())
 }
 
 /// Content-addressed vector cache backed by `vectors.db`.
@@ -91,6 +135,12 @@ pub struct VectorCache {
     warned_over_budget: bool,
     // Field order matters: SQLite closes before the native mode lease.
     access: owner::Access,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteCapacity {
+    AllowPinnedOverflow,
+    RequireFit,
 }
 
 impl VectorCache {
@@ -147,6 +197,52 @@ impl VectorCache {
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures or a corrupt row.
     pub fn get(&mut self, model_id: &str, chunk_hash: &str) -> Result<Option<Vec<f32>>> {
+        self.get_using(model_id, chunk_hash, None)
+    }
+
+    /// Treats an incompatible vector row as a cache miss when preparing a
+    /// catalog generation that requires valid vectors of the resolved width.
+    pub(crate) fn get_for_dimension(
+        &mut self,
+        model_id: &str,
+        chunk_hash: &str,
+        dimension: usize,
+    ) -> Result<Option<Vec<f32>>> {
+        self.get_using(model_id, chunk_hash, Some(dimension))
+    }
+
+    /// Check an existing vector without reading it into an owned buffer or
+    /// making an automatic backfill scan change eviction order.
+    pub(crate) fn has_valid_vector(
+        &self,
+        model_id: &str,
+        hash: &str,
+        dimension: usize,
+    ) -> Result<bool> {
+        let width =
+            i64::try_from(dimension).map_err(|_| Error::internal("vector dimension overflow"))?;
+        self.conn
+            .prepare_cached(SELECT_VECTOR)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![model_id, hash, width], |row| {
+                        Ok(row
+                            .get_ref("vector")?
+                            .as_blob()
+                            .is_ok_and(|bytes| valid_vector_blob(dimension, bytes)))
+                    })
+                    .optional()
+            })
+            .map(|hit| hit.unwrap_or(false))
+            .map_err(|err| Error::internal_with_source("check vector for backfill", err))
+    }
+
+    fn get_using(
+        &mut self,
+        model_id: &str,
+        chunk_hash: &str,
+        expected_dimension: Option<usize>,
+    ) -> Result<Option<Vec<f32>>> {
         if self.access.is_owned() {
             // Reserve the writer before issuing a recency number. Otherwise an
             // older blocked touch could commit after a more recent operation.
@@ -154,12 +250,24 @@ impl VectorCache {
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|err| Error::internal_with_source("begin vector lookup", err))?;
-            let result = lookup(&tx, &mut self.access, model_id, chunk_hash)?;
+            let result = lookup(
+                &tx,
+                &mut self.access,
+                model_id,
+                chunk_hash,
+                expected_dimension,
+            )?;
             tx.commit()
                 .map_err(|err| Error::internal_with_source("commit vector lookup", err))?;
             Ok(result)
         } else {
-            lookup(&self.conn, &mut self.access, model_id, chunk_hash)
+            lookup(
+                &self.conn,
+                &mut self.access,
+                model_id,
+                chunk_hash,
+                expected_dimension,
+            )
         }
     }
 
@@ -172,11 +280,16 @@ impl VectorCache {
         &mut self,
         model_id: &str,
         hashes: &[(u64, String)],
+        expected_dimension: Option<usize>,
         mut visitor: impl FnMut(u64, Option<&[f32]>) -> Result<()>,
     ) -> Result<()> {
         if hashes.is_empty() {
             return Ok(());
         }
+        let width = expected_dimension
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| Error::internal("vector dimension overflow"))?;
         // Take the write reservation before reading to avoid WAL read->write
         // upgrade races between concurrent page visitors/embedding writers.
         let tx = self
@@ -185,9 +298,7 @@ impl VectorCache {
             .map_err(|err| Error::internal_with_source("begin vector access page", err))?;
         {
             let mut select = tx
-                .prepare_cached(
-                    "SELECT dim,vector FROM vector_cache WHERE model_id=?1 AND chunk_hash=?2",
-                )
+                .prepare_cached(SELECT_VECTOR)
                 .map_err(|err| Error::internal_with_source("prepare vector page read", err))?;
             let mut touch = tx
                 .prepare_cached(
@@ -196,7 +307,7 @@ impl VectorCache {
                 .map_err(|err| Error::internal_with_source("prepare vector page touch", err))?;
             for (id, hash) in hashes {
                 let row = select
-                    .query_row(params![model_id, hash], |row| {
+                    .query_row(params![model_id, hash, width], |row| {
                         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
                     })
                     .optional()
@@ -205,6 +316,10 @@ impl VectorCache {
                     visitor(*id, None)?;
                     continue;
                 };
+                if expected_dimension.is_some_and(|expected| !valid_vector_blob(expected, &bytes)) {
+                    visitor(*id, None)?;
+                    continue;
+                }
                 let dim = usize::try_from(dim)
                     .map_err(|_| Error::internal(format!("vector dim {dim} does not fit usize")))?;
                 let vector = decode_vector(dim, &bytes)?;
@@ -225,30 +340,27 @@ impl VectorCache {
     /// # Errors
     /// Returns [`Error::Internal`] on `SQLite` failures or an empty vector.
     pub fn put(&mut self, model_id: &str, chunk_hash: &str, vector: &[f32]) -> Result<()> {
-        if vector.is_empty() {
-            return Err(Error::internal("refusing to cache an empty vector"));
-        }
-        let mut bytes = Vec::with_capacity(vector.len() * 4);
-        for value in vector {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        let dim = i64::try_from(vector.len())
-            .map_err(|_| Error::internal("vector dim does not fit i64"))?;
+        self.put_with_capacity(
+            model_id,
+            chunk_hash,
+            vector,
+            WriteCapacity::AllowPinnedOverflow,
+        )
+    }
+
+    pub(crate) fn put_with_capacity(
+        &mut self,
+        model_id: &str,
+        chunk_hash: &str,
+        vector: &[f32],
+        capacity: WriteCapacity,
+    ) -> Result<()> {
         let mut warned = self.warned_over_budget;
         let store = |conn: &Connection, used_at: i64, warned: &mut bool| -> Result<()> {
-            conn.execute(
-                "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(model_id, chunk_hash) DO UPDATE SET
-                     dim = excluded.dim,
-                     vector = excluded.vector,
-                     used_at = excluded.used_at",
-                params![model_id, chunk_hash, dim, bytes, used_at],
-            )
-            .map_err(|err| Error::internal_with_source("store vector", err))?;
-            evict(conn, self.limits, warned)
+            write_vector(conn, model_id, chunk_hash, vector, used_at)?;
+            evict_with_capacity(conn, self.limits, warned, capacity)
         };
-        if self.access.is_owned() {
+        if self.access.is_owned() || capacity == WriteCapacity::RequireFit {
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -261,6 +373,33 @@ impl VectorCache {
         }
         self.warned_over_budget = warned;
         Ok(())
+    }
+
+    /// Commit the whole batch only when it needs no eviction. Otherwise the
+    /// transaction rolls back before another connection sees any changes.
+    pub(crate) fn try_store_without_eviction<'a>(
+        &mut self,
+        model: &str,
+        rows: impl Iterator<Item = (&'a str, &'a [f32])>,
+        operation: &crate::search::operation::SearchOperation,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| Error::internal_with_source("begin vector batch write", err))?;
+        for (hash, vector) in rows {
+            operation.check()?;
+            write_vector(&tx, model, hash, vector, self.access.next_use())?;
+        }
+        let (count, bytes) = vector_cache_size(&tx)?;
+        if count > self.limits.max_entries || bytes > self.limits.max_bytes {
+            return Ok(false);
+        }
+        operation.check()?;
+        tx.commit()
+            .map_err(|err| Error::internal_with_source("commit vector batch write", err))?;
+        self.warned_over_budget = false;
+        Ok(true)
     }
 
     /// Protects `hashes` from LRU eviction until `ttl` expires (backfill
@@ -444,6 +583,56 @@ impl VectorCache {
             .collect()
     }
 
+    /// Resolve a sealed recipe without reading vector payloads. Advance by
+    /// the representative rowid in a read snapshot so a cached model's
+    /// whole key range is skipped, including unsupported raw identifiers.
+    pub(crate) fn model_for_recipe(
+        &self,
+        recipe: EmbeddingRecipe,
+        mut check: impl FnMut() -> Result<()>,
+        charge: impl FnOnce(u64) -> Result<()>,
+    ) -> Result<Option<String>> {
+        let db_error = |error| Error::internal_with_source("read cached model identity", error);
+        let max_bytes = i64::try_from(EmbeddingRecipe::MAX_MODEL_BYTES)
+            .map_err(|_| Error::internal("catalog model identity bound exceeds SQLite range"))?;
+        check()?;
+        let tx = self.conn.unchecked_transaction().map_err(db_error)?;
+        let mut first = tx
+            .prepare(
+                "SELECT rowid, CASE WHEN octet_length(model_id) <= ?1 THEN model_id END
+             FROM vector_cache ORDER BY model_id LIMIT 1",
+            )
+            .map_err(db_error)?;
+        let mut next = tx
+            .prepare(
+                "SELECT rowid, CASE WHEN octet_length(model_id) <= ?1 THEN model_id END
+             FROM vector_cache
+             WHERE model_id > (SELECT model_id FROM vector_cache WHERE rowid = ?2)
+             ORDER BY model_id LIMIT 1",
+            )
+            .map_err(db_error)?;
+        let mut after = None;
+        loop {
+            check()?;
+            let mut rows = match after {
+                None => first.query([max_bytes]),
+                Some(rowid) => next.query(params![max_bytes, rowid]),
+            }
+            .map_err(db_error)?;
+            let Some(row) = rows.next().map_err(db_error)? else {
+                return Ok(None);
+            };
+            let value = row.get_ref(1).map_err(db_error)?;
+            if let Ok(model) = value.as_str()
+                && EmbeddingRecipe::for_model(model) == recipe
+            {
+                charge(model.len() as u64)?;
+                return Ok(Some(model.to_owned()));
+            }
+            after = Some(row.get::<_, i64>(0).map_err(db_error)?);
+        }
+    }
+
     /// How many of `hashes` are present for `model_id` (coverage diagnostics,
     /// FR-15). Batches the lookups so large projects stay linear-ish.
     ///
@@ -453,9 +642,11 @@ impl VectorCache {
         let mut present = 0u64;
         for window in hashes.chunks(500) {
             let placeholders = vec!["?"; window.len()].join(", ");
-            let sql = format!(
-                "SELECT COUNT(*) FROM vector_cache WHERE model_id = ?1 AND chunk_hash IN ({placeholders})"
-            );
+            let mut sql =
+                String::with_capacity(COUNT_PRESENT_SELECT.len() + placeholders.len() + 1);
+            sql.push_str(COUNT_PRESENT_SELECT);
+            sql.push_str(&placeholders);
+            sql.push(')');
             let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(window.len() + 1);
             params.push(&model_id);
             for hash in window {
@@ -496,12 +687,16 @@ fn lookup(
     access: &mut owner::Access,
     model_id: &str,
     chunk_hash: &str,
+    expected_dimension: Option<usize>,
 ) -> Result<Option<Vec<f32>>> {
+    let expected_width = expected_dimension
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| Error::internal("vector dimension overflow"))?;
     let row = conn
         .query_row(
-            "SELECT dim, vector FROM vector_cache
-                 WHERE model_id = ?1 AND chunk_hash = ?2",
-            params![model_id, chunk_hash],
+            SELECT_VECTOR,
+            params![model_id, chunk_hash, expected_width],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
         .optional()
@@ -509,6 +704,11 @@ fn lookup(
     let Some((dim, bytes)) = row else {
         return Ok(None);
     };
+    if let Some(expected) = expected_dimension
+        && !valid_vector_blob(expected, &bytes)
+    {
+        return Ok(None);
+    }
     let used_at = access.next_use();
     conn.execute(
         "UPDATE vector_cache SET used_at = ?3
@@ -521,17 +721,64 @@ fn lookup(
     Ok(Some(decode_vector(dim, &bytes)?))
 }
 
+fn write_vector(
+    conn: &Connection,
+    model: &str,
+    hash: &str,
+    vector: &[f32],
+    used_at: i64,
+) -> Result<()> {
+    if vector.is_empty() {
+        return Err(Error::internal("refusing to cache an empty vector"));
+    }
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let dim =
+        i64::try_from(vector.len()).map_err(|_| Error::internal("vector dim does not fit i64"))?;
+    conn.execute(
+        "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(model_id, chunk_hash) DO UPDATE SET
+             dim = excluded.dim, vector = excluded.vector, used_at = excluded.used_at",
+        params![model, hash, dim, bytes, used_at],
+    )
+    .map_err(|err| Error::internal_with_source("store vector", err))?;
+    Ok(())
+}
+
+fn vector_cache_size(conn: &Connection) -> Result<(u64, u64)> {
+    let (count, bytes): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) FROM vector_cache",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|err| Error::internal_with_source("measure vector cache", err))?;
+    Ok((
+        u64::try_from(count).unwrap_or(u64::MAX),
+        u64::try_from(bytes).unwrap_or(u64::MAX),
+    ))
+}
+
 fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) -> Result<()> {
+    evict_with_capacity(
+        conn,
+        limits,
+        warned_over_budget,
+        WriteCapacity::AllowPinnedOverflow,
+    )
+}
+
+fn evict_with_capacity(
+    conn: &Connection,
+    limits: CacheLimits,
+    warned_over_budget: &mut bool,
+    capacity: WriteCapacity,
+) -> Result<()> {
     loop {
-        let (count, bytes): (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(vector)), 0) FROM vector_cache",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|err| Error::internal_with_source("measure vector cache", err))?;
-        let count = u64::try_from(count).unwrap_or(u64::MAX);
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let (count, bytes) = vector_cache_size(conn)?;
         if count <= limits.max_entries && bytes <= limits.max_bytes {
             *warned_over_budget = false;
             return Ok(());
@@ -566,6 +813,13 @@ fn evict(conn: &Connection, limits: CacheLimits, warned_over_budget: &mut bool) 
                 // Expired leases may have freed rows in this round; recheck
                 // before giving up (Delta 0.3, FR-9 diagnostics).
                 continue;
+            }
+            if capacity == WriteCapacity::RequireFit {
+                return Err(Error::Admission {
+                    message:
+                        "active and prepared vectors cannot fit together in the configured cache"
+                            .into(),
+                });
             }
             if !*warned_over_budget {
                 *warned_over_budget = true;
@@ -691,6 +945,16 @@ fn now_secs() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+fn valid_vector_blob(dim: usize, blob: &[u8]) -> bool {
+    dim > 0
+        && dim.checked_mul(4) == Some(blob.len())
+        && blob
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|value| f32::from_le_bytes(*value).is_finite())
 }
 
 fn decode_vector(dim: usize, bytes: &[u8]) -> Result<Vec<f32>> {

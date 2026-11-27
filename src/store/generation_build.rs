@@ -2,7 +2,8 @@
 
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fd_lock::RwLock;
 use rusqlite::{Connection, OpenFlags, params};
@@ -42,6 +43,7 @@ use interrupted::InterruptedBase;
 
 mod publication;
 pub use publication::publish_lexical_generation;
+pub(crate) use publication::{CatalogCommit, CatalogHead, LexicalCommit};
 
 mod recovery;
 mod retirement;
@@ -109,7 +111,7 @@ fn prepare_lexical_generation_with_space(
     config: &Config,
     available_space: impl FnOnce(&Path) -> io::Result<u64>,
 ) -> Result<PreparedLexicalGeneration> {
-    prepare_and_then(
+    Ok(prepare_lexical_pair(
         cache,
         BuildInputs {
             request,
@@ -119,54 +121,160 @@ fn prepare_lexical_generation_with_space(
         },
         available_space,
         BuildPurpose::Maintenance,
-        |pair| Ok(pair.publication.staged),
-    )
+    )?
+    .staged)
 }
 
-/// A staged pair under its project's preparation lease.
-pub(crate) struct PreparedLexicalPublication<'a> {
-    publication: publication::StagedPublication<'a>,
+struct StagedLexicalPair {
+    cache: PathBuf,
+    project_dir: PathBuf,
+    request: LexicalBuildRequest,
+    staged: PreparedLexicalGeneration,
+    limits: InspectionLimits,
+    access: CatalogAccess,
     outcome: crate::index::outcome::IndexOutcome,
+    _preparation: ExclusiveFileLease,
 }
 
-impl PreparedLexicalPublication<'_> {
+/// Owns an inactive pair and its preparation lease after the native build
+/// closes its SQLite and Tantivy handles.
+pub(crate) struct PreparedLexicalPublication {
+    pair: StagedLexicalPair,
+    settings: Resolved<DbSettings>,
+    config: Arc<Config>,
+}
+
+impl PreparedLexicalPublication {
     pub(crate) const fn outcome(&self) -> &crate::index::outcome::IndexOutcome {
-        &self.outcome
+        &self.pair.outcome
+    }
+
+    /// Read the selected metadata that supplied the stage's validated base.
+    /// Interrupted pairs cannot supply a readable base.
+    pub(crate) fn with_base_metadata<T>(
+        &self,
+        project: &Project,
+        read: impl FnOnce(&Db, Option<&super::project_index::LocalMetadata>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let pair = &self.pair;
+        let Some(base) = pair.request.base else {
+            return Ok(None);
+        };
+        if matches!(pair.access, CatalogAccess::Repair(_)) {
+            return Ok(None);
+        }
+        let db = open_index_registry(&pair.cache, &self.settings, pair.request.epoch)?;
+        let result =
+            super::project_index::with_catalog_pair(&db, project, |registry, local, index| {
+                if index.generation_id() != base.generation_id
+                    || index.content_revision() != base.content_revision
+                {
+                    return Err(admission(
+                        "generation base changed before vector protection",
+                    ));
+                }
+                read(
+                    local.as_ref().map_or(registry, |local| &local.db),
+                    local.as_ref(),
+                )
+            })?;
+        db.close()?;
+        Ok(Some(result))
+    }
+
+    /// Read inactive metadata without lending a connection to the caller.
+    pub(crate) fn with_metadata<T>(&self, read: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
+        let staged = self.pair.staged;
+        let dir = self
+            .pair
+            .project_dir
+            .join("generations")
+            .join(staged.generation_id.to_string());
+        let metadata = publication::open_local_metadata(&dir, &self.settings, self.pair.limits)?;
+        let revision = registry_inspect::local_revision(
+            metadata.connection(),
+            staged.project_id,
+            staged.generation_id,
+        )
+        .map_err(|reason| {
+            admission(format!(
+                "prepared chunk metadata is unavailable ({reason:?})"
+            ))
+        })?;
+        if revision.content_revision != staged.content_revision || revision.manifest.is_some() {
+            return Err(admission(
+                "prepared chunk metadata changed before embedding",
+            ));
+        }
+        read(&metadata)
     }
 
     pub(crate) fn publish(
         self,
         finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
     ) -> Result<job::JobStats> {
-        publication::publish_prepared(self.publication, finalize)?;
-        Ok(self.outcome.stats)
+        self.publish_with_embedding(None, finalize)
+            .map(|(stats, _)| stats)
+    }
+
+    pub(crate) fn publish_with_embedding(
+        self,
+        embedding_recipe: Option<crate::vector_cache::EmbeddingRecipe>,
+        finalize: impl FnOnce(publication::LexicalCommit<'_>) -> Result<ObservedProjectIndex>,
+    ) -> Result<(job::JobStats, ObservedProjectIndex)> {
+        let pair = self.pair;
+        let published = publication::publish_prepared(
+            publication::StagedPublication {
+                cache: &pair.cache,
+                project_dir: &pair.project_dir,
+                request: pair.request,
+                staged: pair.staged,
+                settings: &self.settings,
+                limits: pair.limits,
+                config: &self.config,
+                embedding_recipe,
+                access: pair.access,
+            },
+            finalize,
+        )?;
+        recovery::reclaim_index_pairs(
+            &pair.cache,
+            &pair.project_dir,
+            pair.request,
+            &self.settings,
+            pair.limits,
+        );
+        Ok((pair.outcome.stats, published))
     }
 }
 
-pub(crate) fn with_prepared_lexical_generation<T>(
+pub(crate) fn prepare_operational_lexical_generation(
     cache: &Path,
     build: OperationalBuild,
     settings: &Resolved<DbSettings>,
     limits: InspectionLimits,
-    config: &Config,
+    config: Arc<Config>,
     capture: &mut job::CaptureBudget<'_>,
-    complete: impl FnOnce(PreparedLexicalPublication<'_>) -> Result<T>,
-) -> Result<T> {
-    prepare_and_then(
+) -> Result<PreparedLexicalPublication> {
+    let pair = prepare_lexical_pair(
         cache,
         BuildInputs {
             request: build.request,
             settings,
             limits,
-            config,
+            config: &config,
         },
         native_fs::available_space,
         BuildPurpose::DirectIndex {
             capture,
             interrupted: build.interrupted,
         },
-        complete,
-    )
+    )?;
+    Ok(PreparedLexicalPublication {
+        pair,
+        settings: settings.clone(),
+        config,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -206,13 +314,12 @@ impl BuildPurpose<'_, '_> {
     }
 }
 
-fn prepare_and_then<T>(
+fn prepare_lexical_pair(
     cache: &Path,
     inputs: BuildInputs<'_>,
     available_space: impl FnOnce(&Path) -> io::Result<u64>,
     purpose: BuildPurpose<'_, '_>,
-    complete: impl FnOnce(PreparedLexicalPublication<'_>) -> Result<T>,
-) -> Result<T> {
+) -> Result<StagedLexicalPair> {
     let BuildInputs {
         request,
         settings,
@@ -249,74 +356,65 @@ fn prepare_and_then<T>(
     let project_dir = project_directory(&cache, project.id);
     ensure_directory(&cache.join("projects"))?;
     ensure_directory(&project_dir)?;
-    with_preparation_lease(&project_dir, || {
-        let direct = access != CatalogAccess::Stopped;
-        let capture = match purpose {
-            BuildPurpose::Maintenance => None,
-            BuildPurpose::DirectIndex { capture, .. } => {
-                capture.operation.check()?;
-                // The preparation lease excludes an active builder. Reclaim
-                // only this command's old attempt, under its own reader lease.
-                recovery::discard_index_attempt(&cache, &project_dir, request, settings, limits)?;
-                recovery::reclaim_index_pairs(&cache, &project_dir, request, settings, limits);
-                capture.operation.check()?;
-                Some(capture)
-            }
-        };
-        // Keep the coordination path available if reservation commits
-        // before the generation directory or its intent are created.
-        #[cfg(unix)]
-        for directory in [&project_dir, &cache.join("projects"), &cache] {
-            recovery::sync_directory(directory)?;
-        }
-        let generations = project_dir.join("generations");
-        ensure_directory(&generations)?;
-        let base_lease = lifecycle::lease_path(&cache, project.id);
-        let generation = lifecycle::with_read_lock(
-            open_coordination_file(&base_lease, request.base.is_none())?,
-            &base_lease,
-            || {
-                verify_base(&cache, request, settings, limits, access)?;
-                reserve(
-                    &cache,
-                    inputs,
-                    &project,
-                    access,
-                    reservation,
-                    &generations,
-                    available_space,
-                )
-            },
-        )?;
-        // The base lease ends before any index or merge work. Publication will
-        // require a new freshness check under its own writer authority.
-
-        let (staged, outcome) = build_reserved_pair(
-            &project_dir,
-            &generations,
-            &project,
-            generation,
-            inputs,
-            pair_budget,
-            capture,
-        )?;
-        let result = complete(PreparedLexicalPublication {
-            publication: publication::StagedPublication {
-                cache: &cache,
-                project_dir: &project_dir,
-                request,
-                staged,
-                settings,
-                limits,
-                config,
-                access,
-            },
-            outcome,
-        })?;
-        if direct {
+    let preparation = acquire_preparation_lease(&project_dir)?;
+    let capture = match purpose {
+        BuildPurpose::Maintenance => None,
+        BuildPurpose::DirectIndex { capture, .. } => {
+            capture.operation.check()?;
+            // The preparation lease excludes an active builder. Reclaim
+            // only this command's old attempt, under its own reader lease.
+            recovery::discard_index_attempt(&cache, &project_dir, request, settings, limits)?;
             recovery::reclaim_index_pairs(&cache, &project_dir, request, settings, limits);
+            capture.operation.check()?;
+            Some(capture)
         }
-        Ok(result)
+    };
+    // Keep the coordination path available if reservation commits
+    // before the generation directory or its intent are created.
+    #[cfg(unix)]
+    for directory in [&project_dir, &cache.join("projects"), &cache] {
+        recovery::sync_directory(directory)?;
+    }
+    let generations = project_dir.join("generations");
+    ensure_directory(&generations)?;
+    let base_lease = lifecycle::lease_path(&cache, project.id);
+    let generation = lifecycle::with_read_lock(
+        open_coordination_file(&base_lease, request.base.is_none())?,
+        &base_lease,
+        || {
+            verify_base(&cache, request, settings, limits, access)?;
+            reserve(
+                &cache,
+                inputs,
+                &project,
+                access,
+                reservation,
+                &generations,
+                available_space,
+            )
+        },
+    )?;
+    // The base lease ends before any index or merge work. Publication will
+    // require a new freshness check under its own writer authority.
+
+    let (staged, outcome) = build_reserved_pair(
+        &project_dir,
+        &generations,
+        &project,
+        generation,
+        inputs,
+        pair_budget,
+        capture,
+    )?;
+    Ok(StagedLexicalPair {
+        cache,
+        project_dir,
+        request,
+        staged,
+        limits,
+        access,
+        outcome,
+        _preparation: preparation,
     })
 }
 
@@ -370,16 +468,22 @@ fn build_reserved_pair(
 }
 
 fn with_preparation_lease<T>(project_dir: &Path, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _guard = acquire_preparation_lease(project_dir)?;
+    run()
+}
+
+pub(super) fn acquire_preparation_lease(project_dir: &Path) -> Result<ExclusiveFileLease> {
     let lock_path = project_dir.join(".prepare.lock");
-    let mut lock = RwLock::new(open_coordination_file(&lock_path, true)?);
-    let _guard = lock.try_write().map_err(|error| {
+    ExclusiveFileLease::try_acquire(open_coordination_file(&lock_path, true)?).map_err(|error| {
         if error.kind() == io::ErrorKind::WouldBlock {
-            admission("another builder holds the project preparation lease")
+            Error::Project {
+                message: "another writer holds the project preparation lease".into(),
+                instruction: Some("wait for the running index to finish".into()),
+            }
         } else {
             Error::internal_with_source("lock project generation preparation", error)
         }
-    })?;
-    run()
+    })
 }
 
 fn probe_project(

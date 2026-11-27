@@ -23,17 +23,20 @@ use crate::hybrid::ann::{self, AnnIndex};
 use crate::hybrid::ann_settings::AnnBuildSettings;
 #[cfg(test)]
 use crate::hybrid::ann_store;
-use crate::hybrid::ann_store::{ANN_FORMAT_VERSION, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore};
+use crate::hybrid::ann_store::{
+    ANN_FORMAT_VERSION, AnnArtifact, AnnKey, AnnSlotAccess, AnnSlotPin, AnnStore,
+};
 use crate::hybrid::dense_metadata::DenseMetadata;
 use crate::hybrid::dense_settings::{DenseSettings, DenseSpec, QueryCacheSettings};
 use crate::hybrid::flight::{Flights, WorkResult};
 use crate::hybrid::meta::{AnnOutcome, AnnState};
 use crate::hybrid::work::Cancellation;
 use crate::store::Db;
+use crate::store::project_index::ProjectIndex;
 use crate::store::repo;
 #[cfg(test)]
 use crate::vector_cache::VectorCache;
-use crate::vector_cache::{CacheLimits, VectorCacheSource, VectorStore};
+use crate::vector_cache::{CacheLimits, EmbeddingRecipe, VectorCacheSource, VectorStore};
 
 #[cfg(test)]
 #[path = "query_flight_tests.rs"]
@@ -275,6 +278,7 @@ pub struct DenseIndex {
     generation: i64,
     model_id: String,
     rows: Vec<(u64, Arc<[f32]>)>,
+    reusable: bool,
 }
 
 impl DenseIndex {
@@ -411,11 +415,28 @@ impl DenseCacheLimits {
 /// One cached project entry.
 struct Entry {
     state: DenseRows,
-    generation: i64,
+    index: ProjectIndex,
     model_id: String,
     ann_build: AnnBuildSettings,
     last_used: u64,
     bytes: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OutcomeBinding {
+    index: ProjectIndex,
+    embedding: EmbeddingRecipe,
+    ann_build: AnnBuildSettings,
+}
+
+struct RecordedOutcome {
+    binding: Option<OutcomeBinding>,
+    outcome: AnnOutcome,
+}
+
+pub(crate) struct AnnDiagnostics {
+    pub(crate) outcome: Option<AnnOutcome>,
+    pub(crate) resident: Option<(usize, u64)>,
 }
 
 struct CachedDigest {
@@ -423,7 +444,7 @@ struct CachedDigest {
     last_used: u64,
 }
 
-type DigestCache = HashMap<(i64, i64), CachedDigest>;
+type DigestCache = HashMap<ProjectIndex, CachedDigest>;
 
 /// Charge for a build or cold ANN load until the working set is dropped or
 /// transfers to a resident entry. Acquired under the entries lock and released
@@ -453,8 +474,7 @@ impl Drop for BuildReservation {
 
 /// Everything a background ANN build needs (design §8).
 struct BuildJob {
-    project_id: i64,
-    generation: i64,
+    index: ProjectIndex,
     model_id: String,
     rows: Vec<(u64, Arc<[f32]>)>,
     hashes: Arc<Vec<(u64, String)>>,
@@ -639,11 +659,27 @@ pub struct DenseRequest<'a> {
     pub model_id: &'a str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct BoundDenseRequest<'a> {
+    pub(crate) cache_root: &'a Path,
+    pub(crate) index: ProjectIndex,
+    pub(crate) model_id: &'a str,
+}
+
+impl<'a> DenseRequest<'a> {
+    fn bind(self) -> Result<BoundDenseRequest<'a>> {
+        Ok(BoundDenseRequest {
+            cache_root: self.cache_root,
+            index: ProjectIndex::legacy(self.project_id, self.generation)?,
+            model_id: self.model_id,
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ColdKey {
     root: PathBuf,
-    project_id: i64,
-    generation: i64,
+    index: ProjectIndex,
     model_id: String,
     ann_build: AnnBuildSettings,
 }
@@ -684,7 +720,7 @@ pub struct DenseCache {
     digests: Arc<Mutex<DigestCache>>,
     vector_cache_limits: Arc<Mutex<HashMap<i64, u64>>>,
     vector_store: Option<VectorStore>,
-    outcomes: Arc<Mutex<HashMap<i64, AnnOutcome>>>,
+    outcomes: Arc<Mutex<HashMap<i64, RecordedOutcome>>>,
     query_cache: Arc<Mutex<QueryCache>>,
     clock: Arc<AtomicU64>,
     origin_activity: Option<Arc<crate::daemon::request::Activity>>,
@@ -918,35 +954,98 @@ impl DenseCache {
     /// Records what the ANN tier did for the last search of `project_id`
     /// (FR-6). One record per project; the oldest is dropped at the project cap.
     pub fn record_outcome(&self, project_id: i64, state: AnnState, reason: Option<&'static str>) {
+        self.record(project_id, None, state, reason);
+    }
+
+    pub(crate) fn record_bound_outcome(
+        &self,
+        index: ProjectIndex,
+        model_id: &str,
+        state: AnnState,
+        reason: Option<&'static str>,
+    ) {
+        let binding = index.catalog_generation().map(|_| OutcomeBinding {
+            index,
+            embedding: EmbeddingRecipe::for_model(model_id),
+            ann_build: self.ann_build,
+        });
+        self.record(index.project_id(), binding, state, reason);
+    }
+
+    fn record(
+        &self,
+        project_id: i64,
+        binding: Option<OutcomeBinding>,
+        state: AnnState,
+        reason: Option<&'static str>,
+    ) {
         let outcome = AnnOutcome {
             state,
             reason,
             at: std::time::Instant::now(),
         };
         let mut outcomes = self.lock_outcomes();
+        if let Some(current) = outcomes.get(&project_id).and_then(|record| record.binding)
+            && binding.is_some_and(|candidate| current.index.is_after(candidate.index))
+        {
+            return;
+        }
         if outcomes.len() >= self.limits.max_projects
             && !outcomes.contains_key(&project_id)
-            && let Some((oldest, _)) = outcomes
+            && let Some(oldest) = outcomes
                 .iter()
-                .min_by_key(|(_, record)| record.at)
-                .map(|(id, record)| (*id, *record))
+                .min_by_key(|(_, record)| record.outcome.at)
+                .map(|(id, _)| *id)
         {
             outcomes.remove(&oldest);
         }
-        outcomes.insert(project_id, outcome);
+        outcomes.insert(project_id, RecordedOutcome { binding, outcome });
     }
 
     /// Last recorded ANN outcome for `project_id`, if any.
     #[must_use]
     pub fn outcome(&self, project_id: i64) -> Option<AnnOutcome> {
-        self.lock_outcomes().get(&project_id).copied()
+        self.lock_outcomes()
+            .get(&project_id)
+            .map(|record| record.outcome)
     }
 
     /// Resident ANN size for `project_id`: `(vectors, estimated_bytes)`.
     #[must_use]
     pub fn ann_snapshot(&self, project_id: i64) -> Option<(usize, u64)> {
         let entries = self.lock_entries();
-        match &entries.get(&project_id)?.state {
+        Self::ann_size(&entries.get(&project_id)?.state)
+    }
+
+    pub(crate) fn ann_diagnostics_for(
+        &self,
+        index: ProjectIndex,
+        model_id: &str,
+        ann_build: AnnBuildSettings,
+    ) -> AnnDiagnostics {
+        let project_id = index.project_id();
+        let expected = OutcomeBinding {
+            index,
+            embedding: EmbeddingRecipe::for_model(model_id),
+            ann_build,
+        };
+        let outcome = self
+            .lock_outcomes()
+            .get(&project_id)
+            .filter(|record| record.binding == Some(expected))
+            .map(|record| record.outcome);
+        let resident = self
+            .lock_entries()
+            .get(&project_id)
+            .filter(|entry| {
+                entry.index == index && entry.model_id == model_id && entry.ann_build == ann_build
+            })
+            .and_then(|entry| Self::ann_size(&entry.state));
+        AnnDiagnostics { outcome, resident }
+    }
+
+    fn ann_size(state: &DenseRows) -> Option<(usize, u64)> {
+        match state {
             DenseRows::Ann(ann) => Some((
                 ann.count(),
                 u64::try_from(ann.estimated_bytes()).unwrap_or(u64::MAX),
@@ -1165,7 +1264,7 @@ impl DenseCache {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn lock_outcomes(&self) -> std::sync::MutexGuard<'_, HashMap<i64, AnnOutcome>> {
+    fn lock_outcomes(&self) -> std::sync::MutexGuard<'_, HashMap<i64, RecordedOutcome>> {
         self.outcomes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -1175,11 +1274,10 @@ impl DenseCache {
 
     /// Digest of the current chunk set for `(project, generation)`, computed
     /// once and reused until the generation changes (design §8).
-    fn digest_for(&self, project_id: i64, generation: i64, chunks: &[(u64, String)]) -> String {
-        let key = (project_id, generation);
+    fn digest_for(&self, index: ProjectIndex, chunks: &[(u64, String)]) -> String {
         {
             let mut digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(cached) = digests.get_mut(&key) {
+            if let Some(cached) = digests.get_mut(&index) {
                 cached.last_used = self.tick();
                 return cached.digest.clone();
             }
@@ -1188,14 +1286,10 @@ impl DenseCache {
         let mut digests = self.digests.lock().unwrap_or_else(PoisonError::into_inner);
         // An older lookup may finish after a newer generation. Return its
         // digest to that caller without retaining retired history.
-        if self.limits.max_projects == 0
-            || digests
-                .keys()
-                .any(|(project, newer)| *project == project_id && *newer > generation)
-        {
+        if self.limits.max_projects == 0 || digests.keys().any(|newer| newer.is_after(index)) {
             return digest;
         }
-        digests.retain(|(project, _), _| *project != project_id);
+        digests.retain(|cached, _| cached.project_id() != index.project_id());
         if digests.len() >= self.limits.max_projects
             && let Some(oldest) = digests
                 .iter()
@@ -1205,7 +1299,7 @@ impl DenseCache {
             digests.remove(&oldest);
         }
         digests.insert(
-            key,
+            index,
             CachedDigest {
                 digest: digest.clone(),
                 last_used: self.tick(),
@@ -1262,6 +1356,16 @@ impl DenseCache {
         load: impl FnOnce() -> Result<DenseMetadata>,
         admit: impl Fn() -> Result<Guard>,
     ) -> Result<DenseRows> {
+        self.get_bound_with_metadata_admitted(request.bind()?, cancellation, load, admit)
+    }
+
+    pub(crate) fn get_bound_with_metadata_admitted<Guard>(
+        &self,
+        request: BoundDenseRequest<'_>,
+        cancellation: &Cancellation,
+        load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
+    ) -> Result<DenseRows> {
         self.access(request, cancellation, Lookup::Get, load, admit, None)
     }
 
@@ -1283,10 +1387,10 @@ impl DenseCache {
         Ok(root)
     }
 
-    fn cached_rows(&self, request: DenseRequest<'_>, lookup: Lookup) -> Option<DenseRows> {
+    fn cached_rows(&self, request: BoundDenseRequest<'_>, lookup: Lookup) -> Option<DenseRows> {
         let mut entries = self.lock_entries();
-        let entry = entries.get_mut(&request.project_id)?;
-        if entry.generation != request.generation
+        let entry = entries.get_mut(&request.index.project_id())?;
+        if entry.index != request.index
             || entry.model_id != request.model_id
             || entry.ann_build != self.ann_build
         {
@@ -1298,14 +1402,15 @@ impl DenseCache {
         let ready = match &entry.state {
             DenseRows::Ann(_) | DenseRows::Building(_) => true,
             DenseRows::Failed(failed) => failed.failed_at.elapsed() < self.limits.build_backoff,
-            DenseRows::Ready(_) | DenseRows::TooLarge(_) => matches!(lookup, Lookup::Get),
+            DenseRows::Ready(index) => index.reusable && matches!(lookup, Lookup::Get),
+            DenseRows::TooLarge(_) => matches!(lookup, Lookup::Get),
         };
         ready.then(|| entry.state.clone())
     }
 
     fn access<Guard>(
         &self,
-        request: DenseRequest<'_>,
+        request: BoundDenseRequest<'_>,
         cancellation: &Cancellation,
         lookup: Lookup,
         load: impl FnOnce() -> Result<DenseMetadata>,
@@ -1323,8 +1428,7 @@ impl DenseCache {
         }
         let key = ColdKey {
             root: root.clone(),
-            project_id: request.project_id,
-            generation: request.generation,
+            index: request.index,
             model_id: request.model_id.to_owned(),
             ann_build: self.ann_build,
         };
@@ -1339,8 +1443,7 @@ impl DenseCache {
                 let metadata = load()?;
                 interest.check()?;
                 if self.root_identity(metadata.cache_root())? != root
-                    || metadata.project_id() != request.project_id
-                    || metadata.generation() != request.generation
+                    || metadata.index() != request.index
                 {
                     return Err(Error::Admission {
                         message: "dense metadata snapshot does not match the requested identity"
@@ -1366,22 +1469,20 @@ impl DenseCache {
     /// Full lookup path: exact rows, ANN load or background build.
     fn resolve(
         &self,
-        request: DenseRequest<'_>,
+        request: BoundDenseRequest<'_>,
         chunks: Vec<(u64, String)>,
         check: &impl Fn() -> WorkResult<()>,
         job_pin: Option<crate::vector_cache::JobPinAuthority>,
     ) -> WorkResult<DenseRows> {
         check()?;
-        let DenseRequest {
-            project_id,
-            generation,
-            model_id,
-            ..
+        let BoundDenseRequest {
+            index, model_id, ..
         } = request;
-        let digest = self.digest_for(project_id, generation, &chunks);
+        let project_id = index.project_id();
+        let digest = self.digest_for(index, &chunks);
         check()?;
         if chunks.len() > self.limits.max_vectors {
-            return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
+            return Ok(self.stash_too_large(index, model_id, chunks));
         }
         let dim_hint = model_dim(model_id);
         // Refuse to materialise exact rows we already know exceed the byte
@@ -1395,17 +1496,12 @@ impl DenseCache {
         {
             let exact_bytes = u64::try_from(exact_bytes).unwrap_or(u64::MAX);
             if exact_bytes > self.limits.max_bytes {
-                return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
+                return Ok(self.stash_too_large(index, model_id, chunks));
             }
             if exact_bytes.saturating_add(self.active_build_bytes.load(AtomicOrdering::Acquire))
                 > self.limits.max_bytes
             {
-                return Ok(self.stream_transient(
-                    project_id,
-                    generation,
-                    model_id,
-                    Arc::new(chunks),
-                ));
+                return Ok(self.stream_transient(index, model_id, Arc::new(chunks)));
             }
         }
         // Cold start must not read every vector just to discover that a valid
@@ -1421,23 +1517,18 @@ impl DenseCache {
         {
             let key = ann_key(
                 project_id,
-                generation,
+                index.content_revision(),
                 model_id,
                 dim,
                 chunks.len(),
                 digest.clone(),
             );
             check()?;
-            match self.load_ann(&key, 0, check, || {})? {
+            match self.load_ann(&key, index, 0, check, || {})? {
                 AnnLoad::Missing => {}
                 AnnLoad::Retained(state) => return Ok(state),
                 AnnLoad::Deferred => {
-                    return Ok(self.stream_transient(
-                        project_id,
-                        generation,
-                        model_id,
-                        Arc::new(chunks),
-                    ));
+                    return Ok(self.stream_transient(index, model_id, Arc::new(chunks)));
                 }
             }
         }
@@ -1454,32 +1545,35 @@ impl DenseCache {
                 self.build_admission(&entries, project_id, peak) == BuildAdmission::WorkerPressure
             };
             if busy {
-                return Ok(self.stream_transient(
-                    project_id,
-                    generation,
-                    model_id,
-                    Arc::new(chunks),
-                ));
+                return Ok(self.stream_transient(index, model_id, Arc::new(chunks)));
             }
         }
         let input = self.load_rows(request, chunks, digest)?;
         check()?;
-        self.resolve_rows_checked(project_id, generation, model_id, input, check, job_pin)
+        self.resolve_rows_checked(index, model_id, input, check, job_pin)
     }
 
     fn load_rows(
         &self,
-        request: DenseRequest<'_>,
+        request: BoundDenseRequest<'_>,
         chunks: Vec<(u64, String)>,
         digest: String,
     ) -> Result<DenseInput> {
         let mut cache = self
-            .vector_source(request.project_id)
+            .vector_source(request.index.project_id())
             .connect(request.cache_root)?;
         let mut rows = Vec::with_capacity(chunks.len());
         let mut full_coverage = true;
+        let dimension = request
+            .index
+            .catalog_generation()
+            .and_then(|_| model_dim(request.model_id));
         for (chunk_id, hash) in &chunks {
-            match cache.get(request.model_id, hash)? {
+            let vector = match dimension {
+                Some(dimension) => cache.get_for_dimension(request.model_id, hash, dimension)?,
+                None => cache.get(request.model_id, hash)?,
+            };
+            match vector {
                 Some(vector) => rows.push((*chunk_id, Arc::from(vector))),
                 None => full_coverage = false,
             }
@@ -1506,6 +1600,7 @@ impl DenseCache {
     fn load_ann(
         &self,
         key: &AnnKey,
+        index: ProjectIndex,
         exact_bytes: u64,
         check: &impl Fn() -> WorkResult<()>,
         before_publish: impl FnOnce(),
@@ -1513,10 +1608,11 @@ impl DenseCache {
         let Some(store) = &self.store else {
             return Ok(AnnLoad::Missing);
         };
-        let Some(pin) = store.pin_slot(key, self.ann_build, AnnSlotAccess::Read) else {
+        let artifact = AnnArtifact::for_index(key, index);
+        let Some(pin) = store.pin_slot(artifact, self.ann_build, AnnSlotAccess::Read) else {
             return Ok(AnnLoad::Deferred);
         };
-        let Ok(Some(slot)) = store.load_with_settings(key, self.ann_build) else {
+        let Some(slot) = store.load_artifact(artifact, self.ann_build) else {
             return Ok(AnnLoad::Missing);
         };
         check()?;
@@ -1550,13 +1646,7 @@ impl DenseCache {
                 before_publish();
                 let state = DenseRows::Ann(Arc::new(ann.with_disk_pin(pin)));
                 Ok(self
-                    .stash_with_reservation(
-                        key.project_id,
-                        key.generation,
-                        &key.model_id,
-                        state,
-                        Some(&mut reservation),
-                    )
+                    .stash_with_reservation(index, &key.model_id, state, Some(&mut reservation))
                     .map_or(AnnLoad::Deferred, AnnLoad::Retained))
             }
             Err(err) => {
@@ -1569,13 +1659,13 @@ impl DenseCache {
     /// ANN/exact decision for already-loaded rows.
     fn resolve_rows_checked(
         &self,
-        project_id: i64,
-        generation: i64,
+        index: ProjectIndex,
         model_id: &str,
         input: DenseInput,
         check: &impl Fn() -> WorkResult<()>,
         job_pin: Option<crate::vector_cache::JobPinAuthority>,
     ) -> WorkResult<DenseRows> {
+        let project_id = index.project_id();
         let DenseInput {
             chunks,
             digest,
@@ -1593,7 +1683,7 @@ impl DenseCache {
         let (in_backoff, admission) = {
             let entries = self.lock_entries();
             let in_backoff = matches!(entries.get(&project_id), Some(entry)
-                if entry.generation == generation
+                if entry.index == index
                     && entry.model_id == model_id
                     && entry.ann_build == self.ann_build
                     && matches!(&entry.state, DenseRows::Failed(failed) if failed.failed_at.elapsed() < self.limits.build_backoff));
@@ -1613,33 +1703,39 @@ impl DenseCache {
         check()?;
         if !seek_ann {
             if exact_bytes > self.limits.max_bytes {
-                return Ok(self.stash_too_large(project_id, generation, model_id, chunks));
+                return Ok(self.stash_too_large(index, model_id, chunks));
             }
-            return Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)));
+            // Partial catalog coverage still needs resident budget admission,
+            // but the next lookup must be allowed to see repaired vectors.
+            let reusable = full_coverage || index.catalog_generation().is_none();
+            return Ok(self.stash_ready(index, model_id, rows, Arc::new(chunks), reusable));
         }
         if admission == BuildAdmission::WorkerPressure {
             // Keep the fallback transient so lookup retries after the worker retires.
-            return Ok(self.stream_transient(project_id, generation, model_id, Arc::new(chunks)));
+            return Ok(self.stream_transient(index, model_id, Arc::new(chunks)));
         }
-        let key = ann_key(project_id, generation, model_id, dim, chunks.len(), digest);
-        match self.load_ann(&key, exact_bytes, check, || drop(std::mem::take(&mut rows)))? {
+        let key = ann_key(
+            project_id,
+            index.content_revision(),
+            model_id,
+            dim,
+            chunks.len(),
+            digest,
+        );
+        match self.load_ann(&key, index, exact_bytes, check, || {
+            drop(std::mem::take(&mut rows));
+        })? {
             AnnLoad::Missing => {}
             AnnLoad::Retained(state) => return Ok(state),
             AnnLoad::Deferred => {
-                return Ok(self.stream_transient(
-                    project_id,
-                    generation,
-                    model_id,
-                    Arc::new(chunks),
-                ));
+                return Ok(self.stream_transient(index, model_id, Arc::new(chunks)));
             }
         }
         check()?;
         if self.policy == AnnPolicy::BuildOrLoad {
             let hashes = Arc::new(chunks);
             Ok(self.start_build(BuildJob {
-                project_id,
-                generation,
+                index,
                 model_id: model_id.to_owned(),
                 rows,
                 hashes,
@@ -1650,7 +1746,7 @@ impl DenseCache {
                 activity: self.origin_activity.clone(),
             }))
         } else {
-            Ok(self.stash_ready(project_id, generation, model_id, rows, Arc::new(chunks)))
+            Ok(self.stash_ready(index, model_id, rows, Arc::new(chunks), true))
         }
     }
 
@@ -1662,56 +1758,55 @@ impl DenseCache {
         model_id: &str,
         input: DenseInput,
     ) -> DenseRows {
-        self.resolve_rows_checked(project_id, generation, model_id, input, &|| Ok(()), None)
+        let index = legacy_index(project_id, generation);
+        self.resolve_rows_checked(index, model_id, input, &|| Ok(()), None)
             .expect("unchecked test lookup cannot be abandoned")
     }
 
     fn stash_ready(
         &self,
-        project_id: i64,
-        generation: i64,
+        index: ProjectIndex,
         model_id: &str,
         rows: Vec<(u64, Arc<[f32]>)>,
         hashes: Arc<Vec<(u64, String)>>,
+        reusable: bool,
     ) -> DenseRows {
         let state = DenseRows::Ready(Arc::new(DenseIndex {
-            generation,
+            generation: index.content_revision(),
             model_id: model_id.to_owned(),
             rows,
+            reusable,
         }));
-        if let Some(retained) = self.stash(project_id, generation, model_id, state.clone()) {
+        if let Some(retained) = self.stash(index, model_id, state.clone()) {
             retained
         } else {
             // Live builds cannot be reclaimed by evicting their entries. Do
             // not keep another full row copy when their reservation fills
             // the cap; exact streaming needs only the chunk hashes.
             drop(state);
-            self.stream_transient(project_id, generation, model_id, hashes)
+            self.stream_transient(index, model_id, hashes)
         }
     }
 
     fn stash_too_large(
         &self,
-        project_id: i64,
-        generation: i64,
+        index: ProjectIndex,
         model_id: &str,
         chunks: Vec<(u64, String)>,
     ) -> DenseRows {
         let state = DenseRows::TooLarge(Arc::new(chunks));
-        self.stash(project_id, generation, model_id, state.clone())
-            .unwrap_or(state)
+        self.stash(index, model_id, state.clone()).unwrap_or(state)
     }
 
     /// A lookup already decided that reservation pressure prevents retention.
     /// Keep that decision even if its last worker finishes before this call.
     fn stream_transient(
         &self,
-        project_id: i64,
-        generation: i64,
+        index: ProjectIndex,
         model_id: &str,
         hashes: Arc<Vec<(u64, String)>>,
     ) -> DenseRows {
-        self.existing_ann(&mut self.lock_entries(), project_id, generation, model_id)
+        self.existing_ann(&mut self.lock_entries(), index, model_id)
             .unwrap_or(DenseRows::TooLarge(hashes))
     }
 
@@ -1720,6 +1815,8 @@ impl DenseCache {
     /// (design §8).
     #[allow(clippy::needless_pass_by_value)]
     fn start_build(&self, job: BuildJob) -> DenseRows {
+        let index = job.index;
+        let project_id = index.project_id();
         let building = Arc::new(BuildingAnn {
             hashes: Arc::clone(&job.hashes),
             bytes: job.building_bytes,
@@ -1727,22 +1824,16 @@ impl DenseCache {
         {
             let mut entries = self.lock_entries();
             if entries
-                .get(&job.project_id)
-                .is_some_and(|entry| entry.generation > job.generation)
+                .get(&project_id)
+                .is_some_and(|entry| entry.index.is_after(index))
             {
                 // This request can finish from its own rows, but it cannot
                 // replace the newer slot or start an obsolete ANN worker.
                 drop(entries);
-                return self.stash_ready(
-                    job.project_id,
-                    job.generation,
-                    &job.model_id,
-                    job.rows,
-                    job.hashes,
-                );
+                return self.stash_ready(index, &job.model_id, job.rows, job.hashes, true);
             }
-            if let Some(entry) = entries.get(&job.project_id)
-                && entry.generation == job.generation
+            if let Some(entry) = entries.get(&project_id)
+                && entry.index == index
                 && entry.model_id == job.model_id
                 && entry.ann_build == self.ann_build
                 && matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
@@ -1753,57 +1844,43 @@ impl DenseCache {
             // two concurrent lookups must not both insert a reservation from a
             // stale snapshot (Delta 0.3.2; the resolve_rows check is a fast
             // path only). Falling back to exact keeps the cap honest.
-            match self.build_admission(&entries, job.project_id, job.building_bytes) {
+            match self.build_admission(&entries, project_id, job.building_bytes) {
                 BuildAdmission::Allowed => {}
                 BuildAdmission::WorkerPressure => {
                     drop(entries);
-                    return self.stream_transient(
-                        job.project_id,
-                        job.generation,
-                        &job.model_id,
-                        job.hashes,
-                    );
+                    return self.stream_transient(index, &job.model_id, job.hashes);
                 }
                 BuildAdmission::ResidentLimit => {
                     drop(entries);
-                    return self.stash_ready(
-                        job.project_id,
-                        job.generation,
-                        &job.model_id,
-                        job.rows,
-                        job.hashes,
-                    );
+                    return self.stash_ready(index, &job.model_id, job.rows, job.hashes, true);
                 }
             }
-            let Some(pin) = self
-                .store
-                .as_ref()
-                .and_then(|store| store.pin_slot(&job.key, self.ann_build, AnnSlotAccess::Build))
-            else {
+            let Some(pin) = self.store.as_ref().and_then(|store| {
+                store.pin_slot(
+                    AnnArtifact::for_index(&job.key, index),
+                    self.ann_build,
+                    AnnSlotAccess::Build,
+                )
+            }) else {
                 drop(entries);
-                return self.stream_transient(
-                    job.project_id,
-                    job.generation,
-                    &job.model_id,
-                    job.hashes,
-                );
+                return self.stream_transient(index, &job.model_id, job.hashes);
             };
             let reservation =
                 BuildReservation::new(Arc::clone(&self.active_build_bytes), job.building_bytes);
             let cache = Arc::new(self.snapshot());
             let entry = Entry {
                 state: DenseRows::Building(Arc::clone(&building)),
-                generation: job.generation,
+                index,
                 model_id: job.model_id.clone(),
                 ann_build: self.ann_build,
                 last_used: self.tick(),
                 bytes: building.bytes,
             };
-            if entries.len() >= self.limits.max_projects && !entries.contains_key(&job.project_id) {
-                self.evict_oldest(&mut entries, Some(job.project_id));
+            if entries.len() >= self.limits.max_projects && !entries.contains_key(&project_id) {
+                self.evict_oldest(&mut entries, Some(project_id));
             }
-            entries.insert(job.project_id, entry);
-            self.enforce_byte_cap(&mut entries, job.project_id);
+            entries.insert(project_id, entry);
+            self.enforce_byte_cap(&mut entries, project_id);
             let build_state = Arc::clone(&building);
             let spawn = move || build_in_background(cache, job, build_state, reservation, pin);
             let worker = std::thread::spawn(spawn);
@@ -1865,6 +1942,16 @@ impl DenseCache {
         load: impl FnOnce() -> Result<DenseMetadata>,
         admit: impl Fn() -> Result<Guard>,
     ) -> Result<()> {
+        self.warm_bound_with_metadata_admitted(request.bind()?, cancellation, load, admit)
+    }
+
+    pub(crate) fn warm_bound_with_metadata_admitted<Guard>(
+        &self,
+        request: BoundDenseRequest<'_>,
+        cancellation: &Cancellation,
+        load: impl FnOnce() -> Result<DenseMetadata>,
+        admit: impl Fn() -> Result<Guard>,
+    ) -> Result<()> {
         self.access(request, cancellation, Lookup::Warm, load, admit, None)
             .map(|_| ())
     }
@@ -1901,8 +1988,15 @@ impl DenseCache {
         pin.renew()?;
         // Existing ready/build/follower/pressure paths drop this authority here
         // on the admitted caller. A newly started build moves it into BuildJob.
-        self.access(request, cancellation, Lookup::Warm, load, admit, Some(pin))
-            .map(|_| ())
+        self.access(
+            request.bind()?,
+            cancellation,
+            Lookup::Warm,
+            load,
+            admit,
+            Some(pin),
+        )
+        .map(|_| ())
     }
 
     fn vector_cache_max_bytes(&self, project_id: i64) -> u64 {
@@ -1955,7 +2049,7 @@ impl DenseCache {
         self.digests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|(project, _), _| *project != project_id);
+            .retain(|index, _| index.project_id() != project_id);
     }
 
     /// Best-effort cleanup of old ANN generations (design §9).
@@ -1987,24 +2081,18 @@ impl DenseCache {
         Ok(())
     }
 
-    fn stash(
-        &self,
-        project_id: i64,
-        generation: i64,
-        model_id: &str,
-        state: DenseRows,
-    ) -> Option<DenseRows> {
-        self.stash_with_reservation(project_id, generation, model_id, state, None)
+    fn stash(&self, index: ProjectIndex, model_id: &str, state: DenseRows) -> Option<DenseRows> {
+        self.stash_with_reservation(index, model_id, state, None)
     }
 
     fn stash_with_reservation(
         &self,
-        project_id: i64,
-        generation: i64,
+        index: ProjectIndex,
         model_id: &str,
         state: DenseRows,
         reservation: Option<&mut BuildReservation>,
     ) -> Option<DenseRows> {
+        let project_id = index.project_id();
         if self.limits.max_projects == 0 {
             return None;
         }
@@ -2022,7 +2110,7 @@ impl DenseCache {
         let mut entries = self.lock_entries();
         // Another cold lookup may have installed/published this build after
         // get's fast-path miss. Never retire it with exact fallback or reload.
-        if let Some(existing) = self.existing_ann(&mut entries, project_id, generation, model_id) {
+        if let Some(existing) = self.existing_ann(&mut entries, index, model_id) {
             return Some(existing);
         }
         let active = self
@@ -2041,7 +2129,7 @@ impl DenseCache {
         }
         if entries
             .get(&project_id)
-            .is_some_and(|entry| entry.generation > generation)
+            .is_some_and(|entry| entry.index.is_after(index))
         {
             // Preserve the caller's coherent generation without publishing it
             // over newer state. Existing memory/disabled-cache refusal above
@@ -2050,7 +2138,7 @@ impl DenseCache {
         }
         let entry = Entry {
             state,
-            generation,
+            index,
             model_id: model_id.to_owned(),
             ann_build: self.ann_build,
             last_used: self.tick(),
@@ -2070,12 +2158,11 @@ impl DenseCache {
     fn existing_ann(
         &self,
         entries: &mut HashMap<i64, Entry>,
-        project_id: i64,
-        generation: i64,
+        index: ProjectIndex,
         model_id: &str,
     ) -> Option<DenseRows> {
-        let entry = entries.get_mut(&project_id)?;
-        if entry.generation != generation
+        let entry = entries.get_mut(&index.project_id())?;
+        if entry.index != index
             || entry.model_id != model_id
             || entry.ann_build != self.ann_build
             || !matches!(entry.state, DenseRows::Building(_) | DenseRows::Ann(_))
@@ -2137,7 +2224,7 @@ impl DenseCache {
         self.digests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|(project, _), _| *project != oldest);
+            .retain(|index, _| index.project_id() != oldest);
         entries.remove(&oldest);
         Some(oldest)
     }
@@ -2307,7 +2394,7 @@ fn build_in_background(
     let building = building_input;
     let job = job_input;
     let BuildJob {
-        project_id,
+        index,
         key,
         rows,
         hashes,
@@ -2315,6 +2402,7 @@ fn build_in_background(
         mut job_pin,
         ..
     } = job;
+    let project_id = index.project_id();
     let Some(store) = &cache.store else {
         return;
     };
@@ -2333,7 +2421,7 @@ fn build_in_background(
     // 41043371926, `cold_start_loads_persisted_ann_without_vectors_db`).
     let result: Result<(Arc<AnnIndex>, u64)> = catch_unwind(AssertUnwindSafe(|| {
         let ann = AnnIndex::build_with_settings(&rows, dim, cache.ann_build)?;
-        let slot = ann.dump(store, &key)?;
+        let slot = ann.dump_artifact(store, AnnArtifact::for_index(&key, index))?;
         // Loading must not hold the source rows, the built graph and the loaded
         // copy at once: on the heap-reload path that would add a third full
         // copy (~1.86 GiB at 75k x 2048) on top of the admitted peak.
@@ -2365,7 +2453,7 @@ fn build_in_background(
     match result {
         Ok((loaded, published_bytes)) => {
             if let Some(entry) = entries.get_mut(&project_id)
-                && entry.generation == key.generation
+                && entry.index == index
                 && entry.model_id == key.model_id
                 && entry.ann_build == cache.ann_build
                 && matches!(&entry.state, DenseRows::Building(current) if Arc::ptr_eq(current, &building))
@@ -2381,7 +2469,7 @@ fn build_in_background(
         Err(err) => {
             eprintln!("warning: ann build failed for project {project_id}: {err}; keeping exact");
             if let Some(entry) = entries.get_mut(&project_id)
-                && entry.generation == key.generation
+                && entry.index == index
                 && entry.model_id == key.model_id
                 && entry.ann_build == cache.ann_build
                 && matches!(&entry.state, DenseRows::Building(current) if Arc::ptr_eq(current, &building))
@@ -2397,9 +2485,21 @@ fn build_in_background(
     }
     cache.enforce_byte_cap(&mut entries, project_id);
     drop(entries);
-    if dump_completed && let Err(err) = cache.cleanup_ann_disk() {
-        eprintln!("warning: ann disk cleanup after build failed: {err}");
+    if dump_completed {
+        if index.generation_id().is_some()
+            && let Err(err) = cache.cleanup(project_id)
+        {
+            eprintln!("warning: ann generation cleanup after build failed: {err}");
+        }
+        if let Err(err) = cache.cleanup_ann_disk() {
+            eprintln!("warning: ann disk cleanup after build failed: {err}");
+        }
     }
+}
+
+#[cfg(test)]
+fn legacy_index(project: i64, generation: i64) -> ProjectIndex {
+    ProjectIndex::legacy(project, generation).expect("valid fixture index")
 }
 
 #[cfg(test)]
@@ -2617,24 +2717,25 @@ mod tests {
     fn stale_generation_cannot_replace_cached_rows() {
         let cache = DenseCache::new();
         let current = cache.stash_ready(
-            1,
-            2,
+            legacy_index(1, 2),
             "model",
             wide_rows(1, 3),
             Arc::new(vec![(0, "new".to_owned())]),
+            true,
         );
         let old = cache.stash_ready(
-            1,
-            1,
+            legacy_index(1, 1),
             "model",
             wide_rows(1, 3),
             Arc::new(vec![(0, "old".to_owned())]),
+            true,
         );
         assert!(matches!(old, DenseRows::Ready(ref rows) if rows.generation() == 1));
         let entries = cache.lock_entries();
         let entry = entries.get(&1).expect("current entry");
         assert_eq!(
-            entry.generation, 2,
+            entry.index.content_revision(),
+            2,
             "late old completion cannot overwrite newer state"
         );
         match (&current, &entry.state) {
@@ -2651,10 +2752,24 @@ mod tests {
         let paused = PausedBuilds::new(root.path(), 1, 1);
         let cache = &paused.cache;
         let input = small_input();
-        cache.stash_ready(1, 2, "model", input.rows, Arc::new(input.chunks));
+        cache.stash_ready(
+            legacy_index(1, 2),
+            "model",
+            input.rows,
+            Arc::new(input.chunks),
+            true,
+        );
         let old = cache.resolve_rows(1, 1, "model", small_input());
         assert!(matches!(old, DenseRows::Ready(ref rows) if rows.generation() == 1));
-        assert_eq!(cache.lock_entries().get(&1).expect("current").generation, 2);
+        assert_eq!(
+            cache
+                .lock_entries()
+                .get(&1)
+                .expect("current")
+                .index
+                .content_revision(),
+            2
+        );
         assert!(
             cache.test_workers.lock().expect("workers").is_empty(),
             "obsolete generation must not spawn a worker"
@@ -3023,10 +3138,9 @@ mod tests {
         // installed its worker. The pre-scan budget check now sees that worker.
         let second = dense
             .resolve(
-                DenseRequest {
+                BoundDenseRequest {
                     cache_root: db.cache_root(),
-                    project_id,
-                    generation,
+                    index: legacy_index(project_id, generation),
                     model_id: embedder.model_id(),
                 },
                 DenseMetadata::capture(&db, project_id)
@@ -3094,7 +3208,9 @@ mod tests {
         paused.finish();
         let hashes = Arc::new(vec![(1, "hash".to_owned())]);
         assert!(matches!(
-            paused.cache.stream_transient(2, 1, "m@d128", hashes),
+            paused
+                .cache
+                .stream_transient(legacy_index(2, 1), "m@d128", hashes),
             DenseRows::TooLarge(_)
         ));
         assert!(!paused.cache.lock_entries().contains_key(&2));
@@ -3120,8 +3236,7 @@ mod tests {
             ..
         } = small_input();
         let job = BuildJob {
-            project_id: 1,
-            generation: 1,
+            index: legacy_index(1, 1),
             model_id: "m@d128".to_owned(),
             key: ann_key(1, 1, "m@d128", dim, chunks.len(), digest),
             building_bytes: u64::try_from(
@@ -3685,23 +3800,23 @@ mod tests {
         for generation in 1..=64 {
             let chunks = vec![(1, format!("hash-{generation}"))];
             assert_eq!(
-                dense.digest_for(1, generation, &chunks),
+                dense.digest_for(legacy_index(1, generation), &chunks),
                 crate::hybrid::ann_store::chunk_set_digest(&chunks)
             );
             let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
             assert_eq!(digests.len(), 1, "old generations must be discarded");
-            assert!(digests.contains_key(&(1, generation)));
+            assert!(digests.contains_key(&legacy_index(1, generation)));
         }
         // Work that started before a newer generation must still get its own
         // correct digest without repopulating the cache's retired history.
         let old = vec![(1, "retired-hash".to_owned())];
         assert_eq!(
-            dense.digest_for(1, 1, &old),
+            dense.digest_for(legacy_index(1, 1), &old),
             crate::hybrid::ann_store::chunk_set_digest(&old)
         );
         let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(digests.len(), 1);
-        assert!(digests.contains_key(&(1, 64)));
+        assert!(digests.contains_key(&legacy_index(1, 64)));
     }
 
     #[test]
@@ -3716,18 +3831,18 @@ mod tests {
             None,
         );
         let chunks = vec![(1, "hash".to_owned())];
-        dense.digest_for(1, 1, &chunks);
-        dense.digest_for(2, 1, &chunks);
-        dense.digest_for(1, 1, &chunks); // Refresh project 1's recency.
-        dense.digest_for(3, 1, &chunks);
+        dense.digest_for(legacy_index(1, 1), &chunks);
+        dense.digest_for(legacy_index(2, 1), &chunks);
+        dense.digest_for(legacy_index(1, 1), &chunks); // Refresh project 1's recency.
+        dense.digest_for(legacy_index(3, 1), &chunks);
         {
             let digests = dense.digests.lock().unwrap_or_else(PoisonError::into_inner);
             assert_eq!(digests.len(), 2);
-            assert!(digests.contains_key(&(1, 1)));
-            assert!(digests.contains_key(&(3, 1)));
+            assert!(digests.contains_key(&legacy_index(1, 1)));
+            assert!(digests.contains_key(&legacy_index(3, 1)));
         }
         for project in 4..=32 {
-            dense.digest_for(project, 1, &chunks);
+            dense.digest_for(legacy_index(project, 1), &chunks);
             assert!(
                 dense
                     .digests
@@ -3744,7 +3859,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .keys()
-                .any(|(project, _)| *project == 32)
+                .any(|index| index.project_id() == 32)
         );
     }
 
@@ -3761,7 +3876,7 @@ mod tests {
         );
         let chunks = vec![(1, "hash".to_owned())];
         assert_eq!(
-            dense.digest_for(1, 1, &chunks),
+            dense.digest_for(legacy_index(1, 1), &chunks),
             crate::hybrid::ann_store::chunk_set_digest(&chunks)
         );
         assert_eq!(
@@ -3786,8 +3901,8 @@ mod tests {
             dense.resolve_rows(2, 1, "m@d128", small_input()),
             DenseRows::Ready(_)
         ));
-        dense.digest_for(1, 1, &[(1, "first".to_owned())]);
-        dense.digest_for(2, 1, &[(2, "other".to_owned())]);
+        dense.digest_for(legacy_index(1, 1), &[(1, "first".to_owned())]);
+        dense.digest_for(legacy_index(2, 1), &[(2, "other".to_owned())]);
         let marker = dense
             .store
             .as_ref()
@@ -3807,8 +3922,8 @@ mod tests {
         assert!(!dense.lock_entries().contains_key(&1));
         assert!(dense.lock_entries().contains_key(&2));
         let digests = dense.digests.lock().expect("digests");
-        assert!(!digests.contains_key(&(1, 1)));
-        assert!(digests.contains_key(&(2, 1)));
+        assert!(!digests.contains_key(&legacy_index(1, 1)));
+        assert!(digests.contains_key(&legacy_index(2, 1)));
         drop(digests);
         assert!(
             marker.exists(),

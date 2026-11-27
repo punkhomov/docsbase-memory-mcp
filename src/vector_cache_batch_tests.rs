@@ -15,7 +15,7 @@ fn vector_page_streams_in_order_with_model_isolation_and_missing_rows() {
     ];
     let mut observed = Vec::new();
     vectors
-        .visit_page("model", &hashes, |id, vector| {
+        .visit_page("model", &hashes, None, |id, vector| {
             observed.push((id, vector.map(<[f32]>::to_vec)));
             Ok(())
         })
@@ -50,7 +50,7 @@ fn failed_vector_page_rolls_back_touches_and_allows_retry() {
         .query_row("SELECT used_at FROM vector_cache", [], |row| row.get(0))
         .expect("before");
     let hashes = vec![(1, "a".to_owned())];
-    let result = vectors.visit_page("model", &hashes, |_, _| {
+    let result = vectors.visit_page("model", &hashes, None, |_, _| {
         Err(Error::Admission {
             message: "cancelled test page".to_owned(),
         })
@@ -63,7 +63,7 @@ fn failed_vector_page_rolls_back_touches_and_allows_retry() {
         .expect("after");
     assert_eq!(before, after);
     vectors
-        .visit_page("model", &hashes, |_, vector| {
+        .visit_page("model", &hashes, None, |_, vector| {
             assert_eq!(vector, Some([1.0, 0.0].as_slice()));
             Ok(())
         })

@@ -310,6 +310,35 @@ fn retire_local_pair(env: &Env) -> (ObservedProjectIndex, ObservedProjectIndex) 
 
 #[test]
 #[cfg(unix)]
+fn catalog_embedding_recipe_distinguishes_legacy_from_a_local_lexical_seal() {
+    use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
+    const MODEL: &str = "test/legacy-embedding@d3@l2";
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let registry = Db::open_readonly_for_search(env.cache.path(), &settings).unwrap();
+    let project = registry::project_by_id(&registry, env.request().project_id)
+        .unwrap()
+        .unwrap();
+    with_catalog_pair(&registry, &project, |_, local, _| {
+        assert!(local.is_none());
+        require_catalog_embedding(local.as_ref(), MODEL)
+    })
+    .unwrap();
+
+    let local_pair = RevisablePair::new();
+    let error = with_catalog_pair(&local_pair.registry, &local_pair.project, |_, local, _| {
+        assert!(local.is_some());
+        require_catalog_embedding(local.as_ref(), MODEL)
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("published embedding recipe"),
+        "{error}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn catalog_reader_holds_the_pair_lease_and_distinguishes_equal_revisions() {
     use crate::store::project_index::with_catalog_pair;
 
@@ -516,17 +545,34 @@ impl RevisablePair {
             operation: &operation,
             observed: None,
         };
+        let config = std::sync::Arc::new(self.config.clone());
         let rebuild = crate::index::generation_job::GenerationJob {
             cache: self.env.cache.path(),
             project: &self.project,
             epoch: self.request.epoch,
             settings: &self.policy,
-            config: &self.config,
+            config: &config,
         };
-        rebuild.prepare(&mut capture, |pair| {
-            pair.publish(|commit| commit.commit(admit))
-        })
+        rebuild
+            .stage(&mut capture)?
+            .publish(|commit| commit.commit(admit))
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_watcher_retries_while_full_preparation_owns_the_active_base() {
+    let pair = RevisablePair::new();
+    pair.write_source("# Cherry\n\nCherryupdatedbatch\n");
+    let project_dir = project_directory(pair.env.cache.path(), pair.project.id);
+    let preparation = acquire_preparation_lease(&project_dir).unwrap();
+    let error = pair.apply().unwrap_err();
+    assert!(lifecycle::is_lease_conflict(&error), "{error}");
+    assert_eq!(pair.search("Applemigration").unwrap().1, 1);
+    assert_eq!(pair.search("Cherryupdatedbatch").unwrap().1, 0);
+    drop(preparation);
+    assert_eq!(pair.apply().unwrap().docs, 1);
+    assert_eq!(pair.search("Cherryupdatedbatch").unwrap().1, 1);
 }
 
 #[test]
@@ -935,12 +981,18 @@ fn publication_resumes_a_durable_seal_left_before_the_catalog_commit() {
     let dir = env.generation(staged.generation_id);
     let written = super::publication::verify_and_seal(
         &dir,
-        request,
-        staged,
+        &super::publication::StagedPublication {
+            cache: env.cache.path(),
+            project_dir: dir.parent().unwrap().parent().unwrap(),
+            request,
+            staged,
+            settings: &settings,
+            limits: limits(),
+            config: &config,
+            embedding_recipe: None,
+            access: CatalogAccess::Stopped,
+        },
         &project,
-        &settings,
-        limits(),
-        &config,
     )
     .unwrap();
     assert_eq!(env.catalog_state(), (1, Some("building".into())));
@@ -2049,11 +2101,90 @@ mod unix {
 
 #[test]
 #[cfg(unix)]
+fn a_private_catalog_pair_retains_preparation_until_a_later_worker_publishes() {
+    let env = Env::new();
+    let settings = settings::standalone().unwrap();
+    let config = std::sync::Arc::new(Config {
+        ignores: vec!["ignored.md".into()],
+        ..Config::default()
+    });
+    fs::write(env.source.path().join("guide.md"), "changedstagecontent").unwrap();
+    fs::write(env.source.path().join("ignored.md"), "ignoredstagecontent").unwrap();
+    let budget = crate::search::budget::PayloadBudget::new(config.search.clone()).unwrap();
+    let operation = crate::search::operation::SearchOperation::new(
+        budget.settings(),
+        std::time::Instant::now(),
+        crate::hybrid::work::Cancellation::new(),
+    )
+    .unwrap();
+    let account = budget.reserve(0).unwrap();
+    let mut capture = job::CaptureBudget {
+        account: &account,
+        operation: &operation,
+        observed: None,
+    };
+    let build = OperationalBuild {
+        request: env.request(),
+        interrupted: None,
+    };
+    let mut prepare = || {
+        prepare_operational_lexical_generation(
+            env.cache.path(),
+            build,
+            &settings,
+            limits(),
+            config.clone(),
+            &mut capture,
+        )
+    };
+
+    let pair = prepare().unwrap();
+    let error = prepare()
+        .err()
+        .expect("the prepared owner still holds the lease");
+    assert!(
+        error
+            .to_string()
+            .contains("holds the project preparation lease")
+    );
+    assert_eq!(env.catalog_state(), (1, Some("building".into())));
+    env.assert_legacy_search();
+
+    let stats = std::thread::spawn(move || pair.publish(|commit| commit.commit(|| Ok(()))))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats.docs, 1);
+    assert_eq!(env.catalog_state(), (2, Some("active".into())));
+    let project_dir = project_directory(env.cache.path(), build.request.project_id);
+    assert!(acquire_preparation_lease(&project_dir).is_ok());
+
+    let registry = Db::open_readonly_for_search(env.cache.path(), &settings).unwrap();
+    let project = registry::project_by_id(&registry, build.request.project_id)
+        .unwrap()
+        .unwrap();
+    crate::store::project_index::with_catalog_pair(&registry, &project, |_, local, index| {
+        assert_eq!(index.generation_id(), Some(2));
+        let local = local.unwrap();
+        assert_eq!(
+            local.index_recipe,
+            crate::index::outcome::recipe_id(&config)
+        );
+        let reader = ReadIndex::open(&local.tantivy_dir()?)?;
+        assert_eq!(reader.search("changedstagecontent", 2)?.len(), 1);
+        assert_eq!(reader.search("ignoredstagecontent", 2)?.len(), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
 fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
     let env = Env::new();
     let request = env.request();
     let settings = settings::standalone().unwrap();
-    let config = Config::default();
+    let config = std::sync::Arc::new(Config::default());
     std::fs::write(
         env.source.path().join("guide.md"),
         "# Peach\n\nPeachmigration\n",
@@ -2072,7 +2203,7 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         operation: &operation,
         observed: None,
     };
-    let result = with_prepared_lexical_generation(
+    let result = prepare_operational_lexical_generation(
         env.cache.path(),
         OperationalBuild {
             request,
@@ -2080,27 +2211,27 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         },
         &settings,
         limits(),
-        &config,
+        config.clone(),
         &mut capture,
-        |pair| {
-            pair.publish(|commit| {
-                commit.commit(|| {
-                    let contender = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
-                    contender.busy_timeout(std::time::Duration::ZERO).unwrap();
-                    let error = contender.execute_batch("BEGIN IMMEDIATE").unwrap_err();
-                    assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+    )
+    .and_then(|pair| {
+        pair.publish(|commit| {
+            commit.commit(|| {
+                let contender = Connection::open(env.cache.path().join(DB_FILE)).unwrap();
+                contender.busy_timeout(std::time::Duration::ZERO).unwrap();
+                let error = contender.execute_batch("BEGIN IMMEDIATE").unwrap_err();
+                assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
                         if code.code == rusqlite::ErrorCode::DatabaseBusy));
-                    Err(admission("late refusal"))
-                })
+                Err(admission("late refusal"))
             })
-        },
-    );
+        })
+    });
     assert!(result.unwrap_err().to_string().contains("late refusal"));
     assert!(env.generation(2).join("seal.json").exists());
     assert_eq!(env.catalog_state(), (1, Some("building".into())));
     env.assert_legacy_search();
 
-    let stats = with_prepared_lexical_generation(
+    let stats = prepare_operational_lexical_generation(
         env.cache.path(),
         OperationalBuild {
             request,
@@ -2108,10 +2239,10 @@ fn direct_index_refusal_at_the_commit_boundary_preserves_the_old_pair() {
         },
         &settings,
         limits(),
-        &config,
+        config.clone(),
         &mut capture,
-        |pair| pair.publish(|commit| commit.commit(|| Ok(()))),
     )
+    .and_then(|pair| pair.publish(|commit| commit.commit(|| Ok(()))))
     .unwrap();
     assert_eq!(stats.docs, 1);
     assert_eq!(env.catalog_state(), (3, None));

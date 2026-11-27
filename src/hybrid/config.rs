@@ -74,6 +74,13 @@ pub struct HybridCfg {
 }
 
 impl HybridCfg {
+    pub(crate) fn embedding_model_key(&self) -> Option<String> {
+        self.embedding
+            .as_ref()
+            .filter(|_| self.enabled)
+            .map(embedding_model_id)
+    }
+
     /// Both stages with defaults; the `hybrid = true` shorthand (FR-13).
     #[must_use]
     pub fn enabled_with_defaults() -> Self {

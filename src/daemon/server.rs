@@ -28,17 +28,27 @@ use crate::hybrid::HybridStages;
 use crate::hybrid::config::{Ranking, embedding_model_id};
 #[cfg(test)]
 use crate::hybrid::dense::DenseCacheLimits;
-use crate::hybrid::dense::{AnnPolicy, DenseCache, DenseRequest};
+#[cfg(test)]
+use crate::hybrid::dense::DenseRequest;
+use crate::hybrid::dense::{AnnPolicy, BoundDenseRequest, DenseCache};
 use crate::hybrid::jobs as hybrid_jobs;
+use crate::hybrid::meta::AnnState;
 use crate::ipc::framing::{Frame, FrameReader};
 use crate::ipc::protocol::{self, PROTOCOL_VERSION, Request, Response};
 use crate::platform::transport::Stream;
 use crate::search::metadata::MetadataSource;
 use crate::store::Db;
 use crate::store::migrations;
-use crate::store::project_index::ProjectIndex;
 use crate::store::read_pool::ReadPool;
+use crate::store::registry_inspect::ObservedProjectIndex;
 use crate::store::settings::{DbSettings, ReadPoolSettings};
+use crate::store::{
+    generation_build::CatalogHead,
+    models::Project,
+    project_index::{
+        CatalogProjectInfo, ProjectIndex, catalog_project_info, require_catalog_embedding,
+    },
+};
 use crate::watch::Watchers;
 
 #[cfg(test)]
@@ -128,12 +138,14 @@ pub(crate) struct ProjectCell {
     reload: Mutex<()>,
     preparation: RwLock<()>,
     catalog_sync: crate::index::async_job::catalog_sync::Slot,
+    catalog_backfill: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
+    watch_candidate: crate::watch::WatchConfigCandidate,
     #[cfg(test)]
     preparation_observer: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl ProjectCell {
-    fn search_preparation_lease<'a>(
+    pub(crate) fn search_preparation_lease<'a>(
         &'a self,
         expected: &Arc<Config>,
         stages: &Arc<HybridStages>,
@@ -176,29 +188,131 @@ impl ProjectCell {
             .preparation
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        let current = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.check_config_revision(expected)?;
+        Ok(preparation)
+    }
+
+    fn check_config_revision(&self, expected: &Arc<Config>) -> Result<()> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.unverified.is_some() {
+            return Err(Shared::catalog_config_busy());
+        }
+        if !state
             .config
             .as_ref()
-            .is_some_and(|config| Arc::ptr_eq(config, expected));
-        if !current {
+            .is_some_and(|config| Arc::ptr_eq(config, expected))
+        {
             return Err(Error::Project {
                 message: "project configuration changed before search preparation".to_owned(),
                 instruction: Some("retry search".to_owned()),
             });
         }
-        Ok(preparation)
+        Ok(())
+    }
+
+    pub(crate) fn begin_watch_config_transition(
+        &self,
+        config: Arc<Config>,
+    ) -> crate::watch::WatchConfigTransition {
+        crate::watch::WatchConfigTransition::begin(&self.watch_candidate, config)
+    }
+
+    pub(crate) fn try_catalog_reload(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        match self.reload.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(Shared::catalog_config_busy()),
+        }
+    }
+
+    pub(crate) fn catalog_publication(
+        &self,
+        expected: &Arc<Config>,
+    ) -> Result<CatalogConfigPublication<'_>> {
+        let publication = self.try_catalog_publication()?;
+        self.check_config_revision(expected)?;
+        Ok(publication)
+    }
+
+    fn try_catalog_publication(&self) -> Result<CatalogConfigPublication<'_>> {
+        // Match the lock order of ordinary reload and watcher installation.
+        let reload = self.try_catalog_reload()?;
+        let preparation = match self.preparation.try_write() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Shared::catalog_config_busy()),
+        };
+        Ok(CatalogConfigPublication {
+            slot: self,
+            preparation,
+            reload,
+        })
+    }
+}
+
+pub(crate) struct CatalogConfigPublication<'a> {
+    slot: &'a ProjectCell,
+    preparation: std::sync::RwLockWriteGuard<'a, ()>,
+    reload: std::sync::MutexGuard<'a, ()>,
+}
+
+impl<'a> CatalogConfigPublication<'a> {
+    /// Readers can use the new runtime while watcher installation remains
+    /// serialized with any subsequent config publication.
+    pub(crate) fn release_preparation(self) -> std::sync::MutexGuard<'a, ()> {
+        drop(self.preparation);
+        self.reload
+    }
+
+    pub(crate) fn retain_unverified(
+        &self,
+        head: CatalogHead,
+        runtime: Arc<crate::watch::WatchRuntime>,
+        watch_transition: Option<crate::watch::WatchConfigTransition>,
+    ) {
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.unverified = Some(UnverifiedRuntime {
+            head,
+            runtime,
+            _watch_transition: watch_transition,
+        });
+    }
+
+    pub(crate) fn install(&self, config: Arc<Config>, stages: Arc<HybridStages>) -> ProjectState {
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(
+            &mut *state,
+            ProjectState {
+                config: Some(config),
+                stages: None,
+                search_stages: Some(stages),
+                ..ProjectState::default()
+            },
+        )
     }
 }
 
 /// A config Arc is its revision identity. Stages always belong to that Arc.
 #[derive(Default)]
-struct ProjectState {
+pub(crate) struct ProjectState {
     config: Option<Arc<Config>>,
     stages: Option<Arc<HybridStages>>,
     search_stages: Option<Arc<HybridStages>>,
+    unverified: Option<UnverifiedRuntime>,
+}
+
+struct UnverifiedRuntime {
+    head: CatalogHead,
+    runtime: Arc<crate::watch::WatchRuntime>,
+    _watch_transition: Option<crate::watch::WatchConfigTransition>,
 }
 
 /// Explicit bootstrap ownership supplied before the daemon's first CPU/native work.
@@ -453,6 +567,7 @@ impl Shared {
                         config: Some(Arc::clone(&fixed.config)),
                         stages: Some(Arc::new(HybridStages::default())),
                         search_stages: None,
+                        ..ProjectState::default()
                     }),
                     ..ProjectCell::default()
                 }),
@@ -488,10 +603,8 @@ impl Shared {
         if let Some(jobs) = jobs {
             shared.activate_jobs(jobs)?;
         }
-        match shared.start_watchers() {
-            Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
-            Ok(_) => {}
-            Err(err) => eprintln!("warning: cannot start watchers: {err}"),
+        if shared.catalog_epoch.is_none() {
+            shared.restore_watchers();
         }
         Ok(shared)
     }
@@ -504,7 +617,11 @@ impl Shared {
         self.jobs
             .set(service)
             .map_err(|_| Error::internal("job root already activated"))?;
-        self.watchers.activate_async(Arc::downgrade(self))
+        self.watchers.activate_async(Arc::downgrade(self))?;
+        if self.catalog_epoch.is_some() {
+            self.restore_watchers();
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -591,19 +708,30 @@ impl Shared {
             .jobs
             .get()
             .ok_or_else(|| Error::internal("watcher job owner absent"))?;
+        if runtime.stages.embedder.is_some() || runtime.config.hybrid_cfg.enabled {
+            let result = self
+                .run_catalog_hybrid_watch(
+                    project,
+                    runtime,
+                    paths.clone(),
+                    &operation,
+                    activity,
+                    service,
+                )
+                .await;
+            if result.is_err() {
+                self.settle_watch_account(&paths, &operation).await?;
+            }
+            return result;
+        }
         let owner = self.clone();
         let input = crate::index::job::JobInput::Watch(paths.clone());
         let account = paths.account.clone();
         let call = operation.clone();
         let result = service
             .run_native(&self.workers, activity, &operation, move || {
-                if let Some(error) =
-                    crate::watch::injected_watch_fault(&project.canonical_root, &owner.cache)
-                {
-                    return Err(error);
-                }
+                let slot = owner.check_catalog_watch(&project, &call)?;
                 let db = owner.open_work_registry()?;
-                let slot = owner.project_slot(project.id);
                 let mut capture = crate::index::job::CaptureBudget {
                     account: &account,
                     operation: &call,
@@ -617,7 +745,13 @@ impl Shared {
                     &input,
                     Some(&mut capture),
                     || {
-                        let accepted = slot.preparation_lease(&runtime.config)?;
+                        let accepted =
+                            slot.preparation_lease(&runtime.config).map_err(|error| {
+                                Error::internal_with_source(
+                                    "retry watcher with the current catalog runtime",
+                                    error,
+                                )
+                            })?;
                         call.check()?;
                         Ok(accepted)
                     },
@@ -628,6 +762,65 @@ impl Shared {
             self.settle_watch_account(&paths, &operation).await?;
         }
         result
+    }
+
+    async fn run_catalog_hybrid_watch(
+        self: &Arc<Self>,
+        project: Project,
+        runtime: Arc<crate::watch::WatchRuntime>,
+        paths: Arc<crate::watch::WatchPayload>,
+        operation: &crate::search::operation::SearchOperation,
+        activity: Arc<Activity>,
+        service: &super::job_service::JobService,
+    ) -> Result<crate::index::job::JobStats> {
+        let shared = self.clone();
+        let captured_project = project.clone();
+        let call = operation.clone();
+        let revision = service
+            .run_native(&self.workers, activity.clone(), operation, move || {
+                shared.check_catalog_watch(&captured_project, &call)
+            })
+            .await?;
+        let context = crate::index::async_job::catalog_watch::Context {
+            cache: self.cache.clone(),
+            epoch: self
+                .catalog_epoch
+                .ok_or_else(|| Error::internal("catalog watcher has no registry epoch"))?,
+            settings: self.db_settings.clone(),
+            project,
+            revision,
+            runtime,
+            paths,
+            pin_ttl: self.dense.limits().ann_lifetimes.backfill_pin_ttl(),
+        };
+        crate::index::async_job::catalog_watch::run(
+            service,
+            &self.workers,
+            activity,
+            operation,
+            &self.payload_budget,
+            context,
+        )
+        .await
+    }
+
+    fn check_catalog_watch(
+        &self,
+        project: &Project,
+        operation: &crate::search::operation::SearchOperation,
+    ) -> Result<ProjectSlot> {
+        if let Some(error) =
+            crate::watch::injected_watch_fault(&project.canonical_root, &self.cache)
+        {
+            return Err(error);
+        }
+        operation.check()?;
+        let slot = self.project_slot(project.id);
+        self.reconcile_catalog_runtime(project.id, &slot)
+            .map_err(|error| {
+                Error::internal_with_source("retry catalog runtime verification for watcher", error)
+            })?;
+        Ok(slot)
     }
 
     async fn settle_watch_account(
@@ -731,6 +924,13 @@ impl Shared {
     pub(crate) fn watch_activity_source(&self) -> request::ActivitySource {
         self.activity.clone()
     }
+
+    pub(crate) fn watch_config_candidate(
+        &self,
+        project_id: i64,
+    ) -> crate::watch::WatchConfigCandidate {
+        self.project_slot(project_id).watch_candidate.clone()
+    }
     pub(crate) fn watch_operation(&self) -> Result<crate::search::operation::SearchOperation> {
         crate::search::operation::SearchOperation::with_timeout(
             Instant::now(),
@@ -826,6 +1026,64 @@ impl Shared {
         )
     }
 
+    fn reconcile_catalog_runtime(&self, project_id: i64, slot: &ProjectCell) -> Result<()> {
+        if self.catalog_epoch.is_none()
+            || slot
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unverified
+                .is_none()
+        {
+            return Ok(());
+        }
+        let reader = self.readers.try_acquire()?;
+        let publication = slot.try_catalog_publication()?;
+        let head = slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unverified
+            .as_ref()
+            .map(|candidate| candidate.head);
+        let Some(head) = head else {
+            return Ok(());
+        };
+        // Keep the candidate available for another retry if the registry
+        // is still unreadable. Only an exact head can adopt this runtime.
+        let selected = head.is_selected(reader.connection())?;
+        let candidate = slot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unverified
+            .take();
+        drop(reader);
+        let retired = candidate.as_ref().and_then(|candidate| {
+            selected.then(|| {
+                publication.install(
+                    candidate.runtime.config.clone(),
+                    candidate.runtime.stages.clone(),
+                )
+            })
+        });
+        let reload = publication.release_preparation();
+        if selected
+            && let Some(candidate) = &candidate
+            && let Err(error) = self.watchers.revise_with_runtime(
+                &self.cache,
+                project_id,
+                candidate.runtime.clone(),
+            )
+        {
+            eprintln!("warning: cannot revise watcher for project {project_id}: {error}");
+        }
+        drop(reload);
+        drop(retired);
+        drop(candidate);
+        Ok(())
+    }
+
     /// Resolved hybrid stages of `project`; built on first use and refreshed
     /// when the project is reopened. Feature-off + enabled hybrid is an
     /// explicit [`Error::Admission`] (FR-14) - no silent BM25-only fallback.
@@ -912,6 +1170,7 @@ impl Shared {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
         loop {
+            self.reconcile_catalog_runtime(project.id, &slot)?;
             let config = {
                 let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
                 let config = self.config_in(&mut state, project)?;
@@ -946,10 +1205,11 @@ impl Shared {
                 build(&config)
             };
             let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if !state
-                .config
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &config))
+            if state.unverified.is_some()
+                || !state
+                    .config
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &config))
             {
                 // Neither an obsolete result nor its error may escape.
                 continue;
@@ -1013,8 +1273,11 @@ impl Shared {
         {
             return Ok(());
         }
-        let db = self.db();
         let source = self.vector_source_for(project.id, &config);
+        if self.catalog_epoch.is_some() {
+            return self.schedule_catalog_backfill(project, config, stages, source, &operation);
+        }
+        let db = self.db();
         let Some(coverage) =
             hybrid_jobs::coverage_from(&db, &config.hybrid_cfg, project.id, &source)?
         else {
@@ -1094,6 +1357,68 @@ impl Shared {
         Ok(())
     }
 
+    fn schedule_catalog_backfill(
+        self: &Arc<Self>,
+        project: &Project,
+        config: Arc<Config>,
+        stages: Arc<HybridStages>,
+        source: crate::vector_cache::VectorCacheSource,
+        operation: &crate::search::operation::SearchOperation,
+    ) -> Result<()> {
+        use crate::index::async_job::catalog_backfill;
+
+        let Some(service) = self.jobs.get() else {
+            return Ok(());
+        };
+        let revision = self.project_slot(project.id);
+        let slot = revision
+            .catalog_backfill
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)));
+        let Ok(singleton) = slot.clone().try_acquire_owned() else {
+            return Ok(());
+        };
+        let detached = crate::search::operation::SearchOperation::with_timeout(
+            operation.started_at(),
+            operation.deadline().duration_since(operation.started_at()),
+            crate::hybrid::work::Cancellation::new(),
+        )?;
+        let Ok(reservation) = service.reserve(detached) else {
+            // Opening a project remains available under backfill pressure.
+            return Ok(());
+        };
+        let context = catalog_backfill::Context {
+            project: project.clone(),
+            readers: self.readers.clone(),
+            revision,
+            config,
+            stages,
+            source,
+            pin_ttl: self.dense.limits().ann_lifetimes.backfill_pin_ttl(),
+            _singleton: singleton,
+        };
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            Error::internal_with_source("background runtime owner absent", error)
+        })?;
+        let service = service.clone();
+        let shared = self.clone();
+        let activity = self.activity.track();
+        drop(runtime.spawn(async move {
+            if let Err(error) = catalog_backfill::run(
+                &service,
+                &shared.workers,
+                activity,
+                &shared.payload_budget,
+                context,
+                reservation,
+            )
+            .await
+            {
+                eprintln!("warning: automatic catalog backfill: {error}");
+            }
+        }));
+        Ok(())
+    }
+
     fn global_error(&self) -> Option<Error> {
         self.global_config_error.as_ref().map(|err| {
             Error::internal(format!(
@@ -1123,9 +1448,6 @@ impl Shared {
         if self.website.is_some() {
             crate::daemon::launch::lexical_only(&config)?;
         }
-        if self.catalog_epoch.is_some() {
-            crate::daemon::launch::catalog_lexical_only(&config)?;
-        }
         Ok(config)
     }
 
@@ -1135,6 +1457,9 @@ impl Shared {
         project: &crate::store::models::Project,
     ) -> Result<Arc<Config>> {
         self.admit_project(project)?;
+        if state.unverified.is_some() {
+            return Err(Self::catalog_config_busy());
+        }
         if let Some(config) = &state.config {
             return Ok(Arc::clone(config));
         }
@@ -1155,6 +1480,7 @@ impl Shared {
     pub fn project_config(&self, project: &crate::store::models::Project) -> Result<Arc<Config>> {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
+        self.reconcile_catalog_runtime(project.id, &slot)?;
         let mut state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.config_in(&mut state, project)
     }
@@ -1201,9 +1527,25 @@ impl Shared {
         }
         let config = self.project_config(project).ok()?;
         let slot = self.project_slot(project.id);
-        let embed_cfg = config.hybrid_cfg.embedding.as_ref()?;
-        let warm = config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf;
-        let model_id = embedding_model_id(embed_cfg);
+        let runtime = {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .config
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(current, &config))
+                .and(state.search_stages.as_ref().or(state.stages.as_ref()))
+                .cloned()
+        };
+        let (model_id, warm) = match runtime {
+            Some(stages) if self.catalog_epoch.is_some() => (
+                stages.embedder.as_ref()?.model_id().to_owned(),
+                stages.ranking == Ranking::Rrf,
+            ),
+            _ => (
+                embedding_model_id(config.hybrid_cfg.embedding.as_ref()?),
+                config.hybrid_cfg.enabled && config.hybrid_cfg.ranking == Ranking::Rrf,
+            ),
+        };
         let cache_path = self.cache.clone();
         let dense = self.dense.snapshot_with_build_settings(config.ann_build);
         let readers = Arc::clone(&self.readers);
@@ -1216,20 +1558,22 @@ impl Shared {
                     let index = {
                         let reader = readers.try_acquire()?;
                         slot.with_preparation(&config, || {
-                            lifecycle::with_project_read_lease(&cache_path, project_id, || {
-                                before_metadata(&reader, project_id, &model_id)?;
-                                tools::snapshot_info(&reader, &project, None)
-                            })
+                            ann_warm_binding(
+                                reader,
+                                &project,
+                                &cache_path,
+                                &model_id,
+                                before_metadata,
+                            )
                         })?
                     };
                     // The scalar lease is gone before entering the shared flight.
                     // Its factory has no personal query budget or outer READ gate.
                     let source = MetadataSource::Prepared(&readers);
-                    dense.warm_with_metadata_admitted(
-                        DenseRequest {
+                    dense.warm_bound_with_metadata_admitted(
+                        BoundDenseRequest {
                             cache_root: &cache_path,
-                            project_id,
-                            generation: index.content_revision(),
+                            index,
                             model_id: &model_id,
                         },
                         &crate::hybrid::work::Cancellation::new(),
@@ -1294,6 +1638,62 @@ impl Shared {
             .map(|(config, _)| config)
     }
 
+    fn stage_catalog_config(
+        &self,
+        project: &crate::store::models::Project,
+        active: &Arc<Config>,
+    ) -> Result<(Arc<Config>, Arc<HybridStages>)> {
+        let slot = self.project_slot(project.id);
+        let _reload = slot.try_catalog_reload()?;
+        slot.check_config_revision(active)?;
+        let config = self.config_for_root(&project.canonical_root)?;
+        if config == **active {
+            return self.project_runtime_for_search(project);
+        }
+        let stages = self.async_stages(&config)?;
+        catalog_stage_model(&config, &stages)?;
+        Ok((Arc::new(config), Arc::new(stages)))
+    }
+
+    fn runtime_for_config_open(
+        &self,
+        slot: &ProjectCell,
+        project: &crate::store::models::Project,
+        desired: Arc<Config>,
+        shared_catalog: bool,
+    ) -> Result<(Arc<Config>, Option<Arc<HybridStages>>)> {
+        let (current, stages) = {
+            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.unverified.is_some() {
+                return Err(Self::catalog_config_busy());
+            }
+            (
+                state.config.clone(),
+                state
+                    .search_stages
+                    .as_ref()
+                    .or(state.stages.as_ref())
+                    .cloned(),
+            )
+        };
+        if let Some(current) = current
+            && (current == desired
+                || (shared_catalog
+                    && catalog_requires_index(&current, &desired)
+                    && crate::store::project_index::catalog_needs_index_for(
+                        self.readers.try_acquire()?,
+                        project,
+                        &crate::index::outcome::recipe_id(&desired),
+                        configured_catalog_embedding(&desired),
+                    )?))
+        {
+            // Opens retain the active recipe until explicit Index can
+            // publish the required pair together with the new settings.
+            return Ok((current, stages));
+        }
+        Ok((desired, None))
+    }
+
     fn publish_project_config<F, O>(
         &self,
         project: &crate::store::models::Project,
@@ -1307,36 +1707,36 @@ impl Shared {
     {
         self.admit_project(project)?;
         let slot = self.project_slot(project.id);
+        self.reconcile_catalog_runtime(project.id, &slot)?;
         // Only same-project reloads wait for construction. Existing runtime
         // reads and unrelated projects keep their last coherent state.
         let shared_catalog = self.catalog_epoch.is_some() && self.website.is_none();
         let _reload = if shared_catalog {
-            match slot.reload.try_lock() {
-                Ok(guard) => guard,
-                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return Err(Self::catalog_config_busy()),
-            }
+            slot.try_catalog_reload()?
         } else {
             slot.reload.lock().unwrap_or_else(PoisonError::into_inner)
         };
-        let config = self.config_for_root(&project.canonical_root)?;
-        if self.website.is_some() || self.catalog_epoch.is_some() || explicit_index_db.is_some() {
-            let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(current) = &state.config
-                && let Some(stages) = state.search_stages.as_ref().or(state.stages.as_ref())
-                && current.as_ref() == &config
-            {
-                // An equal explicit Index or Website read-only bind must keep
-                // the revision that already-admitted work will publish against.
-                return Ok((Arc::clone(current), Arc::clone(stages)));
-            }
-        }
-        let config = Arc::new(config);
-        let stages = Arc::new(if self.website.is_some() {
-            HybridStages::default()
+        let config = Arc::new(self.config_for_root(&project.canonical_root)?);
+        let (config, stages) = if self.website.is_some()
+            || self.catalog_epoch.is_some()
+            || explicit_index_db.is_some()
+        {
+            self.runtime_for_config_open(&slot, project, config, shared_catalog)?
         } else {
-            build(&config)?
-        });
+            (config, None)
+        };
+        let cached = stages.is_some();
+        let stages = match stages {
+            Some(stages) => stages,
+            None if self.website.is_some() => Arc::new(HybridStages::default()),
+            None => Arc::new(build(&config)?),
+        };
+        if shared_catalog {
+            self.verify_catalog_reopen(project, &config, &stages)?;
+        }
+        if cached {
+            return Ok((config, stages));
+        }
         let watch_runtime = if self.website.is_none() {
             let source = self.vector_source_for(project.id, &config);
             source.validate_root(&self.cache)?;
@@ -1416,19 +1816,46 @@ impl Shared {
         Ok((config, stages))
     }
 
+    fn verify_catalog_reopen(
+        &self,
+        project: &Project,
+        config: &Config,
+        stages: &HybridStages,
+    ) -> Result<()> {
+        let model = catalog_stage_model(config, stages)?;
+        crate::store::project_index::require_selected_catalog_embedding(
+            self.readers.try_acquire()?,
+            project,
+            model,
+        )
+    }
+
+    fn restore_watchers(&self) {
+        match self.start_watchers() {
+            Ok(started) if started > 0 => eprintln!("watching {started} indexed project(s)"),
+            Ok(_) => {}
+            Err(err) => eprintln!("warning: cannot start watchers: {err}"),
+        }
+    }
+
     /// Starts watchers for every indexed project in the registry (daemon
     /// startup); returns how many were started.
     ///
     /// # Errors
     /// Returns [`Error::Internal`] when the registry cannot be listed.
     fn start_watchers(&self) -> Result<usize> {
-        if self.website.is_some() {
+        if self.website.is_some() || !self.watchers.enabled() {
             return Ok(0);
         }
         let projects = registry::list_projects(&self.db())?;
         let mut started = 0;
         for project in projects {
-            match self.ensure_watcher(&project) {
+            let restored = if self.catalog_epoch.is_some() {
+                self.restore_catalog_watcher(&project)
+            } else {
+                self.ensure_watcher(&project)
+            };
+            match restored {
                 Ok(true) => started += 1,
                 Ok(false) => {}
                 Err(err) => {
@@ -1437,6 +1864,22 @@ impl Shared {
             }
         }
         Ok(started)
+    }
+
+    fn restore_catalog_watcher(&self, project: &Project) -> Result<bool> {
+        let local = {
+            let reader = self.readers.try_acquire()?;
+            crate::store::project_index::local_watcher_project(&reader, project)?
+        };
+        let Some(local) = local.filter(|local| {
+            local.status == crate::store::models::ProjectStatus::Indexed
+                && registry::root_state(&local.canonical_root) != registry::RootState::Missing
+        }) else {
+            return Ok(false);
+        };
+        // Publish the matching stages before creating the native consumer.
+        self.open_project_config(&local)?;
+        Ok(self.watchers.watching(local.id))
     }
 
     /// Starts a watcher for an indexed project using its open-time config.
@@ -2578,7 +3021,15 @@ async fn start_catalog_sync(
         Err(existing) => return Ok(existing),
     };
 
-    let project_id = context.project.id;
+    let project_id = context.build.project.id;
+    let warm = (shared.website.is_none()
+        && context.build.stages.ranking == Ranking::Rrf
+        && context.build.stages.embedder.is_some())
+    .then(|| CatalogAnnWarm {
+        project: context.build.project.clone(),
+        config: context.build.config.clone(),
+        stages: context.build.stages.clone(),
+    });
     let owner = service
         .admit_with_account(
             shared.workers.clone(),
@@ -2598,23 +3049,23 @@ async fn start_catalog_sync(
             move |state| state.prepare_catalog_sync(context, &call),
         )
         .await?;
-    let status = (**status).clone();
+    let acknowledgement = (**status).clone();
+    drop(status);
     let service = service.clone();
     let shared = shared.clone();
     let run = async move {
-        let call = operation.clone();
-        let (owner, result) = service
-            .phase(
-                &shared.workers,
-                activity.clone(),
-                &operation,
-                owner,
-                move |state| state.run_catalog_sync(&call),
-            )
-            .await?;
-        drop(result);
-        drop(owner);
+        let published = crate::index::async_job::catalog_sync::execute(
+            &service,
+            &shared.workers,
+            &activity,
+            &operation,
+            owner,
+        )
+        .await?;
         finish_index_watch(&shared, project_id, &operation, &activity).await;
+        if let Some(warm) = warm {
+            warm.schedule(&shared, &service, &operation, published);
+        }
         Ok::<_, Error>(())
     };
     // The JobRoot owns the terminal envelope and native work even if the
@@ -2624,7 +3075,115 @@ async fn start_catalog_sync(
     } else {
         run.await?;
     }
-    Ok(status)
+    Ok(acknowledgement)
+}
+
+struct CatalogAnnWarm {
+    project: Project,
+    config: Arc<Config>,
+    stages: Arc<HybridStages>,
+}
+
+impl CatalogAnnWarm {
+    fn schedule(
+        self,
+        shared: &Arc<Shared>,
+        service: &super::job_service::JobService,
+        operation: &crate::search::operation::SearchOperation,
+        published: ObservedProjectIndex,
+    ) {
+        let shutdown = service.shutdown_token();
+        if shared.stopping.load(Ordering::SeqCst) || shutdown.is_cancelled() {
+            return;
+        }
+        let Ok(reservation) = shared.workers.reserve_background(operation) else {
+            return;
+        };
+        let owner = shared.clone();
+        let activity = shared.activity.track();
+        let call = operation.clone();
+        let project_id = self.project.id;
+        drop(tokio::spawn(async move {
+            let mut cancellation = request::CancelOnDrop(Some(call.cancellation().clone()));
+            let work = async {
+                let permit = owner
+                    .workers
+                    .background_reserved(&call, reservation)
+                    .await?;
+                let native_call = call.clone();
+                let native_activity = activity.clone();
+                let worker = request::spawn(Some(permit), Some(activity), move || {
+                    native_call.check()?;
+                    self.run(&owner, &native_call, native_activity, published)
+                });
+                request::run(worker, Some(&call)).await
+            };
+            let result = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                result = work => result,
+            };
+            cancellation.0 = None;
+            if let Err(error) = result {
+                eprintln!("warning: catalog ANN warm for project {project_id}: {error}");
+            }
+        }));
+    }
+
+    fn run(
+        &self,
+        shared: &Shared,
+        operation: &crate::search::operation::SearchOperation,
+        activity: Arc<Activity>,
+        published: ObservedProjectIndex,
+    ) -> Result<()> {
+        let Some(embedder) = self.stages.embedder.as_ref() else {
+            return Ok(());
+        };
+        let model = embedder.model_id();
+        let project = &self.project;
+        let slot = shared.project_slot(project.id);
+        let dense = shared
+            .dense
+            .snapshot_with_activity(activity, self.config.ann_build);
+        let admit = || slot.search_preparation_lease(&self.config, &self.stages);
+        let mut eligible = false;
+        let index = {
+            let _revision = admit()?;
+            let reader = shared.readers.try_acquire()?;
+            ann_warm_binding(reader, project, &shared.cache, model, |db, id, model| {
+                let limit = i64::try_from(dense.limits().max_vectors)
+                    .unwrap_or(i64::MAX)
+                    .saturating_add(1);
+                let count = crate::store::repo::count_chunks_up_to(db.connection(), id, limit)?;
+                eligible = usize::try_from(count)
+                    .is_ok_and(|chunks| dense.limits().ann_build_eligible_for_model(chunks, model));
+                Ok(())
+            })?
+        };
+        if index.project_id() != published.project_id
+            || index.catalog_generation() != published.epoch.zip(published.generation_id)
+            || index.content_revision() != published.content_revision
+        {
+            return Ok(());
+        }
+        if eligible {
+            operation.check()?;
+            dense.warm_bound_with_metadata_admitted(
+                BoundDenseRequest {
+                    cache_root: &shared.cache,
+                    index,
+                    model_id: model,
+                },
+                operation.cancellation(),
+                || tools::capture_dense(MetadataSource::Prepared(&shared.readers), project, index),
+                admit,
+            )?;
+        }
+        operation.check()?;
+        dense.cleanup(project.id)?;
+        dense.cleanup_ann_disk()
+    }
 }
 
 fn capture_catalog_sync(
@@ -2656,21 +3215,106 @@ fn capture_catalog_sync(
             message: "project sync is starting or retiring; retry sync".into(),
         });
     };
-    let config = if refresh {
-        shared.open_project_config(&project)?
+    let active = shared.project_config(&project)?;
+    let (config, stages) = if refresh {
+        shared.stage_catalog_config(&project, &active)?
     } else {
-        shared.project_config(&project)?
+        shared.project_runtime_for_search(&project)?
     };
-    super::launch::catalog_lexical_only(&config)?;
+    let active_model = {
+        let state = revision
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state
+            .config
+            .as_ref()
+            .filter(|current| Arc::ptr_eq(current, &active))
+            .and(state.search_stages.as_ref().or(state.stages.as_ref()))
+            .and_then(|stages| stages.embedder.as_ref())
+            .map(|embedder| embedder.model_id().to_owned())
+    };
+    let source = shared.vector_source_for(project.id, &config);
+    let refresh = if refresh {
+        source.validate_root(&shared.cache)?;
+        Some(crate::index::async_job::catalog_sync::RuntimeUpdate {
+            active,
+            watchers: Arc::clone(&shared.watchers),
+            global_config: shared.global_config.clone(),
+            global_path: shared.global_config_path.clone(),
+            watch_runtime: Arc::new(crate::watch::WatchRuntime::new(
+                Arc::clone(&config),
+                Arc::clone(&stages),
+                source.clone(),
+            )),
+        })
+    } else {
+        None
+    };
     Ok(Ok(crate::index::async_job::catalog_sync::Context {
-        cache: shared.cache.clone(),
-        epoch,
-        settings: shared.db_settings.clone(),
+        build: crate::index::async_job::catalog_sync::BuildContext {
+            cache: shared.cache.clone(),
+            epoch,
+            settings: shared.db_settings.clone(),
+            project,
+            config,
+            stages,
+            active_model,
+            source,
+            pin_ttl: shared.dense.limits().ann_lifetimes.backfill_pin_ttl(),
+        },
         revision,
-        project,
-        config,
         owner,
+        refresh,
     }))
+}
+
+fn catalog_stage_model<'a>(config: &Config, stages: &'a HybridStages) -> Result<Option<&'a str>> {
+    let model = stages.embedder.as_ref().map(|stage| stage.model_id());
+    if model != config.hybrid_cfg.embedding_model_key().as_deref() {
+        return Err(Error::internal(
+            "constructed embedding stage does not match the resolved catalog settings",
+        ));
+    }
+    Ok(model)
+}
+
+fn configured_catalog_embedding(config: &Config) -> Option<crate::vector_cache::EmbeddingRecipe> {
+    config
+        .hybrid_cfg
+        .embedding_model_key()
+        .as_deref()
+        .map(crate::vector_cache::EmbeddingRecipe::for_model)
+}
+
+fn ann_warm_binding(
+    reader: crate::store::read_pool::ReadLease<'_>,
+    project: &crate::store::models::Project,
+    cache: &Path,
+    model_id: &str,
+    before_metadata: impl FnOnce(&Db, i64, &str) -> Result<()>,
+) -> Result<ProjectIndex> {
+    if reader.has_generation_catalog() {
+        use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
+        return with_catalog_pair(reader, project, |registry, local, index| {
+            require_catalog_embedding(local.as_ref(), model_id)?;
+            before_metadata(
+                local.as_ref().map_or(&*registry, |local| &local.db),
+                project.id,
+                model_id,
+            )?;
+            Ok(index)
+        });
+    }
+    lifecycle::with_project_read_lease(cache, project.id, || {
+        before_metadata(&reader, project.id, model_id)?;
+        tools::snapshot_info(&reader, project, None)
+    })
+}
+
+fn catalog_requires_index(active: &Config, desired: &Config) -> bool {
+    crate::index::outcome::recipe_id(active) != crate::index::outcome::recipe_id(desired)
+        || configured_catalog_embedding(active) != configured_catalog_embedding(desired)
 }
 
 fn catalog_job_project(
@@ -2820,12 +3464,12 @@ fn route_metadata_tool_in(
             | "read_neighbors_at"
     ) {
         if shared.catalog_epoch.is_some() {
-            let reader = shared.readers.try_acquire()?;
             if shared.website.is_none()
                 && matches!(name, "status" | "list_projects" | "panel_projects")
             {
-                return catalog_project_views(shared, &reader, name);
+                return catalog_project_views(shared, name);
             }
+            let reader = shared.readers.try_acquire()?;
             let project = match &shared.website {
                 Some(fixed) => fixed.project.clone(),
                 None => bound_project(shared, &reader, session_id)?,
@@ -3001,41 +3645,189 @@ fn route_metadata_tool_in(
     }
 }
 
-fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<Value> {
-    use crate::store::project_index::{CatalogProjectInfo, catalog_project_info};
+struct CatalogDiagnostics {
+    ann: (AnnState, Option<&'static str>),
+    resident: Option<(usize, u64)>,
+    vectors: Option<CatalogCoverage>,
+}
+
+struct CatalogCoverage {
+    hashes: hybrid_jobs::CoverageHashes,
+    source: crate::vector_cache::VectorCacheSource,
+    model: CatalogModel,
+}
+
+struct CatalogModel {
+    key: String,
+    ranking: Ranking,
+    // Keep the charge until the model key and the owned coverage are dropped.
+    permit: crate::search::budget::PayloadPermit,
+}
+
+fn capture_catalog_model(
+    slot: &ProjectCell,
+    config: &Config,
+    budget: &crate::search::budget::PayloadBudget,
+) -> Result<Option<CatalogModel>> {
+    let state = slot.state.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(stages) = state.search_stages.as_ref().or(state.stages.as_ref()) {
+        let Some(embedder) = stages.embedder.as_ref() else {
+            return Ok(None);
+        };
+        let model = embedder.model_id();
+        let permit = budget.reserve(2 * model.len() as u64)?;
+        return Ok(Some(CatalogModel {
+            key: model.to_owned(),
+            ranking: stages.ranking,
+            permit,
+        }));
+    }
+    let Some(model) = config
+        .hybrid_cfg
+        .embedding
+        .as_ref()
+        .filter(|_| config.hybrid_cfg.enabled)
+    else {
+        return Ok(None);
+    };
+    // The canonical keys include the provider, model, numeric fields and
+    // optional local revision. Allow growth of the formatted key buffer and
+    // one SQLite binding without constructing the configured provider.
+    let key_bytes = model.provider.len() + model.model.len() + 64;
+    let permit = budget.reserve(3 * key_bytes as u64)?;
+    Ok(Some(CatalogModel {
+        key: embedding_model_id(model),
+        ranking: config.hybrid_cfg.ranking,
+        permit,
+    }))
+}
+
+impl CatalogDiagnostics {
+    fn without_vectors(state: AnnState, reason: &'static str) -> Self {
+        Self {
+            ann: (state, Some(reason)),
+            resident: None,
+            vectors: None,
+        }
+    }
+}
+
+fn catalog_project_summary(
+    shared: &Shared,
+    project: &Project,
+    diagnostics: bool,
+) -> Result<Option<CatalogProjectInfo<CatalogDiagnostics>>> {
+    let config = diagnostics
+        .then(|| shared.project_config(project).ok())
+        .flatten();
+    let slot = config.as_ref().map(|_| shared.project_slot(project.id));
+    let runtime = slot.as_ref().zip(config.as_ref());
+    let preparation = runtime.and_then(|(slot, config)| slot.preparation_lease(config).ok());
+    let reader = shared.readers.try_acquire()?;
+    catalog_project_info(&reader, project, |db, local, index, counts| {
+        let Some((_, (slot, config))) = preparation.as_ref().zip(runtime) else {
+            return CatalogDiagnostics::without_vectors(
+                AnnState::Unknown,
+                "project runtime unavailable",
+            );
+        };
+        let mut model = match capture_catalog_model(slot, config, &shared.payload_budget) {
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                return CatalogDiagnostics::without_vectors(AnnState::Disabled, "hybrid off");
+            }
+            Err(_) => {
+                return CatalogDiagnostics::without_vectors(
+                    AnnState::Unknown,
+                    "diagnostics payload budget exhausted",
+                );
+            }
+        };
+        if require_catalog_embedding(local, &model.key).is_err() {
+            return CatalogDiagnostics::without_vectors(
+                AnnState::Stale,
+                "published embedding recipe does not match",
+            );
+        }
+        let (ann, resident) = if model.ranking == Ranking::Rrf {
+            let diagnostics = shared
+                .dense
+                .ann_diagnostics_for(index, &model.key, config.ann_build);
+            let ann = tools::classify_ann_outcome(&shared.dense, diagnostics.outcome, true);
+            (ann, diagnostics.resident)
+        } else {
+            ((AnnState::Disabled, Some("lexical ranking")), None)
+        };
+        let vectors =
+            hybrid_jobs::CoverageHashes::capture(db, project.id, counts.chunks, &mut model.permit)
+                .ok()
+                .map(|hashes| CatalogCoverage {
+                    model,
+                    source: shared.vector_source_for(project.id, config),
+                    hashes,
+                });
+        CatalogDiagnostics {
+            ann,
+            resident,
+            vectors,
+        }
+    })
+}
+
+fn catalog_project_views(shared: &Shared, name: &str) -> Result<Value> {
     use crate::store::{models::ProjectStatus, repo::ProjectCounts};
 
     let empty = ProjectCounts { docs: 0, chunks: 0 };
     let mut entries = Vec::new();
-    for mut project in registry::list_projects(registry)? {
-        let (project, counts, revision, unavailable) =
-            match catalog_project_info(registry, &project) {
-                Ok(Some(CatalogProjectInfo {
-                    project,
-                    counts,
-                    revision,
-                })) => (project, counts, Some(revision), None),
-                Ok(None) => {
-                    project.status = ProjectStatus::NotIndexed;
-                    (project, empty, None, None)
-                }
-                Err(error) if lifecycle::is_lease_conflict(&error) => {
-                    project.status = ProjectStatus::Indexing;
-                    (project, empty, None, None)
-                }
-                Err(error @ Error::Project { .. }) => {
-                    project.status = ProjectStatus::Error;
-                    (project, empty, None, Some(error.to_string()))
-                }
-                Err(error) => return Err(error),
-            };
+    let projects = {
+        let reader = shared.readers.try_acquire()?;
+        registry::list_projects(&reader)?
+    };
+    for mut project in projects {
+        let selected = catalog_project_summary(shared, &project, name != "list_projects");
+        let (project, counts, revision, details, unavailable) = match selected {
+            Ok(Some(CatalogProjectInfo {
+                project,
+                counts,
+                index,
+                details,
+            })) => (
+                project,
+                counts,
+                Some(index.content_revision()),
+                Some(details),
+                None,
+            ),
+            Ok(None) => {
+                project.status = ProjectStatus::NotIndexed;
+                (project, empty, None, None, None)
+            }
+            Err(error) if lifecycle::is_lease_conflict(&error) => {
+                project.status = ProjectStatus::Indexing;
+                (project, empty, None, None, None)
+            }
+            Err(error @ Error::Project { .. }) => {
+                project.status = ProjectStatus::Error;
+                (project, empty, None, None, Some(error.to_string()))
+            }
+            Err(error) => return Err(error),
+        };
+        let details = details.unwrap_or_else(|| {
+            CatalogDiagnostics::without_vectors(AnnState::Unknown, "published index unavailable")
+        });
+        let coverage = details.vectors.and_then(|vectors| {
+            vectors
+                .hashes
+                .count(&vectors.source, &shared.cache, &vectors.model.key)
+                .ok()
+        });
         let watched = shared.watchers.watching(project.id);
         let mut entry = if name == "panel_projects" {
             json!(crate::ipc::panel::ProjectView {
                 watched,
-                cached_vectors: None,
-                vector_chunks: None,
-                ann_state: None,
+                cached_vectors: coverage.map(|coverage| coverage.cached),
+                vector_chunks: coverage.map(|coverage| coverage.total),
+                ann_state: Some(details.ann.0.as_str().to_owned()),
                 id: project.id,
                 name: project.name.clone(),
                 root: project.canonical_root.to_string_lossy().into_owned(),
@@ -3044,8 +3836,9 @@ fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<V
                 chunks: counts.chunks,
             })
         } else {
+            let reader = shared.readers.try_acquire()?;
             tools::project_entry_with_counts(
-                registry,
+                &reader,
                 &project,
                 counts,
                 (name == "status").then_some(watched),
@@ -3055,8 +3848,11 @@ fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<V
         if name == "status" {
             entry["root_state"] = json!(registry::root_state(&project.canonical_root).as_str());
             entry["index_generation"] = json!(revision.unwrap_or(0));
-            entry["embed_coverage"] = Value::Null;
-            entry["ann"] = tools::ann_state(None, project.id, false);
+            entry["embed_coverage"] = coverage.map_or(
+                Value::Null,
+                |coverage| json!({"cached": coverage.cached, "total": coverage.total}),
+            );
+            entry["ann"] = tools::ann_state_json(details.ann, details.resident);
         }
         if let Some(error) = unavailable
             && name != "panel_projects"
@@ -3068,8 +3864,9 @@ fn catalog_project_views(shared: &Shared, registry: &Db, name: &str) -> Result<V
     if name != "status" {
         return Ok(json!(entries));
     }
+    let reader = shared.readers.try_acquire()?;
     let status = tools::status_document(
-        registry,
+        &reader,
         &entries,
         &shared.sessions.stats(),
         shared.watchers.count(),

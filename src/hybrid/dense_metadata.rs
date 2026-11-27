@@ -5,13 +5,12 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::error::{Error, Result};
-use crate::store::{Db, repo};
+use crate::store::{Db, project_index::ProjectIndex, repo};
 
 /// Metadata identities and content hashes without a retained SQL handle.
 pub struct DenseMetadata {
     cache_root: PathBuf,
-    project_id: i64,
-    generation: i64,
+    index: ProjectIndex,
     chunks: Vec<(u64, String)>,
 }
 
@@ -54,12 +53,22 @@ impl DenseMetadata {
         after_generation: impl FnOnce(),
     ) -> Result<Self> {
         let generation = repo::index_generation(connection, project_id)?;
+        let index = ProjectIndex::legacy(project_id, generation)?;
         after_generation();
-        let chunks = repo::chunk_hashes(connection, project_id)?;
+        Self::capture_bound(root, connection, index)
+    }
+
+    /// The caller has already validated this metadata connection and retains
+    /// its project read lease. Keep the installation root for vector access.
+    pub(crate) fn capture_bound(
+        root: &Path,
+        connection: &Connection,
+        index: ProjectIndex,
+    ) -> Result<Self> {
+        let chunks = repo::chunk_hashes(connection, index.project_id())?;
         Ok(Self {
             cache_root: root.to_path_buf(),
-            project_id,
-            generation,
+            index,
             chunks,
         })
     }
@@ -73,19 +82,23 @@ impl DenseMetadata {
     /// Registry project identity.
     #[must_use]
     pub const fn project_id(&self) -> i64 {
-        self.project_id
+        self.index.project_id()
     }
 
     /// Generation observed in the same SQL snapshot as the hashes.
     #[must_use]
     pub const fn generation(&self) -> i64 {
-        self.generation
+        self.index.content_revision()
     }
 
     /// Chunk/content identities, sorted by document and sequence.
     #[must_use]
     pub fn chunks(&self) -> &[(u64, String)] {
         &self.chunks
+    }
+
+    pub(crate) const fn index(&self) -> ProjectIndex {
+        self.index
     }
 
     pub(super) fn into_chunks(self) -> Vec<(u64, String)> {

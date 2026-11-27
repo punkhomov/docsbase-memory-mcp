@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::daemon::registry;
 use crate::error::{Error, Result};
+use crate::index::async_job::catalog_sync;
 use crate::ipc::async_client::{AsyncClient, within_operation};
 use crate::search::operation::SearchOperation;
 use crate::store::Db;
@@ -177,6 +178,7 @@ fn canonical_target(path: Option<PathBuf>) -> Result<PathBuf> {
 enum DirectIndex {
     Legacy(crate::index::async_job::JobContext),
     Generation(generation::Target),
+    HybridGeneration(catalog_sync::BuildContext, PathBuf),
 }
 
 pub(super) async fn run_with_operation(
@@ -202,8 +204,14 @@ pub(super) async fn run_with_operation(
                 };
                 let mut db = Db::open_for_index(registry_root, &settings, create_catalog)?;
                 if db.has_generation_catalog() {
-                    return generation::Target::capture(db, &root, config, settings)
-                        .map(DirectIndex::Generation);
+                    let target = generation::Target::capture(
+                        db,
+                        &root,
+                        config,
+                        settings,
+                        &owner.global.daemon.profile,
+                    )?;
+                    return target.into_direct_index(&owner, store);
                 }
                 (
                     registry::ensure_project(&mut db, &root)?,
@@ -244,6 +252,20 @@ pub(super) async fn run_with_operation(
                 target.index(&call, &budget)
             });
             return crate::daemon::request::run(worker, Some(&operation)).await;
+        }
+        DirectIndex::HybridGeneration(build, config_dir) => {
+            let id = build.project.id;
+            let stats = catalog_sync::index_direct(
+                &context.jobs,
+                &context.workers,
+                &activity,
+                &operation,
+                &context.budget,
+                build,
+                config_dir,
+            )
+            .await?;
+            return Ok(serde_json::json!({"project_id": id, "stats": stats}));
         }
     };
     let id = captured.project.id;

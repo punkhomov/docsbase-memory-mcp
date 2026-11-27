@@ -1,6 +1,6 @@
 //! Bounded lookup/validation/write kernels. Connections never cross provider awaits.
 use crate::error::{Error, Result};
-use crate::vector_cache::{VectorCacheSource, chunk_hash};
+use crate::vector_cache::{VectorCacheSource, WriteCapacity, chunk_hash};
 use std::sync::Arc;
 
 pub(crate) struct EmbeddingBatch {
@@ -12,13 +12,38 @@ pub(crate) fn missing(
     root: &std::path::Path,
     model: &str,
     texts: Vec<String>,
+    expected_dimension: Option<usize>,
 ) -> Result<EmbeddingBatch> {
     let mut cache = source.connect(root)?;
+    missing_using(texts, |hash| {
+        let value = match expected_dimension {
+            Some(dimension) => cache.get_for_dimension(model, hash, dimension)?,
+            None => cache.get(model, hash)?,
+        };
+        Ok(value.is_some())
+    })
+}
+
+pub(crate) fn missing_without_touch(
+    source: &VectorCacheSource,
+    root: &std::path::Path,
+    model: &str,
+    texts: Vec<String>,
+    dimension: usize,
+) -> Result<EmbeddingBatch> {
+    let cache = source.connect(root)?;
+    missing_using(texts, |hash| cache.has_valid_vector(model, hash, dimension))
+}
+
+fn missing_using(
+    texts: Vec<String>,
+    mut present: impl FnMut(&str) -> Result<bool>,
+) -> Result<EmbeddingBatch> {
     let mut hashes = Vec::new();
     let mut inputs = Vec::new();
     for text in texts {
         let hash = chunk_hash(&text);
-        if !hashes.contains(&hash) && cache.get(model, &hash)?.is_none() {
+        if !hashes.contains(&hash) && !present(&hash)? {
             hashes.push(hash);
             inputs.push(text);
         }
@@ -35,17 +60,42 @@ pub(crate) fn store(
     batch: &EmbeddingBatch,
     vectors: &[Vec<f32>],
     expected_dim: usize,
+    capacity: WriteCapacity,
 ) -> Result<()> {
+    validate(batch, vectors, expected_dim)?;
+    let mut cache = source.connect(root)?;
+    for (hash, vector) in batch.hashes.iter().zip(vectors) {
+        cache.put_with_capacity(model, hash, vector, capacity)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn try_store_without_eviction(
+    source: &VectorCacheSource,
+    root: &std::path::Path,
+    model: &str,
+    batch: &EmbeddingBatch,
+    vectors: &[Vec<f32>],
+    expected_dim: usize,
+    operation: &crate::search::operation::SearchOperation,
+) -> Result<bool> {
+    validate(batch, vectors, expected_dim)?;
+    let mut cache = source.connect(root)?;
+    let rows = batch
+        .hashes
+        .iter()
+        .map(String::as_str)
+        .zip(vectors.iter().map(Vec::as_slice));
+    cache.try_store_without_eviction(model, rows, operation)
+}
+
+fn validate(batch: &EmbeddingBatch, vectors: &[Vec<f32>], expected_dim: usize) -> Result<()> {
     if vectors.len() != batch.hashes.len()
         || vectors
             .iter()
             .any(|v| v.len() != expected_dim || v.iter().any(|n| !n.is_finite()))
     {
         return Err(Error::internal("invalid embedding batch shape or values"));
-    }
-    let mut cache = source.connect(root)?;
-    for (hash, vector) in batch.hashes.iter().zip(vectors) {
-        cache.put(model, hash, vector)?;
     }
     Ok(())
 }

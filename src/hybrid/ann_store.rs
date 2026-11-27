@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
 use crate::hybrid::ann_settings::{AnnBuildSettings, LEGACY_BUILD_RECIPE};
+use crate::store::project_index::ProjectIndex;
 
 /// First on-disk format version (design §5).
 pub const ANN_FORMAT_VERSION: u32 = 1;
@@ -51,6 +52,43 @@ pub struct AnnKey {
     pub chunk_count: usize,
     pub chunk_set_digest: String,
     pub format_version: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AnnCatalogGeneration {
+    epoch: [u8; 16],
+    generation: i64,
+}
+
+/// The graph inputs and, for a catalog, the installation and physical head
+/// to which the persisted dump belongs. Legacy callers keep their key format.
+#[derive(Clone, Copy)]
+pub(crate) struct AnnArtifact<'a> {
+    pub(crate) key: &'a AnnKey,
+    catalog: Option<AnnCatalogGeneration>,
+}
+
+impl<'a> AnnArtifact<'a> {
+    pub(crate) fn for_index(key: &'a AnnKey, index: ProjectIndex) -> Self {
+        let catalog = index
+            .catalog_generation()
+            .map(|(epoch, generation)| AnnCatalogGeneration { epoch, generation });
+        Self { key, catalog }
+    }
+}
+
+impl<'a> From<&'a AnnKey> for AnnArtifact<'a> {
+    fn from(key: &'a AnnKey) -> Self {
+        Self { key, catalog: None }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredAnnMeta {
+    #[serde(flatten)]
+    meta: AnnMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog: Option<AnnCatalogGeneration>,
 }
 
 /// Validated metadata of a persisted index; written at publish time and
@@ -230,17 +268,21 @@ impl AnnStore {
     /// Final directory for a key and checked graph construction recipe.
     #[must_use]
     pub fn ann_dir_with_settings(&self, key: &AnnKey, settings: AnnBuildSettings) -> PathBuf {
-        self.project_ann_root(key.project_id)
-            .join(dir_name(key, settings))
+        self.artifact_dir(key.into(), settings)
     }
 
-    pub(crate) fn pin_slot(
+    fn artifact_dir(&self, artifact: AnnArtifact<'_>, settings: AnnBuildSettings) -> PathBuf {
+        self.project_ann_root(artifact.key.project_id)
+            .join(dir_name(artifact, settings))
+    }
+
+    pub(crate) fn pin_slot<'a>(
         &self,
-        key: &AnnKey,
+        artifact: impl Into<AnnArtifact<'a>>,
         settings: AnnBuildSettings,
         access: AnnSlotAccess,
     ) -> Option<AnnSlotPin> {
-        let path = self.ann_dir_with_settings(key, settings);
+        let path = self.artifact_dir(artifact.into(), settings);
         let mut pins = self
             .slot_pins
             .lock()
@@ -295,38 +337,48 @@ impl AnnStore {
         key: &AnnKey,
         settings: AnnBuildSettings,
     ) -> Result<Option<AnnSlot>> {
-        let dir = self.ann_dir_with_settings(key, settings);
+        Ok(self.load_artifact(key.into(), settings))
+    }
+
+    pub(crate) fn load_artifact(
+        &self,
+        artifact: AnnArtifact<'_>,
+        settings: AnnBuildSettings,
+    ) -> Option<AnnSlot> {
+        let key = artifact.key;
+        let dir = self.artifact_dir(artifact, settings);
         if !dir.is_dir() || !dir.join("READY").is_file() {
-            return Ok(None);
+            return None;
         }
         let Some(raw) = fs::read_to_string(dir.join("meta.json")).ok() else {
             reject(key, "meta.json is unreadable");
-            return Ok(None);
+            return None;
         };
-        let Ok(meta) = serde_json::from_str::<AnnMeta>(&raw) else {
+        let Ok(StoredAnnMeta { meta, catalog }) = serde_json::from_str::<StoredAnnMeta>(&raw)
+        else {
             reject(key, "meta.json is not valid JSON");
-            return Ok(None);
+            return None;
         };
-        if !meta.matches_key(key) {
+        if catalog != artifact.catalog || !meta.matches_key(key) {
             reject(key, "metadata does not match the requested key");
-            return Ok(None);
+            return None;
         }
         if meta.m != settings.m() || meta.ef_construction != settings.ef_construction() {
             reject(
                 key,
                 "metadata does not match the graph construction settings",
             );
-            return Ok(None);
+            return None;
         }
         if meta.hnsw_rs_version != HNSW_RS_VERSION {
             reject(key, "hnsw_rs version mismatch");
-            return Ok(None);
+            return None;
         }
         if !dump_sizes_ok(&dir) {
             reject(key, "dump files missing or oversized");
-            return Ok(None);
+            return None;
         }
-        Ok(Some(AnnSlot { dir, meta }))
+        Some(AnnSlot { dir, meta })
     }
 
     /// Atomically publishes a dump written by `write` into a fresh temporary
@@ -344,25 +396,26 @@ impl AnnStore {
         key: &AnnKey,
         write: impl FnOnce(&Path) -> Result<String>,
     ) -> Result<AnnSlot> {
-        self.persist_dump_with_settings(key, AnnBuildSettings::owner_defaults(), write)
+        self.persist_artifact(key.into(), AnnBuildSettings::owner_defaults(), write)
     }
 
-    pub(crate) fn persist_dump_with_settings(
+    pub(crate) fn persist_artifact(
         &self,
-        key: &AnnKey,
+        artifact: AnnArtifact<'_>,
         settings: AnnBuildSettings,
         write: impl FnOnce(&Path) -> Result<String>,
     ) -> Result<AnnSlot> {
-        self.persist_dump_at(key, settings, nanos(), write)
+        self.persist_dump_at(artifact, settings, nanos(), write)
     }
 
     fn persist_dump_at(
         &self,
-        key: &AnnKey,
+        artifact: AnnArtifact<'_>,
         settings: AnnBuildSettings,
         clock_tick: u128,
         write: impl FnOnce(&Path) -> Result<String>,
     ) -> Result<AnnSlot> {
+        let key = artifact.key;
         let ann_root = self.project_ann_root(key.project_id);
         fs::create_dir_all(&ann_root)
             .map_err(|err| Error::internal_with_source("create ann root", err))?;
@@ -392,16 +445,19 @@ impl AnnStore {
                 "ann dump basename {basename:?}, expected {DUMP_BASENAME:?}"
             )));
         }
-        let meta = AnnMeta::for_settings(key, settings);
+        let stored = StoredAnnMeta {
+            meta: AnnMeta::for_settings(key, settings),
+            catalog: artifact.catalog,
+        };
         let publish = (|| -> Result<AnnSlot> {
-            let meta_json = serde_json::to_string_pretty(&meta)
+            let meta_json = serde_json::to_string_pretty(&stored)
                 .map_err(|err| Error::internal_with_source("serialize ann meta", err))?;
             fs::write(tmp.join("meta.json"), meta_json)
                 .map_err(|err| Error::internal_with_source("write ann meta", err))?;
             sync_dump_files(&tmp)?;
             fs::write(tmp.join("READY"), "")
                 .map_err(|err| Error::internal_with_source("write ann READY", err))?;
-            let final_dir = self.ann_dir_with_settings(key, settings);
+            let final_dir = self.artifact_dir(artifact, settings);
             if final_dir.exists() {
                 fs::remove_dir_all(&final_dir)
                     .map_err(|err| Error::internal_with_source("replace ann index", err))?;
@@ -410,7 +466,7 @@ impl AnnStore {
                 .map_err(|err| Error::internal_with_source("publish ann index", err))?;
             Ok(AnnSlot {
                 dir: final_dir,
-                meta,
+                meta: stored.meta,
             })
         })();
         if publish.is_err() {
@@ -506,7 +562,7 @@ impl AnnStore {
             }
         };
         let current_tmp = format!("tmp-{}-", std::process::id());
-        let mut by_model: HashMap<String, Vec<(i64, PathBuf)>> = HashMap::new();
+        let mut by_model = HashMap::<_, Vec<_>>::new();
         let mut tmp_dirs: Vec<PathBuf> = Vec::new();
         for entry in entries {
             let Ok(entry) = entry else { continue };
@@ -518,13 +574,11 @@ impl AnnStore {
                 if !name.starts_with(&current_tmp) {
                     tmp_dirs.push(entry.path());
                 }
-            } else if let (Some(model), Some(generation)) =
-                (parse_model(&name), parse_generation(&name))
-            {
+            } else if let Some((model, revision)) = parse_slot_revision(&name) {
                 by_model
-                    .entry(model.to_owned())
+                    .entry((model.to_owned(), revision.epoch))
                     .or_default()
-                    .push((generation, entry.path()));
+                    .push((revision.order, entry.path()));
             }
         }
         for dir in tmp_dirs {
@@ -573,19 +627,22 @@ fn reject(key: &AnnKey, reason: &str) {
 }
 
 /// Default construction uses the original slot name (design §5).
-fn dir_name(key: &AnnKey, settings: AnnBuildSettings) -> String {
+fn dir_name(artifact: AnnArtifact<'_>, settings: AnnBuildSettings) -> String {
     use std::fmt::Write as _;
 
+    let key = artifact.key;
     let model_hash: String = blake3::hash(key.model_id.as_bytes())
         .to_hex()
         .chars()
         .take(16)
         .collect();
     let digest8: String = key.chunk_set_digest.chars().take(8).collect();
-    let mut name = format!(
-        "{model_hash}-g{}-d{}-c{}-{digest8}",
-        key.generation, key.dim, key.chunk_count
-    );
+    let mut name = format!("{model_hash}-g{}", key.generation);
+    if let Some(catalog) = artifact.catalog {
+        let epoch = u128::from_be_bytes(catalog.epoch);
+        let _ = write!(name, "-v5.{epoch:032x}.{}", catalog.generation);
+    }
+    let _ = write!(name, "-d{}-c{}-{digest8}", key.dim, key.chunk_count);
     if settings != LEGACY_BUILD_RECIPE {
         let _ = write!(
             name,
@@ -597,18 +654,36 @@ fn dir_name(key: &AnnKey, settings: AnnBuildSettings) -> String {
     name
 }
 
-/// Parses the model hash prefix of a key directory name.
-fn parse_model(name: &str) -> Option<&str> {
-    let (model, rest) = name.split_once("-g")?;
-    (!model.is_empty() && !rest.is_empty()).then_some(model)
+struct SlotRevision {
+    epoch: Option<u128>,
+    order: (i64, i64),
 }
 
-/// Parses the generation out of a key directory name.
-fn parse_generation(name: &str) -> Option<i64> {
-    let start = name.find("-g")? + 2;
-    let rest = &name[start..];
-    let end = rest.find('-').unwrap_or(rest.len());
-    rest[..end].parse::<i64>().ok()
+fn parse_slot_revision(name: &str) -> Option<(&str, SlotRevision)> {
+    let (model, rest) = name.split_once("-g")?;
+    if model.is_empty() {
+        return None;
+    }
+    let mut fields = rest.split('-');
+    let revision = fields.next()?.parse().ok()?;
+    let catalog = fields.next().and_then(|field| field.strip_prefix("v5."));
+    let snapshot = if let Some(catalog) = catalog {
+        let (epoch, generation) = catalog.split_once('.')?;
+        let generation: i64 = generation.parse().ok()?;
+        if epoch.len() != 32 || generation <= 0 {
+            return None;
+        }
+        SlotRevision {
+            epoch: Some(u128::from_str_radix(epoch, 16).ok()?),
+            order: (generation, revision),
+        }
+    } else {
+        SlotRevision {
+            epoch: None,
+            order: (0, revision),
+        }
+    };
+    Some((model, snapshot))
 }
 
 /// Whether every dump file exists and stays within [`MAX_ANN_FILE_BYTES`].
@@ -659,6 +734,108 @@ fn nanos() -> u128 {
 mod tests {
     use super::*;
 
+    fn graph_key(revision: i64) -> AnnKey {
+        AnnKey {
+            project_id: 1,
+            generation: revision,
+            model_id: "model@d2".into(),
+            dim: 2,
+            chunk_count: 2,
+            chunk_set_digest: "digest".into(),
+            format_version: ANN_FORMAT_VERSION,
+        }
+    }
+
+    fn catalog_artifact(key: &AnnKey, epoch: u8, generation: i64) -> AnnArtifact<'_> {
+        AnnArtifact {
+            key,
+            catalog: Some(AnnCatalogGeneration {
+                epoch: [epoch; 16],
+                generation,
+            }),
+        }
+    }
+
+    fn graph() -> crate::hybrid::ann::AnnIndex {
+        crate::hybrid::ann::AnnIndex::build(
+            &[(11, Arc::from([1.0, 0.0])), (12, Arc::from([0.0, 1.0]))],
+            2,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn catalog_retention_orders_by_head_before_local_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AnnStore::with_retention(root.path().to_path_buf(), 2);
+        let graph = graph();
+        let old_key = graph_key(99);
+        let old = catalog_artifact(&old_key, 7, 1);
+        let old_dump = graph.dump_artifact(&store, old).unwrap();
+        let previous_key = graph_key(1);
+        let previous = graph
+            .dump_artifact(&store, catalog_artifact(&previous_key, 7, 2))
+            .unwrap();
+        let retained_key = graph_key(2);
+        let retained = graph
+            .dump_artifact(&store, catalog_artifact(&retained_key, 7, 2))
+            .unwrap();
+        let current_key = graph_key(3);
+        let current = graph
+            .dump_artifact(&store, catalog_artifact(&current_key, 7, 2))
+            .unwrap();
+        let legacy = graph.dump(&store, &old_key).unwrap();
+        let pin = store
+            .pin_slot(old, graph.build_settings(), AnnSlotAccess::Read)
+            .unwrap();
+        let mapped = crate::hybrid::ann::AnnIndex::load(&old_dump)
+            .unwrap()
+            .with_disk_pin(pin);
+
+        store.cleanup(1).unwrap();
+        assert!(old_dump.dir.is_dir(), "a mapped graph retains its slot");
+        drop(mapped);
+        store.cleanup(1).unwrap();
+
+        assert!(
+            !old_dump.dir.exists(),
+            "a high local revision cannot keep a retired head"
+        );
+        assert!(
+            !previous.dir.exists(),
+            "only the two newest local revisions survive"
+        );
+        assert!(retained.dir.is_dir());
+        assert!(current.dir.is_dir());
+        assert!(legacy.dir.is_dir());
+    }
+
+    #[test]
+    fn catalog_dumps_validate_installation_and_head_at_the_same_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let store = AnnStore::new(root.path().to_path_buf());
+        let graph = graph();
+        let key = graph_key(1);
+        let previous = catalog_artifact(&key, 7, 1);
+        let current = catalog_artifact(&key, 7, 2);
+        let restored = catalog_artifact(&key, 9, 2);
+        let settings = graph.build_settings();
+        let old = graph.dump_artifact(&store, previous).unwrap();
+        let new = graph.dump_artifact(&store, current).unwrap();
+        assert_ne!(old.dir, new.dir);
+        assert!(store.load(&key).unwrap().is_none());
+        assert!(store.load_artifact(restored, settings).is_none());
+
+        let loaded =
+            crate::hybrid::ann::AnnIndex::load(&store.load_artifact(current, settings).unwrap())
+                .unwrap();
+        assert_eq!(loaded.search(&[1.0, 0.0], 1).unwrap()[0].0, 11);
+        drop(loaded);
+        fs::copy(old.dir.join("meta.json"), new.dir.join("meta.json")).unwrap();
+        assert!(store.load_artifact(current, settings).is_none());
+        assert!(store.load_artifact(previous, settings).is_some());
+    }
+
     #[test]
     fn overlapping_recipes_with_the_same_clock_tick_have_private_staging() {
         let root = tempfile::tempdir().unwrap();
@@ -680,10 +857,10 @@ mod tests {
             Ok(DUMP_BASENAME.to_owned())
         };
         let published_first = store
-            .persist_dump_at(&key, first, 123, |staging_first| {
+            .persist_dump_at((&key).into(), first, 123, |staging_first| {
                 let basename = write(staging_first, b"recipe a")?;
                 let published_second =
-                    store.persist_dump_at(&key, second, 123, |staging_second| {
+                    store.persist_dump_at((&key).into(), second, 123, |staging_second| {
                         assert_ne!(staging_first, staging_second);
                         write(staging_second, b"recipe b")
                     })?;

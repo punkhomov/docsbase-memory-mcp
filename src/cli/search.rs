@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::cli::status::read_project_for_search;
+use crate::cli::status::read_project_for_index;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::hybrid::work::Cancellation;
@@ -163,13 +163,17 @@ async fn run_in(
     let original = operation.clone();
     let captured = context
         .control(&operation, &activity, move || {
-            let (db, project) = read_project_for_search(&settings)?;
+            let (db, project) = read_project_for_index(&settings)?;
             let config =
                 std::sync::Arc::new(Config::for_project(&owner.global, &project.canonical_root)?);
-            if db.has_generation_catalog() && config.hybrid_cfg.enabled {
-                return Err(Error::Admission {
-                    message: "published v5 generations require lexical search".into(),
-                });
+            if db.has_generation_catalog()
+                && config.hybrid_cfg.ranking == crate::hybrid::config::Ranking::Rrf
+                && let Some(model) = config.hybrid_cfg.embedding_model_key()
+            {
+                use crate::store::project_index::{require_catalog_embedding, with_catalog_pair};
+                with_catalog_pair(&db, &project, |_, local, _| {
+                    require_catalog_embedding(local.as_ref(), &model)
+                })?;
             }
             let stages = std::sync::Arc::new(owner.stages(&config)?);
             let readers =

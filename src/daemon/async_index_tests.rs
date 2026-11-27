@@ -4,6 +4,8 @@ use crate::hybrid::remote::{AsyncEmbedder, RemoteCall, StageFuture};
 use crate::vector_cache::Embedder;
 
 struct DocumentGate {
+    model: &'static str,
+    queries: AtomicUsize,
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
     legacy: tokio::runtime::Handle,
@@ -13,7 +15,7 @@ struct DocumentGate {
 }
 impl Embedder for DocumentGate {
     fn model_id(&self) -> &'static str {
-        "test/async-documents@d3@l2"
+        self.model
     }
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.synchronous.fetch_add(1, Ordering::SeqCst);
@@ -56,21 +58,29 @@ impl AsyncEmbedder for DocumentGate {
         })
     }
     fn embed_query<'a>(&'a self, _: Arc<str>, _: &'a RemoteCall) -> StageFuture<'a, Vec<f32>> {
-        Box::pin(async { Ok(vec![1.0, 0.0, 0.0]) })
+        Box::pin(async {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![1.0, 0.0, 0.0])
+        })
     }
 }
 
 fn open_v2_index_shared(cache: &Path, config: &Path) -> Arc<Shared> {
-    std::fs::write(config.join("config.toml"), "config_version = 2\n").unwrap();
-    Shared::open_with_launch(
+    open_v2_index_shared_with_config(cache, config, "config_version = 2\n")
+}
+
+fn open_v2_index_shared_with_config(cache: &Path, config: &Path, toml: &str) -> Arc<Shared> {
+    std::fs::write(config.join("config.toml"), toml).unwrap();
+    let launch = LaunchSnapshot::capture_from(config)
+        .strict(DaemonPatch::default())
+        .unwrap();
+    let dense = launch.config.settings().dense.clone();
+    Shared::open_with_launch_config(
         cache,
         &crate::store::settings::standalone().unwrap(),
         &crate::store::settings::standalone_read_pool().unwrap(),
-        crate::hybrid::dense_settings::standalone()
-            .unwrap()
-            .settings(),
-        &LaunchSnapshot::capture_from(config),
-        DaemonPatch::default(),
+        &dense,
+        launch,
     )
     .unwrap()
 }
@@ -221,14 +231,7 @@ fn held_document_embedding_releases_actual_control_dispatch() {
     let mut root = crate::daemon::job_service::JobRoot::new(settings.settings());
     let service = root.service();
     root.run(&runtime, async move {
-        let provider = Arc::new(DocumentGate {
-            entered: tokio::sync::Semaphore::new(0),
-            release: tokio::sync::Semaphore::new(0),
-            legacy: tokio::runtime::Handle::current(),
-            synchronous: AtomicUsize::new(0),
-            batches: Mutex::new(vec![]),
-            invalid_on: AtomicUsize::new(0),
-        });
+        let provider = document_gate();
         let mut fixture = search_phase_tests::Fixture::new(HybridStages {
             embedder: Some(provider.clone()),
             ..HybridStages::default()
@@ -347,7 +350,12 @@ fn low_capture_budget_refuses_before_project_effects_and_terminalizes_only_own_s
 }
 
 fn document_gate() -> Arc<DocumentGate> {
+    document_gate_for("test/async-documents@d3@l2")
+}
+fn document_gate_for(model: &'static str) -> Arc<DocumentGate> {
     Arc::new(DocumentGate {
+        model,
+        queries: AtomicUsize::new(0),
         entered: tokio::sync::Semaphore::new(0),
         release: tokio::sync::Semaphore::new(0),
         legacy: tokio::runtime::Handle::current(),
@@ -372,6 +380,1310 @@ fn batch_fixture(
     slot.state.lock().unwrap().config = Some(Arc::new(config));
     fixture
 }
+#[cfg(unix)]
+fn selected_catalog_hits(
+    shared: &Shared,
+    project: &crate::store::models::Project,
+    query: &str,
+) -> usize {
+    let reader = shared.readers.try_acquire().unwrap();
+    crate::store::project_index::with_catalog_pair(reader, project, |_, local, _| {
+        let dir = local.unwrap().tantivy_dir()?;
+        Ok(crate::index::tantivy_index::ReadIndex::open(&dir)?
+            .search(query, 3)?
+            .len())
+    })
+    .unwrap()
+}
+
+#[cfg(unix)]
+async fn catalog_index_waiting_for_provider(
+    shared: &Arc<Shared>,
+    args: &Value,
+    provider: &DocumentGate,
+) -> tokio::task::JoinHandle<Result<Value>> {
+    let owner = shared.clone();
+    let args = args.clone();
+    let mut indexing =
+        tokio::spawn(async move { call_tool(&owner, None, "index_project", args).await });
+    tokio::select! {
+        entered = tokio::time::timeout(Duration::from_secs(5), provider.entered.acquire()) => entered.unwrap().unwrap().forget(),
+        result = &mut indexing => panic!("catalog job finished before embedding: {result:?}"),
+    }
+    indexing
+}
+
+#[cfg(unix)]
+fn open_v5_index_shared(cache: &Path, config: &Path, toml: &str) -> Arc<Shared> {
+    Db::open_for_index(cache, &crate::store::settings::standalone().unwrap(), true)
+        .unwrap()
+        .close()
+        .unwrap();
+    let mut shared = open_v2_index_shared_with_config(cache, config, toml);
+    Arc::get_mut(&mut shared).unwrap().watchers = Arc::new(Watchers::with_enabled(false));
+    shared
+}
+
+#[cfg(unix)]
+async fn catalog_search_hits(shared: &Arc<Shared>, session: u64, query: &str) -> usize {
+    call_tool(
+        shared,
+        Some(session),
+        "search_docs",
+        json!({"query": query}),
+    )
+    .await
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .len()
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_refresh_keeps_old_runtime_until_the_index_commits() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "retainedcatalogwidget").unwrap();
+        std::fs::write(root.path().join("extra.md"), "omittedcatalogwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        shared.activate_jobs(service).unwrap();
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        let (before, before_stages) = shared.project_runtime_for_search(&project).unwrap();
+        let hits = |query: &'static str| catalog_search_hits(&shared, session, query);
+        assert_eq!(hits("omittedcatalogwidget").await, 1);
+        shared
+            .db()
+            .connection()
+            .execute_batch(
+                "CREATE TABLE deferred_refresh_failure (
+                   project_id INTEGER REFERENCES projects(id) DEFERRABLE INITIALLY DEFERRED
+                 );
+                 CREATE TRIGGER reject_catalog_refresh AFTER UPDATE ON project_generation_head
+                 BEGIN INSERT INTO deferred_refresh_failure VALUES (-1); END;",
+            )
+            .unwrap();
+        std::fs::write(
+            root.path().join(".docsbase.toml"),
+            "config_version = 2\nignores = [\"extra.md\"]\n",
+        )
+        .unwrap();
+        let error = call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("new head was not committed"),
+            "{error}"
+        );
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let (active, stages) = shared.project_runtime_for_search(&project).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &active),
+            "rollback replaced active config"
+        );
+        assert!(
+            Arc::ptr_eq(&before_stages, &stages),
+            "rollback replaced active stages"
+        );
+        assert!(Arc::ptr_eq(
+            &before,
+            &shared.open_project_config(&project).unwrap()
+        ));
+        assert_eq!(hits("omittedcatalogwidget").await, 1);
+
+        shared
+            .db()
+            .connection()
+            .execute_batch(
+                "DROP TRIGGER reject_catalog_refresh; DROP TABLE deferred_refresh_failure",
+            )
+            .unwrap();
+        call_tool(&shared, None, "index_project", args)
+            .await
+            .unwrap();
+        assert_eq!(
+            shared.project_config(&project).unwrap().ignores,
+            ["extra.md"]
+        );
+        assert_eq!(hits("omittedcatalogwidget").await, 0);
+        assert_eq!(hits("retainedcatalogwidget").await, 1);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_catalog_reopen_accepts_the_restored_published_recipe() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("guide.md"), "restoredcatalogwidget").unwrap();
+    let mut original = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = original.service();
+    original
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            call_tool(&shared, None, "index_project", json!({"path": root.path()}))
+                .await
+                .unwrap();
+            shared
+                .activity
+                .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+                .await;
+            Ok(())
+        })
+        .unwrap();
+
+    let path = root.path().join(".docsbase.toml");
+    std::fs::write(&path, "config_version = 2\nignores = ['guide.md']\n").unwrap();
+    let mut restarted = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = restarted.service();
+    restarted
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+            assert_eq!(
+                shared.open_project_config(&project).unwrap().ignores,
+                ["guide.md"]
+            );
+            std::fs::remove_file(path).unwrap();
+            let restored = shared.open_project_config(&project).unwrap();
+            assert_eq!(restored.ignores, Vec::<String>::new());
+
+            let (session, _cancel) = shared
+                .sessions
+                .join(
+                    std::process::id(),
+                    project.canonical_root.clone(),
+                    Some(project.id),
+                )
+                .unwrap();
+            assert_eq!(
+                catalog_search_hits(&shared, session, "restoredcatalogwidget").await,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[cfg(unix)]
+async fn retry_catalog_watch_after_runtime_reconciliation(
+    shared: &Arc<Shared>,
+    project: &crate::store::models::Project,
+    previous: Arc<crate::watch::WatchRuntime>,
+    accepted: Arc<crate::watch::WatchRuntime>,
+) {
+    let doc = project.canonical_root.join("new.md");
+    std::fs::write(&doc, "recoveredcatalogwatch").unwrap();
+    let (_sender, mut events) = tokio::sync::mpsc::channel(1);
+    let operation = shared.watch_operation().unwrap();
+    let paths = crate::watch::merge_pending(
+        &shared.payload_budget,
+        None,
+        Some(vec![doc]),
+        &mut events,
+        &operation,
+        &shared.watchers,
+    )
+    .unwrap();
+    let result = shared
+        .run_watch_batch(
+            project.clone(),
+            previous,
+            paths.clone(),
+            operation.clone(),
+            shared.watch_activity(),
+        )
+        .await;
+    assert!(matches!(result, Err(Error::Internal { .. })), "{result:?}");
+    let stats = shared
+        .run_watch_batch(
+            project.clone(),
+            accepted,
+            paths,
+            operation,
+            shared.watch_activity(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats.docs, 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn shared_catalog_reconciles_a_retained_runtime_against_the_selected_seal() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "selectedcatalogwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        shared.activate_jobs(service).unwrap();
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let (previous, previous_stages) = shared.project_runtime_for_search(&project).unwrap();
+
+        let path = root.path().join(".docsbase.toml");
+        std::fs::write(&path, "config_version = 2\nignores = ['guide.md']\n").unwrap();
+        call_tool(&shared, None, "index_project", args)
+            .await
+            .unwrap();
+        let (committed, committed_stages) = shared.project_runtime_for_search(&project).unwrap();
+        let head =
+            CatalogHead::from_selected_fixture(shared.db().connection(), project.id).unwrap();
+        let pending = Arc::new(crate::watch::WatchRuntime::new(
+            committed.clone(),
+            committed_stages,
+            shared.vector_source_for(project.id, &committed),
+        ));
+        let slot = shared.project_slot(project.id);
+        {
+            // Emulate the in-memory boundary after SQLite committed and its
+            // first independent verification failed. The actual seal is intact.
+            let publication = slot.catalog_publication(&committed).unwrap();
+            publication.install(previous.clone(), previous_stages.clone());
+            let transition = slot.begin_watch_config_transition(committed.clone());
+            publication.retain_unverified(head, pending.clone(), Some(transition));
+        }
+        assert!(slot.preparation_lease(&previous).is_err());
+        // A source edit after the accepted commit must not replace its candidate.
+        std::fs::remove_file(path).unwrap();
+        let previous_runtime = Arc::new(crate::watch::WatchRuntime::new(
+            previous.clone(),
+            previous_stages,
+            shared.vector_source_for(project.id, &previous),
+        ));
+        retry_catalog_watch_after_runtime_reconciliation(
+            &shared,
+            &project,
+            previous_runtime,
+            pending,
+        )
+        .await;
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog_search_hits(&shared, session, "selectedcatalogwidget").await,
+            0
+        );
+        assert_eq!(
+            catalog_search_hits(&shared, session, "recoveredcatalogwatch").await,
+            1
+        );
+        assert!(Arc::ptr_eq(
+            &committed,
+            &shared.project_config(&project).unwrap()
+        ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_refresh_rechecks_the_project_source_after_capture() {
+    use crate::index::async_job::catalog_sync;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "retainedcatalogsource").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+        shared.activate_jobs(service.clone()).unwrap();
+        let args = json!({"path": root.path(), "refresh_config": true});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        let old = shared.project_config(&project).unwrap();
+
+        let path = root.path().join(".docsbase.toml");
+        std::fs::write(&path, "config_version = 2\nignores = ['guide.md']\n").unwrap();
+        let context =
+            capture_catalog_sync(&shared, None, &args, shared.catalog_epoch.unwrap(), false)
+                .unwrap()
+                .unwrap();
+        std::fs::write(&path, "config_version = 2\nignores = ['different.md']\n").unwrap();
+
+        let operation = shared.watch_operation().unwrap();
+        let activity = shared.activity.track();
+        let owner = service
+            .admit(
+                shared.workers.clone(),
+                activity.clone(),
+                &operation,
+                &shared.payload_budget,
+            )
+            .await
+            .unwrap();
+        let call = operation.clone();
+        let (owner, status) = service
+            .phase(
+                &shared.workers,
+                activity.clone(),
+                &operation,
+                owner,
+                move |state| state.prepare_catalog_sync(context, &call),
+            )
+            .await
+            .unwrap();
+        drop(status);
+        let failure =
+            catalog_sync::execute(&service, &shared.workers, &activity, &operation, owner)
+                .await
+                .unwrap_err();
+        assert!(
+            failure
+                .to_string()
+                .contains("configuration changed before publication"),
+            "{failure}"
+        );
+        assert!(Arc::ptr_eq(&old, &shared.project_config(&project).unwrap()));
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "retainedcatalogsource"),
+            1
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn catalog_test_embedder(
+    shared: &Arc<Shared>,
+    project: &crate::store::models::Project,
+    provider: &Arc<DocumentGate>,
+) -> Arc<Config> {
+    let mut config = (*shared.project_config(project).unwrap()).clone();
+    config.remote.embed_batch_texts = 1;
+    let config = Arc::new(config);
+    let slot = shared.project_slot(project.id);
+    let mut state = slot.state.lock().unwrap();
+    state.config = Some(config.clone());
+    state.search_stages = Some(Arc::new(HybridStages {
+        embedder: Some(provider.clone()),
+        ranking: Ranking::Rrf,
+        ..HybridStages::default()
+    }));
+    config
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_hybrid_watcher_publishes_only_after_valid_embedding() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // Directly submitted events use the same canonical root as the native watcher.
+        let root_path = root.path().canonicalize().unwrap();
+        let doc = root_path.join("watch.md");
+        std::fs::write(&doc, "oldwatchproofwidget").unwrap();
+        let shared = open_v5_index_shared(cache.path(), config_dir.path(), "config_version = 2\n");
+        shared.activate_jobs(service).unwrap();
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let provider = document_gate_for("test/catalog-watch@d3@l2");
+        catalog_test_embedder(&shared, &project, &provider);
+        provider.release.add_permits(1);
+        call_tool(&shared, None, "index_project", json!({"path": root.path()})).await.unwrap();
+        provider.entered.try_acquire().unwrap().forget();
+        let (session, _cancel) = shared.sessions.join(std::process::id(), project.canonical_root.clone(), Some(project.id)).unwrap();
+        let before = catalog_diagnostics(&shared, session).await;
+        let (config, stages) = shared.project_runtime_for_search(&project).unwrap();
+        let source = shared.vector_source_for(project.id, &config);
+        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(config, stages, source));
+        std::fs::write(&doc, "newwatchproofwidget").unwrap();
+        let operation = shared.watch_operation().unwrap();
+        let paths = catalog_test_watch_paths(&shared, doc, &operation);
+        provider.invalid_on.store(2, Ordering::SeqCst);
+        let watch = || {
+            let shared = shared.clone();
+            let runtime = watch_runtime.clone();
+            let project = project.clone();
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                let operation = shared.watch_operation().unwrap();
+                shared.run_watch_batch(project, runtime, paths, operation, shared.watch_activity()).await
+            })
+        };
+        let mut failed = watch();
+        tokio::select! {
+            entered = tokio::time::timeout(Duration::from_secs(5), provider.entered.acquire()) => entered.unwrap().unwrap().forget(),
+            result = &mut failed => panic!("watcher returned before preparing its vectors: {result:?}"),
+        }
+        assert_eq!(selected_catalog_hits(&shared, &project, "oldwatchproofwidget"), 1);
+        assert_eq!(selected_catalog_hits(&shared, &project, "newwatchproofwidget"), 0);
+        provider.release.add_permits(1);
+        assert!(failed.await.unwrap().unwrap_err().to_string().contains("invalid embedding batch"));
+        let failed = catalog_diagnostics(&shared, session).await;
+        assert_eq!(failed["index_generation"], before["index_generation"]);
+        assert_eq!(selected_catalog_hits(&shared, &project, "oldwatchproofwidget"), 1);
+
+        provider.release.add_permits(1);
+        assert_eq!(watch().await.unwrap().unwrap().docs, 1);
+        let after = catalog_diagnostics(&shared, session).await;
+        assert_eq!(after["index_generation"].as_i64().unwrap(), before["index_generation"].as_i64().unwrap() + 1);
+        assert_eq!(after["embed_coverage"], json!({"total": 1, "cached": 1}));
+        assert_eq!(selected_catalog_hits(&shared, &project, "newwatchproofwidget"), 1);
+        assert_eq!(watch().await.unwrap().unwrap().docs, 0);
+        assert_eq!(catalog_diagnostics(&shared, session).await["index_generation"], after["index_generation"]);
+        let duplicate = root_path.join("duplicate.md");
+        std::fs::write(&duplicate, "newwatchproofwidget").unwrap();
+        let operation = shared.watch_operation().unwrap();
+        let duplicate = catalog_test_watch_paths(&shared, duplicate, &operation);
+        let stats = tokio::time::timeout(Duration::from_secs(5), shared.run_watch_batch(
+            project, watch_runtime.clone(), duplicate, operation, shared.watch_activity(),
+        )).await.unwrap().unwrap();
+        assert_eq!(stats.docs, 1);
+        assert_eq!(provider.batches.lock().unwrap().len(), 3);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_hybrid_watcher_evicts_only_after_protecting_the_selected_pair() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let guide = root_path.join("guide.md");
+        let removed = root_path.join("remove.md");
+        std::fs::write(&guide, "oldcapacitywatchwidget").unwrap();
+        std::fs::write(&removed, "retiredcapacitywatchwidget").unwrap();
+        let shared = open_v5_index_shared(
+            cache.path(),
+            config_dir.path(),
+            "config_version = 2\n[vector_cache]\nmax_entries = 2\n",
+        );
+        shared.activate_jobs(service).unwrap();
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let provider = document_gate_for("test/catalog-watch-capacity@d3@l2");
+        catalog_test_embedder(&shared, &project, &provider);
+        provider.release.add_permits(5);
+        call_tool(&shared, None, "index_project", json!({"path": root.path()}))
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        let (config, stages) = shared.project_runtime_for_search(&project).unwrap();
+        let source = shared.vector_source_for(project.id, &config);
+        let watch_runtime = Arc::new(crate::watch::WatchRuntime::new(
+            config,
+            stages,
+            source.clone(),
+        ));
+        let watch = |file: PathBuf| {
+            let shared = shared.clone();
+            let project = project.clone();
+            let watch_runtime = watch_runtime.clone();
+            async move {
+                let operation = shared.watch_operation().unwrap();
+                let paths = catalog_test_watch_paths(&shared, file, &operation);
+                shared
+                    .run_watch_batch(
+                        project,
+                        watch_runtime,
+                        paths,
+                        operation,
+                        shared.watch_activity(),
+                    )
+                    .await
+            }
+        };
+        let before = catalog_diagnostics(&shared, session).await;
+        std::fs::write(&guide, "newcapacitywatchwidget").unwrap();
+        assert_failed_watch_keeps_over_budget_cache(cache.path(), &provider, watch(guide.clone()))
+            .await;
+        let error = watch(guide.clone()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("active and prepared vectors"),
+            "{error}"
+        );
+        let refused = catalog_diagnostics(&shared, session).await;
+        assert_eq!(refused["index_generation"], before["index_generation"]);
+        assert_eq!(refused["embed_coverage"], json!({"total": 2, "cached": 2}));
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcapacitywatchwidget"),
+            1
+        );
+        std::fs::remove_file(&removed).unwrap();
+        assert_eq!(watch(removed).await.unwrap().removed, 1);
+        assert_eq!(watch(guide).await.unwrap().docs, 1);
+        let applied = catalog_diagnostics(&shared, session).await;
+        assert_eq!(
+            applied["index_generation"].as_i64().unwrap(),
+            before["index_generation"].as_i64().unwrap() + 2
+        );
+        assert_eq!(applied["embed_coverage"], json!({"total": 1, "cached": 1}));
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcapacitywatchwidget"),
+            1
+        );
+        assert_eq!(provider.batches.lock().unwrap().len(), 5);
+        assert_eq!(source.connect(cache.path()).unwrap().len().unwrap(), 2);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn assert_failed_watch_keeps_over_budget_cache(
+    cache: &Path,
+    provider: &DocumentGate,
+    watch: impl std::future::Future<Output = Result<crate::index::job::JobStats>>,
+) {
+    // A previous, larger limit can leave more rows than the new owner allows.
+    let db = rusqlite::Connection::open(cache.join(crate::vector_cache::VECTOR_DB_FILE)).unwrap();
+    db.execute(
+        "INSERT INTO vector_cache (model_id, chunk_hash, dim, vector, used_at)
+                VALUES ('prior-model', 'unreferenced', 3, zeroblob(12), 1000000)",
+        [],
+    )
+    .unwrap();
+    provider.invalid_on.store(3, Ordering::SeqCst);
+    let failure = watch.await.unwrap_err();
+    assert!(
+        failure.to_string().contains("invalid embedding batch"),
+        "{failure}"
+    );
+    let count = db
+        .query_row("SELECT COUNT(*) FROM vector_cache", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    assert_eq!(count, 3);
+}
+
+#[cfg(unix)]
+fn catalog_test_watch_paths(
+    shared: &Shared,
+    file: PathBuf,
+    operation: &crate::search::operation::SearchOperation,
+) -> Arc<crate::watch::WatchPayload> {
+    let (_sender, mut events) = tokio::sync::mpsc::channel(1);
+    crate::watch::merge_pending(
+        &shared.payload_budget,
+        None,
+        Some(vec![file]),
+        &mut events,
+        operation,
+        &shared.watchers,
+    )
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn catalog_warm_metadata(
+    shared: &Arc<Shared>,
+    project: &crate::store::models::Project,
+) -> Option<(i64, String)> {
+    let (called, metadata) = std::sync::mpsc::channel();
+    shared
+        .refresh_ann_after_sync_with(project, move |db, _, model| {
+            let generation = db
+                .connection()
+                .query_row(
+                    "SELECT generation_id FROM generation_state WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            called.send((generation, model.to_owned())).unwrap();
+            Ok(())
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    metadata.try_recv().ok()
+}
+
+#[cfg(unix)]
+async fn catalog_diagnostics(shared: &Arc<Shared>, session: u64) -> Value {
+    let mut status = call_tool(shared, Some(session), "status", json!({}))
+        .await
+        .unwrap();
+    let project = status["projects"][0].take();
+    let panel = call_tool(shared, Some(session), "panel_projects", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        panel[0]["cached_vectors"],
+        project["embed_coverage"]["cached"]
+    );
+    assert_eq!(
+        panel[0]["vector_chunks"],
+        project["embed_coverage"]["total"]
+    );
+    assert_eq!(panel[0]["ann_state"], project["ann"]["state"]);
+    project
+}
+
+#[cfg(unix)]
+async fn catalog_diagnostics_with_small_payload_allowance(shared: &Arc<Shared>, session: u64) {
+    let policy = shared.payload_budget.settings();
+    let mut remaining = policy.max_retained_payload_bytes - 192;
+    let mut held = Vec::new();
+    while remaining > 0 {
+        let bytes = remaining.min(policy.max_request_payload_bytes);
+        held.push(shared.payload_budget.reserve(bytes).unwrap());
+        remaining -= bytes;
+    }
+    let view = catalog_diagnostics(shared, session).await;
+    assert_eq!(view["docs"], 1);
+    assert!(view["embed_coverage"].is_null());
+    drop(held);
+}
+
+#[cfg(unix)]
+async fn catalog_config_only_diagnostics(shared: &Arc<Shared>, project: &Project, session: u64) {
+    let slot = shared.project_slot(project.id);
+    let prior = {
+        let mut state = slot.state.lock().unwrap();
+        let mut config = (**state.config.as_ref().unwrap()).clone();
+        config.hybrid_cfg.enabled = true;
+        config.hybrid_cfg.ranking = Ranking::Rrf;
+        config.hybrid_cfg.embedding = Some(crate::hybrid::config::EmbeddingCfg {
+            provider: "openrouter".into(),
+            model: "test/sealed-model".into(),
+            dimensions: 3,
+            normalize: true,
+        });
+        let previous = state.config.replace(Arc::new(config));
+        (previous, state.stages.take(), state.search_stages.take())
+    };
+    let view = catalog_diagnostics(shared, session).await;
+    assert_eq!(view["embed_coverage"], json!({"cached": 1, "total": 1}));
+    let mut state = slot.state.lock().unwrap();
+    assert!(state.stages.is_none() && state.search_stages.is_none());
+    (state.config, state.stages, state.search_stages) = prior;
+}
+
+#[cfg(unix)]
+fn assert_catalog_embedding_seal(cache: &Path, project: i64, generation: i64, model: &str) {
+    let seal = cache
+        .join("projects")
+        .join(project.to_string())
+        .join("generations")
+        .join(generation.to_string())
+        .join("seal.json");
+    let seal = std::fs::read_to_string(seal).unwrap();
+    assert!(seal.contains("embedding_recipe"));
+    assert!(!seal.contains(model));
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_search_checks_the_sealed_model_before_query_embedding() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("guide.md"), "sealedmodelwidget").unwrap();
+    let model = "openrouter/test/sealed-model@d3@l2";
+
+    let mut initial = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = initial.service();
+    initial
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+            let provider = document_gate_for(model);
+            catalog_test_embedder(&shared, &project, &provider);
+            provider.release.add_permits(1);
+            call_tool(&shared, None, "index_project", json!({"path": root.path()}))
+                .await
+                .unwrap();
+            shared
+                .activity
+                .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+                .await;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut restarted = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = restarted.service();
+    restarted
+        .run(&runtime, async {
+            let shared = open_v5_index_shared(cache.path(), config.path(), "config_version = 2\n");
+            shared.activate_jobs(service).unwrap();
+            let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+            let (session, _cancel) = shared
+                .sessions
+                .join(
+                    std::process::id(),
+                    project.canonical_root.clone(),
+                    Some(project.id),
+                )
+                .unwrap();
+            let other = document_gate_for("test/new-model@d3@l2");
+            catalog_test_embedder(&shared, &project, &other);
+            let error = call_tool(
+                &shared,
+                Some(session),
+                "search_docs",
+                json!({"query": "sealedmodelwidget"}),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("embedding recipe"), "{error}");
+            assert_eq!(other.queries.load(Ordering::SeqCst), 0);
+            assert_eq!(catalog_warm_metadata(&shared, &project), None);
+            let view = catalog_diagnostics(&shared, session).await;
+            assert!(view["embed_coverage"].is_null());
+
+            let original = document_gate_for(model);
+            catalog_config_only_diagnostics(&shared, &project, session).await;
+            catalog_test_embedder(&shared, &project, &original);
+            catalog_diagnostics_with_small_payload_allowance(&shared, session).await;
+            assert_eq!(original.queries.load(Ordering::SeqCst), 0);
+            let (generation, used) = catalog_warm_metadata(&shared, &project).unwrap();
+            assert_eq!(used, model);
+            assert_catalog_embedding_seal(&shared.cache, project.id, generation, model);
+            assert_eq!(
+                catalog_search_hits(&shared, session, "sealedmodelwidget").await,
+                1
+            );
+            assert_eq!(original.queries.load(Ordering::SeqCst), 1);
+
+            let view = catalog_diagnostics(&shared, session).await;
+            assert_eq!(view["ann"]["state"], "ready");
+
+            catalog_test_embedder(&shared, &project, &other);
+            let view = catalog_diagnostics(&shared, session).await;
+            assert_eq!(view["ann"]["state"], "stale");
+
+            catalog_test_embedder(&shared, &project, &original);
+            std::fs::write(root.path().join("guide.md"), "newsealedmodelwidget").unwrap();
+            std::fs::write(root.path().join("duplicate.md"), "newsealedmodelwidget").unwrap();
+            original.release.add_permits(2);
+            call_tool(
+                &shared,
+                Some(session),
+                "index_project",
+                json!({"path": root.path()}),
+            )
+            .await
+            .unwrap();
+            let view = catalog_diagnostics(&shared, session).await;
+            assert_eq!(view["docs"], 2);
+            assert_eq!(view["chunks"], 2);
+            assert_eq!(view["embed_coverage"], json!({"cached": 1, "total": 1}));
+            assert_eq!(view["ann"]["state"], "loading");
+            assert!(view["ann"]["vectors"].is_null());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_index_and_detached_sync_warm_the_published_ann() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut policy = crate::daemon::settings::standalone()
+        .unwrap()
+        .into_settings();
+    policy.background_active = 1;
+    policy.background_pending = 0;
+    let mut jobs = crate::daemon::job_service::JobRoot::new(&policy);
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("guide.md"), "catalogwarmguide").unwrap();
+        std::fs::write(root.path().join("reference.md"), "catalogwarmreference").unwrap();
+        let mut shared = open_v5_index_shared(
+            cache.path(),
+            config.path(),
+            "config_version = 2\n[dense]\nmin_vectors = 1\n[daemon]\nbackground_active = 1\nbackground_pending = 0\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'test/catalog-warm'\ndimensions = 3\n",
+        );
+        let warm_gate = Arc::get_mut(&mut shared).unwrap().dense.pause_job_builds_for_test();
+        shared.activate_jobs(service).unwrap();
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let provider = document_gate_for("openrouter/test/catalog-warm@d3@l2");
+        catalog_test_embedder(&shared, &project, &provider);
+        provider.release.add_permits(3);
+        let (session, _cancel) = shared
+            .sessions
+            .join(
+                std::process::id(),
+                project.canonical_root.clone(),
+                Some(project.id),
+            )
+            .unwrap();
+        let wait_for_background = || async {
+            tokio::time::timeout(
+                Duration::from_secs(8),
+                shared
+                    .activity
+                    .drain(Duration::from_millis(policy.drain_poll_ms)),
+            )
+            .await
+            .unwrap();
+        };
+
+        let reply = tokio::time::timeout(Duration::from_secs(8), call_tool(
+            &shared, Some(session), "index_project", json!({"path": root.path()}),
+        )).await;
+        let warm_active = shared.activity.counter.load(Ordering::SeqCst) > 0;
+        warm_gate.open();
+        reply.unwrap().unwrap();
+        assert!(warm_active);
+        wait_for_background().await;
+        let view = catalog_diagnostics(&shared, session).await;
+        assert_eq!(view["ann"]["vectors"], 2);
+        assert_eq!(view["ann"]["state"], "loading");
+
+        reopen_catalog_with_new_ann_recipe(&shared, &project, &provider);
+        let reloaded = catalog_diagnostics(&shared, session).await;
+        assert_eq!(reloaded["index_generation"], view["index_generation"]);
+        assert!(reloaded["ann"]["vectors"].is_null());
+
+        std::fs::write(root.path().join("new.md"), "catalogwarmnew").unwrap();
+        let ack = call_tool(
+            &shared,
+            Some(session),
+            "sync_start",
+            json!({"project_id": project.id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack["state"], "running");
+        wait_for_background().await;
+        let sync = call_tool(
+            &shared,
+            Some(session),
+            "sync_status",
+            json!({"job_id": ack["job_id"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sync["state"], "done");
+        let view = catalog_diagnostics(&shared, session).await;
+        assert_eq!(view["ann"]["vectors"], 3);
+        assert_eq!(provider.queries.load(Ordering::SeqCst), 0);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn reopen_catalog_with_new_ann_recipe(
+    shared: &Shared,
+    project: &Project,
+    provider: &Arc<DocumentGate>,
+) {
+    std::fs::write(
+        project.canonical_root.join(".docsbase.toml"),
+        "config_version = 2\n[ann.build]\nm = 12\n",
+    )
+    .unwrap();
+    let reopened = shared
+        .open_project_config_with(project, |_| {
+            Ok(HybridStages {
+                embedder: Some(provider.clone()),
+                ranking: Ranking::Rrf,
+                ..HybridStages::default()
+            })
+        })
+        .unwrap();
+    assert_eq!(reopened.ann_build.m(), 12);
+}
+
+#[test]
+#[cfg(unix)]
+fn catalog_index_capacity_failure_preserves_selected_vectors() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let guide = root.path().join("guide.md");
+        let old_text = "oldcatalogwidget";
+        std::fs::write(&guide, old_text).unwrap();
+        let mut shared = open_v5_index_shared(
+            cache.path(),
+            config.path(),
+            "config_version = 2\n[vector_cache]\nmax_entries = 2\n",
+        );
+        let owner = Arc::get_mut(&mut shared).unwrap();
+        let mut budget = owner.global_config.search.clone();
+        budget.max_request_payload_bytes = 32 * 1024 * 1024;
+        owner.payload_budget = crate::search::budget::PayloadBudget::new(budget).unwrap();
+        shared.activate_jobs(service).unwrap();
+        let args = json!({"path": root.path()});
+        let project = registry::ensure_project(&mut shared.db(), root.path()).unwrap();
+        let original = document_gate_for("test/initial-catalog-cache@d3@l2");
+        catalog_test_embedder(&shared, &project, &original);
+        original.release.add_permits(1);
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+
+        let provider = document_gate_for("test/replacement-catalog-cache@d3@l2");
+        let config = catalog_test_embedder(&shared, &project, &provider);
+        let source = shared.vector_source_for(project.id, &config);
+        let old_hash = crate::vector_cache::chunk_hash(old_text);
+        let mut vectors = source.connect(cache.path()).unwrap();
+        vectors
+            .put("aaa/foreign-model@d3@l2", "unreferenced", &[0.0, 0.0, 1.0])
+            .unwrap();
+        std::fs::write(&guide, "newcatalogwidget").unwrap();
+        std::fs::write(root.path().join("second.md"), "anothercatalogwidget").unwrap();
+
+        provider.release.add_permits(2);
+        let failure = tokio::time::timeout(
+            Duration::from_secs(5),
+            call_tool(&shared, None, "index_project", args),
+        )
+        .await
+        .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        assert_eq!(
+            vectors.get(original.model_id(), &old_hash).unwrap(),
+            Some(vec![1.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            vectors.len().unwrap(),
+            2,
+            "staging must respect the shared entry cap"
+        );
+        let batches = provider.batches.lock().unwrap();
+        assert_eq!(batches.len(), 2, "{failure:?}");
+        let first = crate::vector_cache::chunk_hash(&batches[0][0]);
+        let second = crate::vector_cache::chunk_hash(&batches[1][0]);
+        assert_eq!(
+            vectors.get(provider.model_id(), &first).unwrap(),
+            Some(vec![1.0, 0.0, 0.0])
+        );
+        assert!(vectors.get(provider.model_id(), &second).unwrap().is_none());
+        assert_eq!(selected_catalog_hits(&shared, &project, old_text), 1);
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            0
+        );
+        assert!(
+            matches!(failure, Err(Error::Admission { .. })),
+            "{failure:?}"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+#[allow(clippy::too_many_lines)] // The same live catalog exercises two failure boundaries and retry.
+fn catalog_sync_embeds_before_publication_and_reuses_valid_batches_on_retry() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let policy = crate::daemon::settings::standalone().unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(policy.settings());
+    let service = jobs.service();
+    jobs.run(&runtime, async move {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let guide = root.path().join("guide.md");
+        std::fs::write(&guide, "oldcatalogwidget").unwrap();
+        let db = Db::open_for_index(
+            cache.path(),
+            &crate::store::settings::standalone().unwrap(),
+            true,
+        )
+        .unwrap();
+        db.close().unwrap();
+        let mut shared = open_v2_index_shared(cache.path(), config.path());
+        let owner = Arc::get_mut(&mut shared).unwrap();
+        owner.watchers = Arc::new(Watchers::with_enabled(false));
+        let mut workers = owner.global_config.daemon.clone();
+        workers.background_active = 1;
+        owner.workers = Arc::new(
+            crate::daemon::worker_admission::WorkerAdmission::with_policies(
+                &workers,
+                &owner.global_config.remote,
+            )
+            .unwrap(),
+        );
+        shared.activate_jobs(service).unwrap();
+
+        let args = json!({"path": root.path()});
+        call_tool(&shared, None, "index_project", args.clone())
+            .await
+            .unwrap();
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        let project = registry::list_projects(&shared.db()).unwrap().remove(0);
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            1
+        );
+
+        let provider = document_gate();
+        provider.invalid_on.store(2, Ordering::SeqCst);
+        let slot = shared.project_slot(project.id);
+        {
+            let mut state = slot.state.lock().unwrap();
+            let mut config = (**state.config.as_ref().unwrap()).clone();
+            config.remote.embed_batch_texts = 1;
+            state.config = Some(Arc::new(config));
+            state.search_stages = Some(Arc::new(HybridStages {
+                embedder: Some(provider.clone()),
+                ..HybridStages::default()
+            }));
+        }
+        {
+            let config = shared.project_config(&project).unwrap();
+            let source = shared.vector_source_for(project.id, &config);
+            let mut cache = source.connect(&shared.cache).unwrap();
+            for (text, vector) in [
+                ("newcatalogwidget", &[0.0, 1.0][..]),
+                ("anothercatalogwidget", &[f32::NAN, 0.0, 0.0]),
+            ] {
+                cache
+                    .put(
+                        provider.model_id(),
+                        &crate::vector_cache::chunk_hash(text),
+                        vector,
+                    )
+                    .unwrap();
+            }
+        }
+        std::fs::write(&guide, "newcatalogwidget").unwrap();
+        std::fs::write(root.path().join("second.md"), "anothercatalogwidget").unwrap();
+        let indexing = catalog_index_waiting_for_provider(&shared, &args, &provider).await;
+        let operation = crate::search::operation::SearchOperation::with_timeout(
+            Instant::now(),
+            Duration::from_secs(5),
+            crate::hybrid::work::Cancellation::new(),
+        )
+        .unwrap();
+        let free_background = shared.workers.background(&operation).await;
+        let free_writer =
+            lifecycle::with_writer_lease(&shared.cache, project.id, || Ok(())).is_ok();
+        let old_hit = selected_catalog_hits(&shared, &project, "oldcatalogwidget");
+        let new_hit = selected_catalog_hits(&shared, &project, "newcatalogwidget");
+        provider.release.add_permits(1);
+        assert!(
+            free_background.is_ok(),
+            "provider must release native worker admission"
+        );
+        drop(free_background);
+        assert!(
+            free_writer,
+            "provider must not hold the active pair's writer lease"
+        );
+        assert_eq!((old_hit, new_hit), (1, 0));
+        tokio::time::timeout(Duration::from_secs(5), provider.entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        provider.release.add_permits(1);
+        let error = indexing.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("invalid embedding batch"));
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            1
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            0
+        );
+
+        provider.invalid_on.store(0, Ordering::SeqCst);
+        let retry = catalog_index_waiting_for_provider(&shared, &args, &provider).await;
+        {
+            // The valid first batch was reused before waiting on the second.
+            // Replace it now to exercise the final proof, not batch validation.
+            let config = shared.project_config(&project).unwrap();
+            let mut cache = shared
+                .vector_source_for(project.id, &config)
+                .connect(&shared.cache)
+                .unwrap();
+            cache
+                .put(
+                    provider.model_id(),
+                    &crate::vector_cache::chunk_hash("newcatalogwidget"),
+                    &[f32::NAN, 0.0, 0.0],
+                )
+                .unwrap();
+        }
+        provider.release.add_permits(1);
+        let error = tokio::time::timeout(Duration::from_secs(5), retry)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("prepared embedding vector has invalid values")
+        );
+        shared
+            .activity
+            .drain(Duration::from_millis(policy.settings().drain_poll_ms))
+            .await;
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            1
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            0
+        );
+
+        provider.release.add_permits(1);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            call_tool(&shared, None, "index_project", args),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(provider.batches.lock().unwrap().len(), 4);
+        assert_eq!(provider.synchronous.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "oldcatalogwidget"),
+            0
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "newcatalogwidget"),
+            1
+        );
+        assert_eq!(
+            selected_catalog_hits(&shared, &project, "anothercatalogwidget"),
+            1
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[test]
 fn detached_sync_acknowledges_own_job_and_deduplicates_while_provider_is_held() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1250,6 +2562,7 @@ struct FactoryWire {
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
     calls: AtomicUsize,
+    invalid_on: AtomicUsize,
 }
 impl crate::hybrid::remote::AsyncTransport for FactoryWire {
     fn post_json<'a>(
@@ -1258,12 +2571,15 @@ impl crate::hybrid::remote::AsyncTransport for FactoryWire {
         _: Duration,
     ) -> StageFuture<'a, crate::hybrid::wire::TransportResponse> {
         Box::pin(async move {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
             let request: Value = serde_json::from_str(&request.body).unwrap();
             let count = request["input"].as_array().unwrap().len();
-            let dimension = usize::try_from(request["dimensions"].as_u64().unwrap()).unwrap();
+            let mut dimension = usize::try_from(request["dimensions"].as_u64().unwrap()).unwrap();
+            if call == self.invalid_on.load(Ordering::SeqCst) {
+                dimension -= 1;
+            }
             let data: Vec<_> = (0..count)
                 .map(|index| {
                     let mut vector = vec![0.0_f32; dimension];
@@ -1275,6 +2591,450 @@ impl crate::hybrid::remote::AsyncTransport for FactoryWire {
         })
     }
 }
+#[test]
+#[cfg(unix)]
+fn configured_shared_catalog_indexes_syncs_and_watches_hybrid() {
+    const CHILD: &str = "DOCSBASE_SHARED_CATALOG_HYBRID_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::server::async_index_tests::configured_shared_catalog_indexes_syncs_and_watches_hybrid",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("OPENROUTER_API_KEY", "fixture-secret")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let file = project.path().join("guide.md");
+    std::fs::write(&file, "firstsharedhybridrevision").unwrap();
+    Db::open_for_index(
+        cache.path(),
+        &crate::store::settings::standalone().unwrap(),
+        true,
+    )
+    .unwrap()
+    .close()
+    .unwrap();
+    let wire = Arc::new(FactoryWire {
+        entered: tokio::sync::Semaphore::new(0),
+        release: tokio::sync::Semaphore::new(32),
+        calls: AtomicUsize::new(0),
+        invalid_on: AtomicUsize::new(0),
+    });
+    let shared = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
+    run_catalog_daemon(&shared, async {
+        assert_configured_catalog_hybrid_routes(
+            &shared,
+            project.path(),
+            &file,
+            &wire,
+            shared.global_config.daemon.drain_poll_ms,
+        )
+        .await;
+    });
+    drop(shared);
+
+    let matching = open_configured_remote_catalog(cache.path(), config.path(), &wire, 3);
+    run_catalog_daemon(&matching, async {
+        let project = registry::resolve_by_cwd(&matching.db(), project.path()).unwrap();
+        assert!(matching.watchers.watching(project.id));
+        assert_catalog_registration_refills_only_vectors(&matching, &project, &wire).await;
+        assert_catalog_refill_rejects_a_late_vector(&matching, &project, &file, &wire).await;
+    });
+    drop(matching);
+
+    let restarted = open_configured_remote_catalog(cache.path(), config.path(), &wire, 4);
+    run_catalog_daemon(&restarted, async {
+        assert_catalog_reopen_requires_matching_seal(&restarted, project.path(), &wire).await;
+    });
+    drop(restarted);
+
+    let lexical = open_v2_index_shared(cache.path(), config.path());
+    run_catalog_daemon(&lexical, async {
+        assert_disabled_catalog_model_requires_a_lexical_pair(&lexical, project.path()).await;
+    });
+}
+
+#[cfg(unix)]
+fn run_catalog_daemon(shared: &Arc<Shared>, work: impl std::future::Future<Output = ()>) {
+    // Match the production lifetime: each daemon owns its runtime. Dropping
+    // it retires idle cancelled consumers that can still own vector leases.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut jobs = crate::daemon::job_service::JobRoot::new(&shared.global_config.daemon);
+    let service = jobs.service();
+    jobs.run(&runtime, async {
+        shared.activate_jobs(service)?;
+        work.await;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[cfg(unix)]
+async fn assert_disabled_catalog_model_requires_a_lexical_pair(shared: &Arc<Shared>, root: &Path) {
+    let project = registry::resolve_by_cwd(&shared.db(), root).unwrap();
+    let error = register_session_in(shared, std::process::id(), root, false, None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("published embedding recipe"),
+        "{error}"
+    );
+    assert!(!shared.watchers.watching(project.id));
+
+    call_tool(shared, None, "index_project", json!({"path": root}))
+        .await
+        .unwrap();
+    let (session, binding, _cancel) =
+        register_session_in(shared, std::process::id(), root, false, None)
+            .await
+            .unwrap();
+    assert_eq!(binding["status"], "indexed");
+    let status = catalog_diagnostics(shared, session).await;
+    assert!(status["embed_coverage"].is_null());
+    assert!(shared.watchers.watching(project.id));
+    assert_eq!(
+        catalog_search_hits(shared, session, "firstsharedhybridrevision").await,
+        1
+    );
+}
+
+#[cfg(unix)]
+fn open_configured_remote_catalog(
+    cache: &Path,
+    config: &Path,
+    wire: &Arc<FactoryWire>,
+    dimensions: u32,
+) -> Arc<Shared> {
+    let mut shared = open_v2_index_shared_with_config(
+        cache,
+        config,
+        &format!(
+            "config_version = 2\n[daemon]\nbackground_active = 2\n[providers.openrouter]\nenabled = true\n[hybrid]\nenabled = true\nranking = 'rrf'\n[hybrid.embedding]\nprovider = 'openrouter'\nmodel = '{}'\ndimensions = {dimensions}\n",
+            crate::hybrid::config::DEFAULT_EMBEDDING_MODEL
+        ),
+    );
+    let owner = Arc::get_mut(&mut shared).unwrap();
+    owner.remote = Arc::new(
+        crate::hybrid::remote::RemoteExecution::with_owners(
+            &owner.global_config.remote,
+            wire.clone(),
+            owner.workers.clone(),
+            owner.activity.clone(),
+        )
+        .unwrap(),
+    );
+    shared
+}
+
+#[cfg(unix)]
+async fn assert_catalog_registration_refills_only_vectors(
+    shared: &Arc<Shared>,
+    project: &Project,
+    wire: &FactoryWire,
+) {
+    let selected = || {
+        crate::store::project_index::with_catalog_pair(
+            shared.readers.try_acquire().unwrap(),
+            project,
+            |_, _, index| Ok(index),
+        )
+        .unwrap()
+    };
+    let count_jobs = || {
+        shared
+            .db()
+            .connection()
+            .query_row("SELECT count(*) FROM sync_jobs", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before = selected();
+    let prior_jobs = count_jobs();
+    let malformed =
+        rusqlite::Connection::open(shared.cache.join(crate::vector_cache::VECTOR_DB_FILE))
+            .unwrap()
+            .execute(
+                "UPDATE vector_cache SET dim=1, vector=x'0000807f' WHERE chunk_hash = ?1",
+                [crate::vector_cache::chunk_hash(
+                    "latestsharedhybridrevision",
+                )],
+            )
+            .unwrap();
+    assert_eq!(malformed, 1);
+    let (cold_session, _cold_cancel) = shared
+        .sessions
+        .join(
+            std::process::id(),
+            project.canonical_root.clone(),
+            Some(project.id),
+        )
+        .unwrap();
+    let query = "cachemissingdensequery";
+    assert_eq!(catalog_search_hits(shared, cold_session, query).await, 0);
+    let scoped = |session| {
+        call_tool(
+            shared,
+            Some(session),
+            "search_docs",
+            json!({"query":query, "path_prefix":"guide.md"}),
+        )
+    };
+    assert_eq!(scoped(cold_session).await.unwrap(), json!([]));
+    let calls = wire.calls.load(Ordering::SeqCst);
+    let (session, binding, _cancel) = register_session_in(
+        shared,
+        std::process::id(),
+        &project.canonical_root,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(binding["status"], "indexed");
+    shared
+        .activity
+        .drain(Duration::from_millis(
+            shared.global_config.daemon.drain_poll_ms,
+        ))
+        .await;
+    let view = catalog_diagnostics(shared, session).await;
+    assert_eq!(view["embed_coverage"], json!({"cached":1,"total":1}));
+    assert_eq!(selected(), before);
+    assert_eq!(count_jobs(), prior_jobs);
+    assert_eq!(wire.calls.load(Ordering::SeqCst), calls + 1);
+    assert_eq!(catalog_search_hits(shared, session, query).await, 1);
+    assert_eq!(scoped(session).await.unwrap()[0]["path"], "guide.md");
+}
+
+#[cfg(unix)]
+async fn assert_catalog_refill_rejects_a_late_vector(
+    shared: &Arc<Shared>,
+    project: &Project,
+    file: &Path,
+    wire: &FactoryWire,
+) {
+    for gate in [&wire.entered, &wire.release] {
+        while let Ok(permit) = gate.try_acquire() {
+            permit.forget();
+        }
+    }
+    let key = crate::vector_cache::chunk_hash("latestsharedhybridrevision");
+    let cache = shared.cache.join(crate::vector_cache::VECTOR_DB_FILE);
+    assert_eq!(
+        rusqlite::Connection::open(&cache)
+            .unwrap()
+            .execute("DELETE FROM vector_cache WHERE chunk_hash = ?1", [&key],)
+            .unwrap(),
+        1
+    );
+
+    let calls = wire.calls.load(Ordering::SeqCst);
+    let (session, _, _cancel) = register_session_in(
+        shared,
+        std::process::id(),
+        &project.canonical_root,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(8), wire.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+
+    // A second open must join the pending cache repair. Meanwhile the real
+    // watcher can commit an older text that still has a vector in the cache.
+    let (_, _, _second_cancel) = register_session_in(
+        shared,
+        std::process::id(),
+        &project.canonical_root,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let before = catalog_diagnostics(shared, session).await["index_generation"]
+        .as_i64()
+        .unwrap();
+    std::fs::write(file, "firstsharedhybridrevision").unwrap();
+    wait_for_catalog_revision(shared, session, before + 1).await;
+    wire.release.add_permits(32);
+    shared
+        .activity
+        .drain(Duration::from_millis(
+            shared.global_config.daemon.drain_poll_ms,
+        ))
+        .await;
+
+    let rows: i64 = rusqlite::Connection::open(cache)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM vector_cache WHERE chunk_hash = ?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "inference for the old revision must not be committed"
+    );
+    assert_eq!(wire.calls.load(Ordering::SeqCst), calls + 1);
+    assert_eq!(
+        catalog_diagnostics(shared, session).await["embed_coverage"],
+        json!({"cached":1,"total":1})
+    );
+}
+
+#[cfg(unix)]
+async fn assert_catalog_reopen_requires_matching_seal(
+    shared: &Arc<Shared>,
+    project: &Path,
+    wire: &FactoryWire,
+) {
+    let calls = wire.calls.load(Ordering::SeqCst);
+    let error = register_session_in(shared, std::process::id(), project, false, None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("published embedding recipe"),
+        "{error}"
+    );
+    assert_eq!(wire.calls.load(Ordering::SeqCst), calls);
+    wire.invalid_on.store(calls + 1, Ordering::SeqCst);
+    assert!(
+        call_tool(shared, None, "index_project", json!({"path": project}))
+            .await
+            .is_err()
+    );
+    assert_eq!(wire.calls.load(Ordering::SeqCst), calls + 1);
+    let still_mismatched = register_session_in(shared, std::process::id(), project, false, None)
+        .await
+        .unwrap_err();
+    assert!(
+        still_mismatched
+            .to_string()
+            .contains("published embedding recipe"),
+        "{still_mismatched}"
+    );
+    shared
+        .activity
+        .drain(Duration::from_millis(
+            shared.global_config.daemon.drain_poll_ms,
+        ))
+        .await;
+    call_tool(shared, None, "index_project", json!({"path": project}))
+        .await
+        .unwrap();
+    let (_, binding, _cancel) =
+        register_session_in(shared, std::process::id(), project, false, None)
+            .await
+            .unwrap();
+    assert_eq!(binding["status"], "indexed");
+    assert_eq!(wire.calls.load(Ordering::SeqCst), calls + 2);
+}
+
+#[cfg(unix)]
+async fn assert_configured_catalog_hybrid_routes(
+    shared: &Arc<Shared>,
+    project: &Path,
+    file: &Path,
+    wire: &FactoryWire,
+    drain_poll_ms: u64,
+) {
+    let drain = || shared.activity.drain(Duration::from_millis(drain_poll_ms));
+    call_tool(shared, None, "index_project", json!({"path": project}))
+        .await
+        .unwrap();
+    drain().await;
+    assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+    let (session, binding, _cancel) =
+        register_session_in(shared, std::process::id(), project, false, None)
+            .await
+            .unwrap();
+    assert_eq!(binding["status"], "indexed");
+    let before = catalog_diagnostics(shared, session).await;
+    assert_eq!(before["embed_coverage"], json!({"cached":1,"total":1}));
+    let ack = call_tool(shared, Some(session), "sync_start", json!({}))
+        .await
+        .unwrap();
+    drain().await;
+    let sync = call_tool(
+        shared,
+        Some(session),
+        "sync_status",
+        json!({"job_id":ack["job_id"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sync["state"], "done");
+    assert_eq!(
+        wire.calls.load(Ordering::SeqCst),
+        1,
+        "Sync reused the stored document vector"
+    );
+
+    let before = catalog_diagnostics(shared, session).await["index_generation"]
+        .as_i64()
+        .unwrap();
+    std::fs::write(file, "latestsharedhybridrevision").unwrap();
+    wait_for_catalog_revision(shared, session, before + 1).await;
+    drain().await;
+    let after = catalog_diagnostics(shared, session).await;
+    assert_eq!(after["embed_coverage"], json!({"cached":1,"total":1}));
+    let hits = call_tool(
+        shared,
+        Some(session),
+        "search_docs",
+        json!({"query":"denseonlysharedhybridquery","snippet":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits[0]["path"], "guide.md");
+    assert!(
+        hits[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("latestsharedhybridrevision")
+    );
+    assert_eq!(
+        wire.calls.load(Ordering::SeqCst),
+        3,
+        "Index, watcher and dense query each embed once"
+    );
+}
+
+#[cfg(unix)]
+async fn wait_for_catalog_revision(shared: &Arc<Shared>, session: u64, revision: i64) {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let status = call_tool(shared, Some(session), "status", json!({})).await;
+            if status.is_ok_and(|status| status["projects"][0]["index_generation"] == revision) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // One isolated real factory/codec/HTTP ownership proof.
 fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
@@ -1303,6 +3063,7 @@ fn actual_background_remote_factory_is_async_and_held_http_releases_cpu() {
             entered: tokio::sync::Semaphore::new(0),
             release: tokio::sync::Semaphore::new(0),
             calls: AtomicUsize::new(0),
+            invalid_on: AtomicUsize::new(0),
         });
         let shared = Arc::get_mut(&mut fixture.shared).unwrap();
         let mut daemon = shared.global_config.daemon.clone();
@@ -1499,7 +3260,7 @@ fn automatic_registration_and_backfill_use_configured_async_factory() {
             std::fs::create_dir_all(project_root.join(".git")).unwrap();
             std::fs::write(project_root.join("guide.md"),"# Automatic\n\nautomaticwidget\n").unwrap();
             std::fs::write(project_root.join(".docsbase.toml"),"auto_index=true\n[hybrid]\nenabled=true\nranking='lexical'\n[hybrid.embedding]\nprovider='openrouter'\nmodel='fixture'\ndimensions=3\nnormalize=true\n").unwrap();
-            let wire=Arc::new(FactoryWire{entered:tokio::sync::Semaphore::new(0),release:tokio::sync::Semaphore::new(0),calls:AtomicUsize::new(0)});
+            let wire=Arc::new(FactoryWire{entered:tokio::sync::Semaphore::new(0),release:tokio::sync::Semaphore::new(0),calls:AtomicUsize::new(0),invalid_on:AtomicUsize::new(0)});
             let owner=Arc::get_mut(&mut fixture.shared).unwrap();
             let mut daemon=owner.global_config.daemon.clone();daemon.control_active=1;daemon.control_pending=1;
             owner.workers=Arc::new(crate::daemon::worker_admission::WorkerAdmission::with_policies(&daemon,&owner.global_config.remote).unwrap());

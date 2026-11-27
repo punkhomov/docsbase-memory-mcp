@@ -981,6 +981,20 @@ fn direct_search_reads_the_published_v5_pair() {
 }
 
 #[test]
+#[cfg(all(unix, feature = "hybrid-remote"))]
+fn stopped_search_checks_the_v5_embedding_recipe_before_constructing_provider() {
+    let env = Env::new(&[("guide.md", "# Guide\n\nneedlefrompublishedpair\n")]);
+    let _published = seed_published_v5_pair(&env);
+    fs::write(
+        env.project_config(),
+        "config_version = 2\n[hybrid]\nenabled = true\nranking = 'rrf'\n\
+         [hybrid.embedding]\nprovider = 'openrouter'\nmodel = 'missing-test-model'\ndimensions = 3\n",
+    ).unwrap();
+    assert_published_search_refuses(&env, "published embedding recipe");
+    assert!(!env.cache().join("vectors.db").exists());
+}
+
+#[test]
 #[cfg(unix)]
 fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
     let env = Env::new(&[("guide.md", "# Guide\n\nfirstgenerationpulsar\n")]);
@@ -989,6 +1003,16 @@ fn direct_index_publishes_and_replaces_a_lexical_v5_pair() {
 
     let initial = env.run_json(&["index"]);
     assert_eq!(initial["stats"]["docs"], 1);
+    let status = env.run_json(&["status"]);
+    assert_eq!(status["schema_version"], 5);
+    let project = &status["projects"][0];
+    assert_eq!(project["status"], "indexed");
+    assert_eq!(project["docs"], 1);
+    assert_eq!(project["chunks"], 1);
+    assert_eq!(project["ann"]["state"], "unknown");
+    let list = env.run_json(&["list"]);
+    assert_eq!(list["docs"][0]["path"], "guide.md");
+    assert_eq!(list["docs"][0]["chunks"], 1);
     let hits = env.run_json(&["search", "firstgenerationpulsar", "--snippet"]);
     assert_eq!(hits[0]["path"], "guide.md");
     assert!(
